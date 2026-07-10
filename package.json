@@ -1,0 +1,21 @@
+{
+  "name": "@quicklisting/browser-engine",
+  "version": "0.1.0",
+  "description": "Shared Playwright automation engine — dynamic click discovery, smart fill, and agent loop",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": ["playwright", "automation", "form-fill"],
+  "license": "ISC",
+  "peerDependencies": {
+    "playwright": ">=1.50.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
