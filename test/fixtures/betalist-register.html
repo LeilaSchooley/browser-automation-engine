@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Join BetaList</title>
+  </head>
+  <body>
+    <main>
+      <h1>Join BetaList</h1>
+      <p>Create an account to continue</p>
+      <!-- hidden login fields still in DOM (SPA pattern) -->
+      <form id="login-form" hidden style="display: none">
+        <input name="email" type="email" autocomplete="email" value="" />
+        <input name="password" type="password" autocomplete="current-password" value="" />
+      </form>
+      <form id="signup-form">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" placeholder="Username" />
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" placeholder="Email" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" placeholder="Password" />
+        <label for="confirm">Password confirmation</label>
+        <input
+          id="confirm"
+          name="password_confirmation"
+          type="password"
+          autocomplete="new-password"
+          placeholder="Password confirmation"
+        />
+        <button type="button" data-testid="create-account">Create my account</button>
+      </form>
+      <a href="/sign_in">Already have a BetaList account? Sign in</a>
+    </main>
+  </body>
+</html>

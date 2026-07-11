@@ -10,7 +10,7 @@ function runSmartFill(config, siteMappings) {
     if (raw == null) return "";
     let s = String(raw).trim();
     if (!s) return "";
-    s = s.replace(/[_-]+/g, " ");
+    s = s.replace(/[[\]_-]+/g, " ");
     s = s.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
     return s.toLowerCase().replace(/\s+/g, " ").trim();
   }
@@ -46,23 +46,51 @@ function runSmartFill(config, siteMappings) {
     push(field.getAttribute("aria-label"));
     push(field.getAttribute("title"));
     ["data-test", "data-testid", "data-cy", "data-field", "ng-model"].forEach((a) => push(field.getAttribute(a)));
+    push(String(field.className || "").slice(0, 120));
+    let hasOwnLabel = false;
     try {
       if (field.labels && field.labels.length) {
+        hasOwnLabel = true;
         Array.from(field.labels).forEach((l) => { if (l && l.textContent) push(l.textContent); });
       }
     } catch (e) { /* */ }
     if (field.id) {
       try {
         const lab = document.querySelector('label[for="' + field.id.replace(/"/g, '\\"') + '"]');
-        if (lab && lab.textContent) push(lab.textContent);
+        if (lab && lab.textContent) { hasOwnLabel = true; push(lab.textContent); }
       } catch (e) { /* */ }
     }
-    const wrap = field.parentElement;
-    if (wrap) {
-      const lbl = wrap.querySelector(":scope > label");
-      if (lbl && lbl.textContent) push(lbl.textContent);
+    // Only trust a wrapper label when the field has no label of its own AND the
+    // wrapper label isn't for= some other field — otherwise a sibling's label
+    // ("Email") poisons this field's clue and anti-keywords veto valid matches.
+    if (!hasOwnLabel) {
+      const wrap = field.parentElement;
+      if (wrap) {
+        const lbl = wrap.querySelector(":scope > label");
+        if (lbl && (!lbl.htmlFor || lbl.htmlFor === field.id) && lbl.textContent) push(lbl.textContent);
+      }
     }
     return joinClueTokens(...chunks);
+  }
+
+  function ownLabelText(field) {
+    try {
+      if (field.labels && field.labels.length) {
+        return String(field.labels[0].textContent || "").replace(/[*:]/g, "").trim().toLowerCase();
+      }
+      if (field.id) {
+        const lab = document.querySelector('label[for="' + field.id.replace(/"/g, '\\"') + '"]');
+        if (lab) return String(lab.textContent || "").replace(/[*:]/g, "").trim().toLowerCase();
+      }
+    } catch (e) { /* */ }
+    return "";
+  }
+
+  function hasUserValue(el) {
+    // A select always reports its default first option as "value" — only a
+    // non-first selection counts as user input.
+    if ((el.tagName || "") === "SELECT") return el.selectedIndex > 0;
+    return !!(el.value && String(el.value).trim());
   }
 
   function collectElementsDeep(root, selector, bucket) {
@@ -77,12 +105,25 @@ function runSmartFill(config, siteMappings) {
 
   function isLikelyVisibleField(el) {
     if (!el) return false;
-    if (el.offsetParent !== null) return true;
     try {
       const cs = window.getComputedStyle(el);
       if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) return false;
       const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
+      // 1x1 clip-hidden helper inputs (dropzone validation fields etc.) are not
+      // real fields — typing into them corrupts the fill.
+      return r.width > 2 && r.height > 2;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** WPForms/Dropzone fake text inputs used for upload validation — not real fields. */
+  function isDropzoneCompanionInput(el) {
+    if (!el) return false;
+    if ((el.type || "").toLowerCase() === "file") return false;
+    if ((el.className || "").includes("dropzone-input")) return true;
+    try {
+      return !!el.closest(".wpforms-uploader, .dz-clickable, [class*='uploader' i][data-field-id]");
     } catch (e) {
       return false;
     }
@@ -113,7 +154,24 @@ function runSmartFill(config, siteMappings) {
         } catch (e) { /* */ }
       }
     }
-    return tag + (el.name ? '[name="' + el.name + '"]' : "");
+    // Never fall back to a bare tag selector — querying "input" later resolves
+    // to the FIRST input on the page and fills the wrong field. Build a
+    // positional path instead.
+    const parts = [];
+    let node = el;
+    let depth = 0;
+    while (node && node.nodeType === 1 && depth < 6) {
+      let sel = (node.tagName || "").toLowerCase();
+      const parent = node.parentElement;
+      if (parent) {
+        const same = Array.prototype.filter.call(parent.children, (c) => c.tagName === node.tagName);
+        if (same.length > 1) sel += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
+      }
+      parts.unshift(sel);
+      node = parent;
+      depth += 1;
+    }
+    return parts.join(" > ") || tag;
   }
 
   const FIELD_TYPE_RULES = {
@@ -132,14 +190,16 @@ function runSmartFill(config, siteMappings) {
     },
     firstname: {
       autocomplete: ["given-name"],
-      keywords: ["first name", "firstname", "given name", "forename"],
+      keywords: ["first name", "firstname", "given name", "forename", "name first"],
       antiKeywords: ["last", "surname", "company", "username"],
+      exactLabels: ["first", "first name", "given name", "forename"],
       points: { autocomplete: 100, keyword: 60 },
     },
     lastname: {
       autocomplete: ["family-name"],
-      keywords: ["last name", "lastname", "surname", "family name"],
+      keywords: ["last name", "lastname", "surname", "family name", "name last"],
       antiKeywords: ["first", "given", "company", "username"],
+      exactLabels: ["last", "last name", "surname", "family name"],
       points: { autocomplete: 100, keyword: 60 },
     },
     tel: {
@@ -153,7 +213,8 @@ function runSmartFill(config, siteMappings) {
       inputType: ["url", "text"],
       keywords: ["linkedin", "linkedin url", "linkedin profile"],
       antiKeywords: ["email", "twitter", "github"],
-      points: { keyword: 70 },
+      // inputType text is nearly meaningless for linkedin — keyword must carry it
+      points: { keyword: 70, inputType: 5 },
     },
     website: {
       autocomplete: ["url"],
@@ -167,11 +228,22 @@ function runSmartFill(config, siteMappings) {
       keywords: [
         "cover letter", "coverletter", "cover_letter",
         "why interested", "why are you", "tell us about yourself",
-        "additional information", "message to hiring", "motivation",
-        "introduction", "about you",
+        "message to hiring", "motivation",
       ],
-      antiKeywords: ["company", "website"],
+      antiKeywords: [
+        "company", "website", "upload", "attach", "drag", "drop", "file",
+        "additional information", "anything else", "other information",
+      ],
       points: { keyword: 70, inputType: 30 },
+    },
+    additionalinfo: {
+      inputType: ["textarea"],
+      keywords: [
+        "additional information", "anything else", "other information",
+        "comments or questions", "optional message", "notes",
+      ],
+      antiKeywords: ["cover letter", "upload", "attach", "resume", "cv"],
+      points: { keyword: 80, inputType: 20 },
     },
     resume: {
       inputType: ["file"],
@@ -184,11 +256,56 @@ function runSmartFill(config, siteMappings) {
       antiKeywords: ["job description"],
       points: { keyword: 40 },
     },
+    address1: {
+      autocomplete: ["address-line1", "street-address"],
+      keywords: ["address line 1", "address1", "street address", "address"],
+      antiKeywords: ["line 2", "address2", "email", "ip address"],
+      points: { autocomplete: 100, keyword: 60 },
+    },
+    address2: {
+      autocomplete: ["address-line2"],
+      keywords: ["address line 2", "address2", "apt", "suite", "unit number"],
+      antiKeywords: ["line 1", "address1"],
+      points: { autocomplete: 100, keyword: 60 },
+    },
+    city: {
+      autocomplete: ["address-level2"],
+      keywords: ["city", "town", "locality"],
+      antiKeywords: ["state", "country", "postal"],
+      points: { autocomplete: 100, keyword: 60 },
+    },
+    state: {
+      autocomplete: ["address-level1"],
+      keywords: ["state", "province", "region", "state province"],
+      antiKeywords: ["country", "city", "united"],
+      points: { autocomplete: 100, keyword: 55 },
+    },
+    zip: {
+      autocomplete: ["postal-code"],
+      keywords: ["postal code", "zip code", "zip", "postcode", "postal"],
+      antiKeywords: ["city", "country"],
+      points: { autocomplete: 100, keyword: 60 },
+    },
+    country: {
+      autocomplete: ["country", "country-name"],
+      keywords: ["country"],
+      antiKeywords: ["country code", "dial"],
+      points: { autocomplete: 100, keyword: 60 },
+    },
   };
 
   function scoreFieldForType(field, fieldType) {
     const rules = FIELD_TYPE_RULES[fieldType];
     if (!rules) return 0;
+    // Sublabel patterns ("First"/"Last" under a Name legend) identify the field
+    // outright — check before anti-keywords, which sibling text can trip.
+    if (rules.exactLabels) {
+      const own = ownLabelText(field);
+      if (own && rules.exactLabels.indexOf(own) !== -1) return 90;
+    }
+    const className = String(field.className || "");
+    if (fieldType === "firstname" && /wpforms-field-name-first/i.test(className)) return 95;
+    if (fieldType === "lastname" && /wpforms-field-name-last/i.test(className)) return 95;
     const blob = buildFieldClueBlob(field);
     const inputType = (field.type || "").toLowerCase();
     const tagName = (field.tagName || "").toLowerCase();
@@ -242,14 +359,30 @@ function runSmartFill(config, siteMappings) {
     return all;
   }
 
+  function isSiteSearchField(el) {
+    if ((el.type || "").toLowerCase() === "search") return true;
+    if ((el.getAttribute && (el.getAttribute("role") || "").toLowerCase()) === "searchbox") return true;
+    const blob = `${el.name || ""} ${el.id || ""} ${el.placeholder || ""} ${(el.getAttribute && el.getAttribute("aria-label")) || ""}`.toLowerCase();
+    if (/\bsearch\b|\bquery\b/.test(blob)) return true;
+    try {
+      return !!el.closest("[role='search'], form[action*='search' i]");
+    } catch (e) {
+      return false;
+    }
+  }
+
   function scanDomFields() {
     const all = getAllFillable();
     const activeTypes = Object.keys(FIELD_TYPE_RULES);
     const best = {};
     for (const el of all) {
-      if (el.value && String(el.value).trim()) continue;
+      if (hasUserValue(el)) continue;
       if (el.disabled || el.readOnly) continue;
-      if (!isLikelyVisibleField(el)) continue;
+      if (isDropzoneCompanionInput(el)) continue;
+      const isFile = (el.type || "").toLowerCase() === "file";
+      // File inputs are legitimately hidden behind dropzones — keep them.
+      if (!isFile && !isLikelyVisibleField(el)) continue;
+      if (!isFile && isSiteSearchField(el)) continue;
       for (const fieldType of activeTypes) {
         const score = scoreFieldForType(el, fieldType);
         if (score <= 0) continue;
@@ -266,7 +399,12 @@ function runSmartFill(config, siteMappings) {
     const str = String(value);
     if (el.tagName === "SELECT") {
       const opts = Array.from(el.options || []);
-      const match = opts.find((o) => o.text.toLowerCase().includes(str.toLowerCase()) || o.value.toLowerCase() === str.toLowerCase());
+      const lower = str.toLowerCase();
+      // Exact value/text match first — substring matching alone picks
+      // "Australia" for "us" because of the embedded letters.
+      const match =
+        opts.find((o) => o.value.toLowerCase() === lower || o.text.trim().toLowerCase() === lower) ||
+        (lower.length >= 3 ? opts.find((o) => o.text.toLowerCase().includes(lower)) : null);
       if (match) {
         el.value = match.value;
         el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -311,21 +449,62 @@ function runSmartFill(config, siteMappings) {
     fullname: config.fullName || [config.firstName, config.lastName].filter(Boolean).join(" "),
     tel: config.phone,
     coverletter: config.coverLetter,
+    additionalinfo: config.fillAdditionalInfo ? config.coverLetter : "",
     linkedinurl: config.linkedinUrl,
     website: config.websiteUrl,
     resume: config.resumePath,
+    address1: config.addressLine1,
+    address2: config.addressLine2,
+    city: config.city,
+    state: config.state,
+    zip: config.postalCode,
+    country: config.country,
   };
 
   const MIN_SCORE = {
     email: 40, firstname: 50, lastname: 50, fullname: 50, tel: 50,
-    coverletter: 50, linkedinurl: 60, website: 50, resume: 70, description: 40,
+    coverletter: 50, additionalinfo: 55, linkedinurl: 60, website: 50, resume: 70, description: 40,
+    address1: 50, address2: 60, city: 50, state: 50, zip: 50, country: 50,
   };
+
+  const DEFERRED_TYPES = ["coverletter", "additionalinfo"];
+  const LONG_TEXT_TYPES = new Set(DEFERRED_TYPES);
+
+  function isAdditionalInfoBlob(blob) {
+    return /additional\s*information|anything\s*else|other\s*information|comments\s*or\s*questions/i.test(blob || "");
+  }
+
+  function shouldDeferFill(fieldType, el) {
+    if (LONG_TEXT_TYPES.has(fieldType)) return true;
+    if (!config.deferTextFill) return false;
+    if (!el) return false;
+    if (el.tagName === "SELECT") return false;
+    if ((el.type || "").toLowerCase() === "file") return false;
+    return true;
+  }
+
+  function pushFilled(entry) {
+    filled.push(entry);
+  }
+
+  function resolveHostMappings(mappings, hostname) {
+    const key = String(hostname || "").toLowerCase().replace(/^www\./, "");
+    if (!key || !mappings || typeof mappings !== "object") return {};
+    if (mappings[key]) return mappings[key];
+    const parts = key.split(".");
+    while (parts.length > 2) {
+      parts.shift();
+      const parent = parts.join(".");
+      if (mappings[parent]) return mappings[parent];
+    }
+    return {};
+  }
 
   const filled = [];
   const siteMapped = [];
 
-  // Site-specific mappings (from autofill Field Mapper export)
-  const hostMappings = siteMappings[window.location.hostname] || {};
+  // Site-specific mappings (from autofill Field Mapper export + learnings)
+  const hostMappings = resolveHostMappings(siteMappings, window.location.hostname);
   Object.keys(hostMappings).forEach((selector) => {
     const mapping = hostMappings[selector];
     const mappedTo = mapping.mappedTo || mapping;
@@ -340,14 +519,21 @@ function runSmartFill(config, siteMappings) {
       filled.push({ type: fieldType, selector, score: 100, file: true });
       return;
     }
+    if (fieldType === "additionalinfo" && !config.fillAdditionalInfo) return;
+    if (shouldDeferFill(fieldType, el)) {
+      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping", deferred: true });
+      siteMapped.push(selector);
+      return;
+    }
     if (setFieldValue(el, value)) {
-      filled.push({ type: fieldType, selector, score: 100, source: "site_mapping" });
+      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping" });
       siteMapped.push(selector);
     }
   });
 
   const domMap = scanDomFields();
   for (const [fieldType, best] of Object.entries(domMap)) {
+    if (fieldType === "additionalinfo" && !config.fillAdditionalInfo) continue;
     const value = String(TYPE_VALUE[fieldType] || "").trim();
     if (!value) continue;
     const minScore = MIN_SCORE[fieldType] || 50;
@@ -356,25 +542,132 @@ function runSmartFill(config, siteMappings) {
     const el = findElement(best.selector);
     if (!el) continue;
     if (el.type === "file") {
-      filled.push({ type: fieldType, selector: best.selector, score: best.score, file: true });
+      // Only file-path types may target file inputs; a text value never goes here.
+      if (fieldType === "resume") {
+        filled.push({ type: fieldType, selector: best.selector, score: best.score, file: true });
+      }
+      continue;
+    }
+    // Never type a filesystem path into a text field.
+    if (fieldType === "resume") continue;
+    if (shouldDeferFill(fieldType, el)) {
+      pushFilled({
+        type: fieldType,
+        selector: best.selector,
+        score: best.score,
+        source: "dom_scan",
+        deferred: true,
+      });
       continue;
     }
     if (setFieldValue(el, value)) {
-      filled.push({ type: fieldType, selector: best.selector, score: best.score, source: "dom_scan" });
+      pushFilled({ type: fieldType, selector: best.selector, score: best.score, source: "dom_scan" });
     }
   }
 
-  // Fallback: lone empty textarea → cover letter
-  if (config.coverLetter && !filled.some((f) => f.type === "coverletter")) {
+  // File-upload targets with a human-readable clue so the caller can route the
+  // right document (resume vs cover letter).
+  const fileTargets = [];
+  function wpformsUploaderClue(u) {
+    const field = u.closest("[id*='field'][class*='container'], [class*='wpforms-field'][class*='container']");
+    const label = field?.querySelector(".wpforms-field-label");
+    const labelText = label?.textContent?.replace(/\s+/g, " ").trim() || "";
+    const fieldId = u.getAttribute("data-field-id") || field?.getAttribute("data-field-id") || "";
+    return [labelText, fieldId ? `field_${fieldId}` : ""].filter(Boolean).join(" ");
+  }
+  function containerClue(c) {
+    if (!c) return "";
+    const wpformsLabel = c.closest("[class*='wpforms-field'][class*='container']")?.querySelector(".wpforms-field-label");
+    if (wpformsLabel?.textContent) return wpformsLabel.textContent.replace(/\s+/g, " ").trim();
+    const scope = c.closest("[class*='field' i], [class*='form-group' i]") || c;
+    const dn = (c.getAttribute && (c.getAttribute("data-input-name") || "")) || "";
+    const t = (scope.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
+    return [dn, t].filter(Boolean).join(" ");
+  }
+  function upsertFileTarget(selector, clue) {
+    if (!selector) return;
+    const existing = fileTargets.find((t) => t.selector === selector);
+    if (existing) {
+      if ((clue || "").length > (existing.clue || "").length) existing.clue = clue;
+      return;
+    }
+    fileTargets.push({ selector, clue: clue || "" });
+  }
+
+  const formRoot = document.querySelector("form.wpforms-form, form[id^='wpforms-form']");
+  if (formRoot) {
+    const uploaders = Array.from(formRoot.querySelectorAll(".wpforms-uploader"));
+    const formFiles = Array.from(formRoot.querySelectorAll('input[type="file"]'));
+    uploaders.forEach((u, idx) => {
+      const embedded = u.querySelector('input[type="file"]');
+      const fileEl = embedded || formFiles[idx];
+      if (!fileEl || fileEl.disabled) return;
+      upsertFileTarget(generateStableSelector(fileEl), wpformsUploaderClue(u));
+    });
+  }
+
+  if (!fileTargets.length) {
+    const fileEls = [];
+    collectElementsDeep(document, 'input[type="file"]', fileEls);
+    const containers = [];
+    collectElementsDeep(document, "[class*='uploader' i], [class*='dropzone' i]:not(input)", containers);
+    const visibleContainers = containers.filter((c) => {
+      try {
+        const r = c.getBoundingClientRect();
+        return r.width > 10 && r.height > 10;
+      } catch (e) {
+        return false;
+      }
+    });
+    function fileOwnClue(el) {
+      const parts = [el.id, el.name, el.getAttribute("aria-label")];
+      try {
+        if (el.labels && el.labels.length) parts.push(el.labels[0].textContent);
+      } catch (e) { /* */ }
+      return parts.filter(Boolean).join(" ").trim();
+    }
+    let detachedIdx = 0;
+    for (const el of fileEls) {
+      if (el.disabled) continue;
+      let clue = fileOwnClue(el);
+      if (!clue) {
+        const inContainer = visibleContainers.find((c) => c.contains(el));
+        if (inContainer) {
+          clue = containerClue(inContainer);
+        } else if (visibleContainers[detachedIdx]) {
+          clue = containerClue(visibleContainers[detachedIdx]);
+          detachedIdx += 1;
+        }
+      }
+      upsertFileTarget(generateStableSelector(el), clue || "");
+    }
+  }
+
+  const hasCoverLetterUpload = fileTargets.some((t) => /cover\s*letter|upload your cover/i.test(t.clue || ""));
+
+  // Fallback: lone empty textarea → cover letter (skip additional-info boxes and when cover upload exists)
+  if (config.coverLetter && !hasCoverLetterUpload && !filled.some((f) => f.type === "coverletter")) {
     const textareas = getAllFillable().filter((el) => el.tagName === "TEXTAREA" && !el.value);
     if (textareas.length === 1 && isLikelyVisibleField(textareas[0])) {
       const el = textareas[0];
-      if (setFieldValue(el, config.coverLetter)) {
-        filled.push({
+      const blob = buildFieldClueBlob(el);
+      if (isAdditionalInfoBlob(blob)) {
+        if (config.fillAdditionalInfo) {
+          pushFilled({
+            type: "additionalinfo",
+            selector: generateStableSelector(el),
+            score: 40,
+            source: "textarea_fallback",
+            deferred: true,
+          });
+        }
+      } else {
+        pushFilled({
           type: "coverletter",
           selector: generateStableSelector(el),
           score: 30,
           source: "textarea_fallback",
+          deferred: true,
         });
       }
     }
@@ -383,9 +676,12 @@ function runSmartFill(config, siteMappings) {
   const filledSelectors = new Set(filled.map((f) => f.selector));
   const unfilled = [];
   for (const el of getAllFillable()) {
-    if (el.value && String(el.value).trim()) continue;
+    if (hasUserValue(el)) continue;
     if (el.disabled || el.readOnly) continue;
+    if (isDropzoneCompanionInput(el)) continue;
+    if ((el.type || "").toLowerCase() === "file") continue;
     if (!isLikelyVisibleField(el)) continue;
+    if (isSiteSearchField(el)) continue;
     const selector = generateStableSelector(el);
     if (filledSelectors.has(selector)) continue;
     const clue = buildFieldClueBlob(el);
@@ -403,5 +699,10 @@ function runSmartFill(config, siteMappings) {
     unfilled.push(entry);
   }
 
-  return { filled, unfilled, siteMapped, hostname: window.location.hostname };
+  const visibleUnfilled =
+    config.fillAdditionalInfo
+      ? unfilled
+      : unfilled.filter((u) => !isAdditionalInfoBlob(u.clue));
+
+  return { filled, unfilled: visibleUnfilled, siteMapped, fileTargets, hasCoverLetterUpload, hostname: window.location.hostname };
 }

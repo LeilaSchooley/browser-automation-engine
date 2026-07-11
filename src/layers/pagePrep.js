@@ -1,28 +1,13 @@
 import { humanPause } from "../human.js";
 import { loadSiteMappings } from "../siteMappings.js";
+import { hostnameFromUrl, resolveHostMapping } from "../host.js";
 import { clickDiscoveredCookie, clickDiscoveredEntry } from "./domActions.js";
+import { dismissBlockingOverlays } from "./adDismiss.js";
 import { inspectPage, logPageSnapshot, looksLikeApplyForm } from "./formDiscovery.js";
 import { isPageUnloaded, waitForApplySurface } from "./pageReady.js";
 
-function hostnameFromUrl(url) {
-  try {
-    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
-function hostMapping(hostname, siteMappings) {
-  if (!hostname) return {};
-  if (siteMappings[hostname]) return siteMappings[hostname];
-  for (const [key, val] of Object.entries(siteMappings)) {
-    if (hostname === key || hostname.endsWith(`.${key}`)) return val;
-  }
-  return {};
-}
-
 function applyConfig(hostname, siteMappings) {
-  const map = hostMapping(hostname, siteMappings);
+  const map = resolveHostMapping(siteMappings, hostname) || {};
   const apply = map._apply || map.$apply || {};
   return {
     cookieAccept: [...(apply.cookieAccept || []), ...(apply.cookies || [])],
@@ -62,6 +47,20 @@ export async function runPagePrepRound(page, url, log, { mode = "all" } = {}) {
   const actions = [];
   let snap = await inspectPage(page);
 
+  if (mode === "all" || mode === "dismiss") {
+    let hit = await dismissBlockingOverlays(page, log, "page_prep", snap);
+    if (!hit && cfg.dismiss?.length) {
+      hit = await clickMappingHint(page, cfg.dismiss, log, "dismiss");
+    }
+    if (hit) {
+      actions.push("dismiss");
+      await humanPause(800, 1400);
+      snap = await inspectPage(page);
+    } else if (snap.hasBlockingOverlay) {
+      log.layer("page_prep", "overlay: detected but could not dismiss", "warn");
+    }
+  }
+
   if (mode === "all" || mode === "cookies") {
     let hit = await clickDiscoveredCookie(page, log, "page_prep");
     if (!hit && cfg.cookieAccept.length) {
@@ -73,15 +72,6 @@ export async function runPagePrepRound(page, url, log, { mode = "all" } = {}) {
       snap = await inspectPage(page);
     } else {
       log.layer("page_prep", "cookie: none found in DOM scan", "debug");
-    }
-  }
-
-  if (mode === "all" || mode === "dismiss") {
-    for (const sel of cfg.dismiss || []) {
-      if (await clickMappingHint(page, [sel], log, "dismiss")) {
-        actions.push("dismiss");
-        break;
-      }
     }
   }
 
@@ -106,7 +96,7 @@ export async function runPagePrepRound(page, url, log, { mode = "all" } = {}) {
 const MAX_PREP_ROUNDS = 3;
 
 export async function preparePageForApply(page, url, log) {
-  log.step("page_prep", "Preparing page (DOM scan: cookies → apply entry)…");
+  log.step("page_prep", "Preparing page (DOM scan: ads/overlays → cookies → apply entry)…");
 
   const allActions = [];
   let lastFieldCount = -1;

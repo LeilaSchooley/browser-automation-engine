@@ -5,6 +5,46 @@ export const FILE_UPLOAD_TEXT =
 
 export const FILE_INPUT_HINT_TEXT = /\b(uploader|file-input|resume-upload|cv-upload|file_upload)\b/i;
 
+/** Secondary actions that dismiss an interstitial / upsell (any site). */
+export const INTERSTITIAL_DISMISS_TEXT =
+  /^(skip|no[, ]?thanks|not now|maybe later|continue without|dismiss|close|no,? pass|i'?ll pass|skip (for )?now|continue to (apply|job)|no,? i'?m good)$/i;
+
+/** Copy that means "this dialog is an upsell/paywall, not the application". */
+export const INTERSTITIAL_UPSELL_BODY =
+  /\b(auto-?rejected|won[\u2019']?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score|get more replies|upgrade (now|your)|go premium|subscribe|newsletter signup|paywall)\b/i;
+
+/** @deprecated use INTERSTITIAL_UPSELL_BODY */
+export const RESUME_REVIEW_UPSELL_TEXT = INTERSTITIAL_UPSELL_BODY;
+
+/** True when a non-apply dialog is blocking (upsell, score tease, sponsored modal). */
+export function isBlockingInterstitial(snap) {
+  if (!snap) return false;
+  const hints = snap.overlayHints || [];
+  if (hints.some((h) => /interstitial|resume-review-upsell|upsell/i.test(h))) return true;
+  if ((snap.dismissCandidates || []).some((c) => /interstitial|upsell/i.test(c.source || ""))) return true;
+  const blob = [
+    snap.pageText,
+    snap.title,
+    snap.applyModalTitle,
+    ...(snap.modalCandidates || []).map((c) => `${c.text || ""} ${c.testId || ""}`),
+    ...(snap.dismissCandidates || []).map((c) => `${c.text || ""} ${c.testId || ""}`),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .replace(/[\u2018\u2019']/g, "'");
+  if (!INTERSTITIAL_UPSELL_BODY.test(blob)) return false;
+  return (
+    (snap.modalCount || 0) > 0 ||
+    (snap.dismissCandidates || []).some((c) => INTERSTITIAL_DISMISS_TEXT.test(String(c.text || "").trim())) ||
+    snap.hasBlockingOverlay
+  );
+}
+
+export function isResumeReviewUpsell(snap) {
+  return isBlockingInterstitial(snap);
+}
+
 export function blobFromCandidate(candidate) {
   if (!candidate) return "";
   return `${candidate.text || ""} ${candidate.aria || ""} ${candidate.testId || ""}`.trim();
@@ -88,6 +128,7 @@ export function pageFingerprintFromSnap(snap) {
     snap.fileInputCount || 0,
     snap.continueCount,
     snap.cookieBanner ? 1 : 0,
+    snap.hasBlockingOverlay ? 1 : 0,
     snap.modalCandidates?.[0]?.text?.slice(0, 20) || "",
     snap.url?.split("?")[0]?.slice(-40),
   ].join("|");

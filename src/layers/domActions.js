@@ -2,23 +2,18 @@
  * Click elements discovered by DOM scan — no hardcoded site selectors.
  */
 import path from "path";
-import { humanPause } from "../human.js";
+import { humanPause, humanType } from "../human.js";
+import { gotoWithCloudflareRetry } from "../cloudflare.js";
 import { loadSiteMappings } from "../siteMappings.js";
 import { getRuntime } from "../runtime.js";
+import { hostnameFromPage, resolveHostMapping } from "../host.js";
 import { inspectPage } from "./formDiscovery.js";
-import { snapSuggestsFileUpload, isResumeChoiceStep } from "../heuristics.js";
-
-function hostnameFromPage(page) {
-  try {
-    return new URL(page.url()).hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
+import { isResumeChoiceStep, snapSuggestsFileUpload } from "../heuristics.js";
+import { rankEntryCandidates, entryCandidateKey } from "./pageIntent.js";
 
 function modalHintsForHost(hostname) {
   const maps = loadSiteMappings();
-  const map = maps[hostname] || Object.entries(maps).find(([k]) => hostname.endsWith(k))?.[1];
+  const map = resolveHostMapping(maps, hostname);
   const apply = map?._apply || map?.$apply || {};
   return apply.modalSteps || [];
 }
@@ -242,6 +237,101 @@ export async function clickTargetCandidate(page, target, log, layer = "agent") {
   return false;
 }
 
+function looksLikeCssSelector(s) {
+  return /^[#.[]/.test(s) || /[>~+:]/.test(s) || /^\w+(\.\w|#)/.test(s);
+}
+
+/**
+ * Generic AI-driven primitive: click / fill / goto / press / scroll on any
+ * element, addressed by snapshot interactives index, CSS selector, or text.
+ * This is what lets the agent handle flows no step classifier anticipated.
+ */
+export async function performGenericAct(page, plan, { snap = null, log = null, sessionId = null, layer = "agent" } = {}) {
+  const action = (plan.action || "").toLowerCase();
+  const item = Number.isInteger(plan.elementIndex)
+    ? (snap?.interactives || []).find((i) => i.index === plan.elementIndex)
+    : null;
+  const targetStr = (plan.target || "").trim();
+
+  switch (action) {
+    case "click": {
+      if (item) {
+        const ok = await clickCandidate(page, item, log, layer, "act-click");
+        if (ok) return { ok: true };
+      }
+      if (targetStr) {
+        return { ok: await clickTargetCandidate(page, targetStr, log, layer) };
+      }
+      return { ok: false };
+    }
+
+    case "fill": {
+      const value = String(plan.value ?? "").trim();
+      if (!value) return { ok: false };
+      const locators = [];
+      if (item?.selector) locators.push(() => page.locator(item.selector).first());
+      if (targetStr) {
+        if (looksLikeCssSelector(targetStr)) {
+          locators.push(() => page.locator(targetStr).first());
+        } else {
+          locators.push(() => page.getByLabel(targetStr).first());
+          locators.push(() => page.getByPlaceholder(targetStr).first());
+        }
+      }
+      for (const make of locators) {
+        try {
+          const loc = make();
+          if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) continue;
+          if (value.length > 80) {
+            await humanType(loc, value, page);
+          } else {
+            await loc.fill(value, { timeout: 5000 });
+          }
+          log?.layer(layer, `act: filled "${(item?.text || targetStr).slice(0, 50)}"`, "info");
+          return { ok: true };
+        } catch {
+          /* next */
+        }
+      }
+      log?.layer(layer, `act: could not fill "${targetStr.slice(0, 60)}"`, "warn");
+      return { ok: false };
+    }
+
+    case "goto": {
+      const dest = plan.url || targetStr || (item?.href || "");
+      if (!/^https?:/i.test(dest)) return { ok: false };
+      log?.layer(layer, `act: goto ${dest.slice(0, 110)}`, "info");
+      await gotoWithCloudflareRetry(page, dest, { sessionId });
+      return { ok: true };
+    }
+
+    case "press": {
+      const key = plan.value || "Enter";
+      try {
+        await page.keyboard.press(key);
+        log?.layer(layer, `act: pressed ${key}`, "info");
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    }
+
+    case "scroll": {
+      const ok = await page
+        .evaluate(() => {
+          window.scrollBy(0, Math.round((window.innerHeight || 800) * 0.8));
+          return true;
+        })
+        .catch(() => false);
+      if (ok) log?.layer(layer, "act: scrolled down", "debug");
+      return { ok: !!ok };
+    }
+
+    default:
+      return { ok: false };
+  }
+}
+
 export async function clickDiscoveredCookie(page, log, layer = "page_prep", snap = null) {
   const state = snap || (await inspectPage(page));
   if (state.hasApplyModal) {
@@ -256,7 +346,7 @@ export async function clickDiscoveredCookie(page, log, layer = "page_prep", snap
   return false;
 }
 
-export async function clickDiscoveredEntry(page, log, layer = "page_prep", snap = null) {
+export async function clickDiscoveredEntry(page, log, layer = "page_prep", snap = null, context = {}) {
   const state = snap || (await inspectPage(page));
 
   if (state.hasApplyModal) {
@@ -268,13 +358,13 @@ export async function clickDiscoveredEntry(page, log, layer = "page_prep", snap 
     await page.evaluate(() => window.scrollTo(0, Math.min(400, document.body?.scrollHeight || 400))).catch(() => {});
   }
 
-  const candidates = state.entryCandidates || [];
+  const candidates = rankEntryCandidates(state.entryCandidates, context);
   if (!candidates.length) {
     log.layer(layer, "entry: DOM scan found no apply/interested controls", "debug");
     return false;
   }
 
-  log.layer(layer, `entry: trying ${candidates.length} candidate(s) from DOM scan`, "info");
+  log.layer(layer, `entry: trying ${candidates.length} ranked candidate(s) from DOM scan`, "info");
 
   for (const c of candidates) {
     if (await clickCandidate(page, c, log, layer, "entry")) return true;
@@ -288,24 +378,30 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
   const state = snap || (await inspectPage(page));
   const candidates = state.modalCandidates || [];
 
+  const success = (candidate) => ({
+    ok: true,
+    selector: candidate?.selector || (candidate?.testId ? `[data-testid="${candidate.testId}"]` : ""),
+  });
+
   if (isResumeChoiceStep(state) || candidates.some((c) => /have a resume|option-upload/i.test(`${c.testId} ${c.text}`))) {
     log.layer(layer, "modal: resume choice step — click before upload", "info");
     for (const c of candidates) {
       if (/close dialog|^x$|need a resume|resume builder/i.test(c.aria || c.text || "")) continue;
-      if (await clickCandidate(page, c, log, layer, "modal", { inModal: true })) return true;
-      if (await clickCandidate(page, c, log, layer, "modal-force", { inModal: true, force: true })) return true;
+      if (await clickCandidate(page, c, log, layer, "modal", { inModal: true })) return success(c);
+      if (await clickCandidate(page, c, log, layer, "modal-force", { inModal: true, force: true })) return success(c);
     }
   }
 
   if (state.fileInputCount > 0 || snapSuggestsFileUpload(state)) {
     log.layer(layer, "modal: upload flow detected — use setInputFiles", "debug");
     const uploaded = await uploadDiscoveredFile(page, log, layer, state, sessionId);
-    if (uploaded) return true;
+    if (uploaded) return { ok: true, selector: "input[type=file]" };
   }
 
   if (!candidates.length) {
     log.layer(layer, "modal: no wizard steps found in DOM scan", "debug");
-    return clickMappingModalHints(page, log, layer);
+    const hinted = await clickMappingModalHints(page, log, layer);
+    return { ok: Boolean(hinted) };
   }
 
   log.layer(
@@ -316,11 +412,11 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
 
   for (const c of candidates) {
     if (/close dialog|^x$/i.test(c.aria || c.text || "")) continue;
-    if (await clickCandidate(page, c, log, layer, "modal", { inModal: true })) return true;
-    if (await clickCandidate(page, c, log, layer, "modal-force", { inModal: true, force: true })) return true;
+    if (await clickCandidate(page, c, log, layer, "modal", { inModal: true })) return success(c);
+    if (await clickCandidate(page, c, log, layer, "modal-force", { inModal: true, force: true })) return success(c);
   }
 
-  return false;
+  return { ok: false };
 }
 
 /** Upload file via file input (setInputFiles) — never click the overlay button. */
@@ -368,7 +464,8 @@ export async function clickDiscoveredContinue(page, log, layer = "agent", snap =
   const state = snap || (await inspectPage(page));
 
   if (state.hasApplyModal && state.modalCandidates?.length) {
-    return clickDiscoveredModalStep(page, log, layer, state);
+    const modal = await clickDiscoveredModalStep(page, log, layer, state);
+    return modal.ok;
   }
 
   for (const c of state.continueCandidates || []) {

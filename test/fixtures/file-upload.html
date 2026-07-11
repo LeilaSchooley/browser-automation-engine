@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Apply — Upload resume</title>
+  </head>
+  <body>
+    <div role="dialog" aria-modal="true">
+      <h2>Upload your resume</h2>
+      <p>Attach a PDF or DOCX to continue your application.</p>
+      <input type="file" id="resume" data-testid="resume-upload" accept=".pdf,.doc,.docx" />
+      <p id="status"></p>
+      <button type="button">Continue</button>
+    </div>
+    <script>
+      document.getElementById("resume").addEventListener("change", () => {
+        document.getElementById("status").textContent = "Resume attached";
+      });
+    </script>
+  </body>
+</html>

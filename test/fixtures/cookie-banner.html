@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Startup Jobs — Example Listing</title>
+  </head>
+  <body>
+    <main>
+      <h1>Senior Platform Engineer</h1>
+      <p>We are hiring a platform engineer to build scalable infrastructure.</p>
+      <button type="button" data-testid="job-apply-button">Apply</button>
+    </main>
+    <div id="onetrust-banner-sdk" role="dialog" aria-label="Cookie consent">
+      <p>We use cookies to improve your experience.</p>
+      <button type="button" id="accept-cookies">Accept all cookies</button>
+    </div>
+    <script>
+      document.getElementById("accept-cookies").addEventListener("click", () => {
+        document.getElementById("onetrust-banner-sdk")?.remove();
+      });
+    </script>
+  </body>
+</html>

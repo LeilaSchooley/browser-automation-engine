@@ -1,5 +1,6 @@
 import fs from "fs";
 import { getRuntime, getSettings } from "./runtime.js";
+import { learningsAsSiteMappings, mergeSiteMappings } from "./siteLearnings.js";
 
 export function loadSiteMappingsFromPath(filePath) {
   if (!filePath || !fs.existsSync(filePath)) {
@@ -26,7 +27,10 @@ export function loadSiteMappings() {
   const runtimeLoader = getRuntime().loadSiteMappings;
   if (runtimeLoader) {
     const loaded = runtimeLoader();
-    if (loaded && typeof loaded === "object") return loaded;
+    if (loaded && typeof loaded === "object") {
+      return mergeSiteMappings(loaded, learningsAsSiteMappings());
+    }
   }
-  return loadSiteMappingsFromPath(getSettings().site_mappings_path);
+  const base = loadSiteMappingsFromPath(getSettings().site_mappings_path);
+  return mergeSiteMappings(base, learningsAsSiteMappings());
 }

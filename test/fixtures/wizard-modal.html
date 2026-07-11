@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Platform Engineer | JobLeads.com</title>
+  </head>
+  <body>
+    <main>
+      <h1>Platform Engineer</h1>
+      <button type="button" data-testid="job-preview-apply-button">I'm interested</button>
+    </main>
+    <div role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h2 id="modal-title">Start your application</h2>
+      <button type="button" data-testid="umja-option-upload-resume" id="have-resume">I have a resume</button>
+      <button type="button" data-testid="umja-option-open-resume-builder">I need a resume</button>
+      <div id="upload-step" hidden>
+        <p>Upload your resume</p>
+        <input type="file" id="resume" data-testid="resume-upload" accept=".pdf,.doc,.docx" />
+      </div>
+    </div>
+    <script>
+      document.getElementById("have-resume").addEventListener("click", () => {
+        document.getElementById("upload-step").hidden = false;
+      });
+    </script>
+  </body>
+</html>

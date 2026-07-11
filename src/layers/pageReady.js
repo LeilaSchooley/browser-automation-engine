@@ -12,6 +12,51 @@ export function isPageUnloaded(snap) {
   return snap.pageKind === "unknown" && (snap.fieldCount || 0) === 0 && title.length < 5;
 }
 
+const AD_POPUP_HOST_RE =
+  /doubleclick|googlesyndication|googleads|adservice|adsystem|taboola|outbrain|popads|propeller|onclicka|clickadu|adsterra|adnxs|criteo/i;
+
+/**
+ * After a click, check whether a new tab/popup opened and adopt it when it looks
+ * like the apply flow continued there (apply links with target=_blank, redirect
+ * chains). Ad popups are closed; unknown tabs are only adopted when the current
+ * page itself did not navigate.
+ * @returns {Promise<import("playwright").Page|null>} the adopted page or null
+ */
+export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
+  let pages = [];
+  try {
+    pages = page.context().pages();
+  } catch {
+    return null;
+  }
+  const fresh = pages.filter((p) => p !== page && !knownPages.has(p) && !p.isClosed());
+  if (!fresh.length) return null;
+
+  for (const candidate of fresh.reverse()) {
+    let url = "";
+    try {
+      await candidate.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => {});
+      url = candidate.url();
+    } catch {
+      continue;
+    }
+    if (!/^https?:/i.test(url)) continue;
+    if (AD_POPUP_HOST_RE.test(url)) {
+      log?.layer(layer, `closing ad popup ${url.slice(0, 90)}`, "debug");
+      await candidate.close().catch(() => {});
+      continue;
+    }
+    try {
+      await candidate.bringToFront();
+    } catch {
+      /* ignore */
+    }
+    log?.layer(layer, `following new tab → ${url.slice(0, 120)}`, "info");
+    return candidate;
+  }
+  return null;
+}
+
 /** Wait for dialog/form to appear after a click action. */
 export async function waitAfterClickTransition(page) {
   await page

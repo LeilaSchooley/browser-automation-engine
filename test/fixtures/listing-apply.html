@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Software Engineer — Example Co</title>
+  </head>
+  <body>
+    <nav><a href="/jobs">Search jobs</a></nav>
+    <main>
+      <h1>Software Engineer</h1>
+      <p>Join our team building developer tools for startup founders worldwide.</p>
+      <p>Remote friendly. Competitive salary and equity.</p>
+      <button type="button" data-testid="apply-cta" id="apply-btn">Apply</button>
+      <section id="apply-panel" hidden>
+        <h2>Apply now</h2>
+        <label>Full name <input type="text" name="name" autocomplete="name" /></label>
+        <label>Email <input type="email" name="email" autocomplete="email" /></label>
+        <button type="submit">Submit application</button>
+      </section>
+    </main>
+    <script>
+      document.getElementById("apply-btn").addEventListener("click", () => {
+        document.getElementById("apply-panel").hidden = false;
+      });
+    </script>
+  </body>
+</html>

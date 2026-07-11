@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Log in — BetaList</title>
+  </head>
+  <body>
+    <header>
+      <strong>BetaList</strong>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/browse">Browse</a>
+        <button type="button">Submit Startup</button>
+      </nav>
+    </header>
+    <main>
+      <section aria-labelledby="login-title">
+        <h1 id="login-title">Welcome back</h1>
+        <p>Sign in to get started</p>
+        <button type="button">Sign in with X</button>
+        <p>or</p>
+        <form>
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" placeholder="you@company.com" autocomplete="email" />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" />
+          <button type="button" data-testid="sign-in-email">Sign in with email</button>
+        </form>
+        <a href="/signup">Sign up</a>
+      </section>
+    </main>
+  </body>
+</html>

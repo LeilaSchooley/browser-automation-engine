@@ -13,6 +13,7 @@ export function initRuntime(deps = {}) {
     buildFillConfig: deps.buildFillConfig || (async () => ({})),
     resolveFileUpload: deps.resolveFileUpload || (async () => ({ ok: false })),
     planNextAction: deps.planNextAction || null,
+    validateAction: deps.validateAction || null,
     answerUnfilledFields: deps.answerUnfilledFields || null,
     onStatus: deps.onStatus || null,
   };

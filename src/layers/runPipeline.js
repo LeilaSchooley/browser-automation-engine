@@ -6,6 +6,24 @@ import { runAutomationAgent } from "./automationAgent.js";
 import { preparePageForApply } from "./pagePrep.js";
 import { inspectPage, logPageSnapshot } from "./formDiscovery.js";
 import { waitForApplySurface } from "./pageReady.js";
+import { enrichContextWithLearnings } from "./navigationRecovery.js";
+
+/** Prefer a concrete submit path over a bare homepage when provided. */
+export function resolveStartUrl(url, submitUrl) {
+  if (!url) return url;
+  if (!submitUrl || submitUrl === url) return url;
+  try {
+    const target = new URL(submitUrl);
+    const base = new URL(url);
+    const sameHost = target.hostname.replace(/^www\./, "") === base.hostname.replace(/^www\./, "");
+    if (!sameHost) return url;
+    if (target.pathname && target.pathname !== "/") return submitUrl;
+    if (/\/(submit|add|post|suggest|list|launch)/i.test(target.pathname)) return submitUrl;
+  } catch {
+    /* ignore */
+  }
+  return url;
+}
 
 function buildReadyMessage({ fillResult, snap, prep, agentSteps, entryLabel = "Apply" }) {
   const filledCount = fillResult.filled?.length || 0;
@@ -36,11 +54,16 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, entryLabel = "A
 /**
  * Unified automation pipeline — navigation then dynamic agent loop.
  */
-export async function runPipeline(page, { url, context = {}, log, sessionId = null, shouldStop = null, entryLabel = "Apply" } = {}) {
+export async function runPipeline(page, { url, submitUrl, context = {}, log, sessionId = null, shouldStop = null, entryLabel = "Apply" } = {}) {
   if (!url) throw new Error("runPipeline requires url");
 
-  log.step("navigate", `Loading ${url}`);
-  await gotoWithCloudflareRetry(page, url, { sessionId });
+  const startUrl = resolveStartUrl(url, submitUrl || context?.submitUrl);
+  if (startUrl !== url) {
+    log.layer("navigate", `using submit URL ${startUrl}`, "info");
+  }
+
+  log.step("navigate", `Loading ${startUrl}`);
+  await gotoWithCloudflareRetry(page, startUrl, { sessionId });
   await humanPause(800, 1500);
 
   const afterNav = await waitForApplySurface(page, log, { timeoutMs: 28000 });
@@ -52,9 +75,36 @@ export async function runPipeline(page, { url, context = {}, log, sessionId = nu
     await waitForCloudflareClear(page, sessionId);
   }
 
+  const agentContext = enrichContextWithLearnings(
+    {
+      ...context,
+      startUrl: url,
+      submitUrl,
+      targetHost: (() => {
+        try {
+          return new URL(submitUrl || url).hostname;
+        } catch {
+          return "";
+        }
+      })(),
+    },
+    (() => {
+      try {
+        return new URL(submitUrl || url).hostname;
+      } catch {
+        return "";
+      }
+    })(),
+  );
+
   let agentResult;
   if (getSettings().agent_enabled) {
-    agentResult = await runAutomationAgent(page, context, log, { url, sessionId, shouldStop });
+    agentResult = await runAutomationAgent(page, agentContext, log, {
+      url: startUrl,
+      submitUrl: submitUrl || context?.submitUrl,
+      sessionId,
+      shouldStop,
+    });
   } else {
     log.step("page_prep", "Linear prep (agent disabled)…");
     const prep = await preparePageForApply(page, url, log);
@@ -70,6 +120,7 @@ export async function runPipeline(page, { url, context = {}, log, sessionId = nu
   }
 
   const { prep, fillResult, snap, history, agentSteps } = agentResult;
+  const activePage = agentResult.page || page;
 
   log.layer(
     "agent",
@@ -96,9 +147,10 @@ export async function runPipeline(page, { url, context = {}, log, sessionId = nu
     fillResult,
     snap,
     readyMessage,
-    cloudflare: await isCloudflarePage(page),
+    cloudflare: await isCloudflarePage(activePage),
     agentSteps,
     agentHistory: history,
+    page: activePage,
   };
 }
 

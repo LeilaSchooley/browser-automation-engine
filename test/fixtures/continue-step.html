@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Application — Continue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Almost done</h1>
+      <p>Review your details, then continue to the next step of the application.</p>
+      <button type="button" data-testid="continue-cta" id="continue-btn">Continue</button>
+      <div id="next" hidden>
+        <p>Step 2 loaded.</p>
+        <input type="email" id="email" name="email" placeholder="Email" />
+      </div>
+    </main>
+    <script>
+      document.getElementById("continue-btn").addEventListener("click", () => {
+        document.getElementById("continue-btn").remove();
+        document.getElementById("next").hidden = false;
+      });
+    </script>
+  </body>
+</html>

@@ -8,6 +8,8 @@ import { humanPause, humanType } from "./human.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMART_FILL_JS = fs.readFileSync(path.join(__dirname, "smart_fill.js"), "utf8");
 
+const LONG_TEXT_TYPES = new Set(["coverletter", "additionalinfo"]);
+
 export function splitName(fullName) {
   const parts = fullName.trim().split(/\s+/, 2);
   if (!parts.length) return ["", ""];
@@ -32,7 +34,10 @@ async function fillViaPlaywright(page, selector, value, { longText = false } = {
     if (!(await loc.count()) || !(await loc.isVisible())) {
       return false;
     }
-    if (longText && getSettings().browser_human_behavior) {
+    const human = getSettings().browser_human_behavior;
+    if (human) {
+      await humanType(loc, value, page);
+    } else if (longText) {
       await humanType(loc, value, page);
     } else {
       await loc.fill(value, { timeout: 5000 });
@@ -44,18 +49,96 @@ async function fillViaPlaywright(page, selector, value, { longText = false } = {
 }
 
 async function uploadFile(page, selector, filePath) {
-  try {
-    const loc = page.locator(selector).first();
-    if (!(await loc.count())) return false;
-    await loc.setInputFiles(filePath);
-    return true;
-  } catch {
-    return false;
+  const loc = page.locator(selector).first();
+  if (!(await loc.count())) return false;
+  for (const force of [false, true]) {
+    try {
+      await loc.setInputFiles(filePath, { timeout: 15000, force });
+      await loc.dispatchEvent("input").catch(() => {});
+      await loc.dispatchEvent("change").catch(() => {});
+      await page.waitForTimeout(500);
+      return true;
+    } catch {
+      /* retry hidden Dropzone inputs with force */
+    }
   }
+  return false;
 }
 
 function fieldHint(entry) {
   return entry.label || entry.name || entry.placeholder || entry.selector || entry.type || "?";
+}
+
+function textValueForEntry(entry, config) {
+  const byType = {
+    email: config.email,
+    firstname: config.firstName,
+    lastname: config.lastName,
+    fullname: config.fullName || [config.firstName, config.lastName].filter(Boolean).join(" "),
+    tel: config.phone,
+    coverletter: config.coverLetter,
+    additionalinfo: config.coverLetter,
+    linkedinurl: config.linkedinUrl,
+    website: config.websiteUrl,
+    address1: config.addressLine1,
+    address2: config.addressLine2,
+    city: config.city,
+    state: config.state,
+    zip: config.postalCode,
+    country: config.country,
+  };
+  if (entry.type && byType[entry.type]) return String(byType[entry.type] || "").trim();
+  return entry.value || "";
+}
+
+function partitionFilled(entries, fileTargets) {
+  const shortText = [];
+  const longText = [];
+  const files = [];
+  const hasFileTargets = (fileTargets || []).length > 0;
+
+  for (const entry of entries || []) {
+    if (entry.file) {
+      if (hasFileTargets) continue;
+      files.push(entry);
+    } else if (LONG_TEXT_TYPES.has(entry.type)) {
+      longText.push(entry);
+    } else if (entry.deferred) {
+      shortText.push(entry);
+    } else {
+      shortText.push(entry);
+    }
+  }
+
+  return { shortText, longText, files };
+}
+
+async function processTextEntry(page, entry, config, seen, allFilled, log) {
+  const sel = entry.selector || "";
+  if (!sel || seen.has(sel)) return;
+
+  log?.layer(
+    "smart_fill",
+    `match ${entry.type} score=${entry.score ?? "?"} \`${fieldHint(entry)}\` → ${sel.slice(0, 80)}`,
+    "debug",
+  );
+
+  if (!entry.deferred) {
+    seen.add(sel);
+    allFilled.push(entry);
+    return;
+  }
+
+  const value = textValueForEntry(entry, config);
+  if (!value) return;
+
+  const longText =
+    LONG_TEXT_TYPES.has(entry.type) || value.length > getSettings().human_long_text_threshold;
+  if (await fillViaPlaywright(page, sel, value, { longText })) {
+    seen.add(sel);
+    allFilled.push(entry);
+    log?.layer("smart_fill", `typed ${entry.type} → ${sel.slice(0, 80)}`, "info");
+  }
 }
 
 /**
@@ -86,41 +169,76 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     );
 
     const filePath = config.resumePath || config.filePath || "";
+    const { shortText, longText, files } = partitionFilled(
+      lastResult.filled,
+      lastResult.fileTargets,
+    );
 
-    for (const entry of lastResult.filled || []) {
+    // 1) Profile / short fields first (human-typed when enabled)
+    for (const entry of shortText) {
+      await processTextEntry(page, entry, config, seen, allFilled, log);
+    }
+
+    // 2) Resume / cover uploads before optional long text
+    for (const entry of files) {
       const sel = entry.selector || "";
-      if (!sel || seen.has(sel)) continue;
-
-      log?.layer(
-        "smart_fill",
-        `match ${entry.type} score=${entry.score ?? "?"} \`${fieldHint(entry)}\` → ${sel.slice(0, 80)}`,
-        "debug",
-      );
-
-      if (entry.file && filePath) {
-        if (await uploadFile(page, sel, filePath)) {
-          entry.uploaded = true;
-          seen.add(sel);
-          allFilled.push(entry);
-          log?.layer("smart_fill", `uploaded file → ${sel}`, "info");
-        } else {
-          log?.layer("smart_fill", `file upload failed → ${sel}`, "warn");
-        }
-        continue;
+      if (!sel || seen.has(sel) || !filePath) continue;
+      if (await uploadFile(page, sel, filePath)) {
+        entry.uploaded = true;
+        seen.add(sel);
+        allFilled.push(entry);
+        log?.layer("smart_fill", `uploaded file → ${sel}`, "info");
+      } else {
+        log?.layer("smart_fill", `file upload failed → ${sel}`, "warn");
       }
+    }
 
-      const longTextValue = entry.type === "coverletter" ? config.coverLetter : entry.value;
-      if (entry.type === "coverletter" && getSettings().browser_human_behavior) {
-        if (await fillViaPlaywright(page, sel, longTextValue, { longText: true })) {
-          seen.add(sel);
-          allFilled.push(entry);
-          log?.layer("smart_fill", `typed long text → ${sel}`, "info");
-        }
-        continue;
+    const resumePath = config.resumePath || config.filePath || "";
+    const coverPath = config.coverLetterPath || "";
+    const pendingTargets = (lastResult.fileTargets || []).filter(
+      (t) => t.selector && !seen.has(t.selector),
+    );
+
+    function classifyUploadTarget(target, index, total) {
+      const clue = (target.clue || "").toLowerCase();
+      if (/cover\s*letter|upload your cover/.test(clue)) return "cover";
+      if (/resume|curriculum|\bcv\b|upload your resume/.test(clue)) return "resume";
+      if (total === 2 && coverPath) return index === 0 ? "resume" : "cover";
+      return "resume";
+    }
+
+    for (let i = 0; i < pendingTargets.length; i++) {
+      const target = pendingTargets[i];
+      const kind = classifyUploadTarget(target, i, pendingTargets.length);
+      const uploadPath = kind === "cover" ? coverPath : resumePath;
+      if (!uploadPath) continue;
+      if (await uploadFile(page, target.selector, uploadPath)) {
+        seen.add(target.selector);
+        allFilled.push({
+          type: kind === "cover" ? "coverletter_file" : "resume",
+          selector: target.selector,
+          score: 90,
+          file: true,
+          uploaded: true,
+        });
+        const basename = uploadPath.split(/[/\\]/).pop() || uploadPath;
+        log?.layer(
+          "smart_fill",
+          `uploaded ${kind === "cover" ? "cover letter" : "resume"} (${basename}) → ${target.selector.slice(0, 80)} [${target.clue || "no clue"}]`,
+          "info",
+        );
+      } else {
+        log?.layer(
+          "smart_fill",
+          `file upload failed → ${target.selector.slice(0, 80)} [${target.clue || "no clue"}]`,
+          "warn",
+        );
       }
+    }
 
-      seen.add(sel);
-      allFilled.push(entry);
+    // 3) Cover letter / additional info last
+    for (const entry of longText) {
+      await processTextEntry(page, entry, config, seen, allFilled, log);
     }
 
     if (passNum < passes - 1) {

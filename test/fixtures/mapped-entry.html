@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Role — Mapped Host</title>
+  </head>
+  <body>
+    <main>
+      <h1>Backend Engineer</h1>
+      <p>Join the platform team. Competitive pay. Remote OK.</p>
+      <!-- Intentionally weak CTA copy so DOM entry scoring misses it; site mapping hits #custom-go -->
+      <button type="button" id="custom-go">Proceed here</button>
+      <div id="form-panel" hidden>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" />
+        <label for="name">Full name</label>
+        <input id="name" name="full_name" type="text" />
+      </div>
+    </main>
+    <script>
+      document.getElementById("custom-go").addEventListener("click", () => {
+        document.getElementById("custom-go").remove();
+        document.getElementById("form-panel").hidden = false;
+      });
+    </script>
+  </body>
+</html>
