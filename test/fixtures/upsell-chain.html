@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Platform Engineer | JobLeads.com</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f4; }
+      body.modal-open { overflow: hidden; }
+      .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; }
+      .ui-modal { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); background: #fff; border-radius: 16px; padding: 28px; width: 420px; z-index: 1001; box-shadow: 0 20px 60px rgba(0,0,0,.2); }
+      .ui-modal h2 { margin: 0 0 12px; font-size: 1.25rem; }
+      .ui-modal p { color: #444; line-height: 1.5; }
+      .ui-modal button { display: block; width: 100%; margin-top: 14px; padding: 14px 18px; border: 0; border-radius: 999px; font-size: 1rem; cursor: pointer; }
+      .primary { background: #111; color: #fff; }
+      .secondary { background: #ff6b6b; color: #fff; }
+      #job-card { padding: 24px; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body class="modal-open">
+    <div id="job-card">
+      <h1>Platform Engineer &amp; Web Admin</h1>
+      <button id="apply-btn">I'm interested</button>
+    </div>
+
+    <div id="backdrop" class="backdrop"></div>
+
+    <div id="modal-1" class="ui-modal" role="dialog" aria-modal="true">
+      <h2>AUTO-REJECTED</h2>
+      <p>Your resume won't reach a human. ATS software will filter you out. Fix my resume with quick wins to improve your score.</p>
+      <button class="primary" type="button">Fix my resume</button>
+      <button id="skip-1" class="secondary" type="button">Skip</button>
+    </div>
+
+    <div id="modal-2" class="ui-modal hidden" role="dialog" aria-modal="true">
+      <h2>Increase your chances by 78%</h2>
+      <p>Tailor your resume in minutes to get more replies from recruiters.</p>
+      <button class="primary" type="button">Tailor your resume in minutes</button>
+      <button id="skip-2" class="secondary" type="button">Skip to application</button>
+    </div>
+
+    <div id="apply-form" class="hidden" style="padding:24px">
+      <h2>Application form</h2>
+      <label>First name <input id="first-name" name="firstName" type="text" /></label>
+      <label>Last name <input id="last-name" name="lastName" type="text" /></label>
+      <label>Email <input id="email" name="email" type="email" /></label>
+    </div>
+
+    <script>
+      document.getElementById("skip-1").addEventListener("click", () => {
+        document.getElementById("modal-1").classList.add("hidden");
+        document.getElementById("modal-2").classList.remove("hidden");
+      });
+      document.getElementById("skip-2").addEventListener("click", () => {
+        document.getElementById("modal-2").classList.add("hidden");
+        document.getElementById("backdrop").classList.add("hidden");
+        document.body.classList.remove("modal-open");
+        document.getElementById("apply-form").classList.remove("hidden");
+      });
+    </script>
+  </body>
+</html>

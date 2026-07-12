@@ -14,7 +14,7 @@ import { initTestRuntime } from "./helpers/runtime.js";
 
 describe("learningRecorder", () => {
   it("fieldHintsFromFilled uses smart_fill site-mapping shape", () => {
-    const hints = fieldHintsFromFilled([
+    const { hints, controlSkills } = fieldHintsFromFilled([
       { type: "email", selector: "#user_email" },
       { type: "coverletter", selector: "textarea.bio" },
     ]);
@@ -22,6 +22,7 @@ describe("learningRecorder", () => {
       "#user_email": { mappedTo: "email" },
       "textarea.bio": { mappedTo: "coverLetter" },
     });
+    assert.equal(controlSkills.length, 0);
   });
 
   it("normalizeFieldHints upgrades legacy type→selector records", () => {

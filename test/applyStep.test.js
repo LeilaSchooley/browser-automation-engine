@@ -81,6 +81,70 @@ describe("applyStep", () => {
     assert.equal(stepToPlan(c, formSnap, []).type, "smart_fill");
   });
 
+  it("classifies preferences complete as continue not overlay", () => {
+    const snap = {
+      pageKind: "form",
+      fieldCount: 3,
+      passwordFieldCount: 0,
+      authForm: false,
+      hasApplyModal: true,
+      hasBlockingOverlay: true,
+      continueCount: 1,
+      continueCandidates: [{ text: "Sign up now for free", score: 80 }],
+      applyModalTitle: "Tell us about yourself",
+      pageText: "Salary expectations Desired job title Location Germany",
+      fields: [
+        { label: "Location", type: "text", filled: true },
+        { label: "Salary expectations", type: "select", filled: true },
+        { label: "Desired job title", type: "text", filled: true },
+      ],
+    };
+    const c = classifyApplyStep(snap, { filled: [{ type: "salary" }], unfilled: [] }, []);
+    assert.equal(c.step, "continue");
+  });
+
+  it("never classifies identity registration as overlay dismiss", () => {
+    const snap = {
+      pageKind: "auth",
+      fieldCount: 4,
+      passwordFieldCount: 1,
+      emailFieldCount: 1,
+      hasBlockingOverlay: true,
+      hasApplyModal: true,
+      fields: [
+        { label: "First name", type: "text", filled: false },
+        { label: "Last name", type: "text", filled: false },
+        { label: "Email", type: "email", filled: false },
+        { label: "Password", type: "password", filled: false },
+      ],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.notEqual(c.step, "overlay");
+    assert.equal(c.step, "form");
+  });
+
+  it("classifies preferences gate with empty salary as form not continue", () => {
+    const snap = {
+      pageKind: "modal",
+      fieldCount: 3,
+      passwordFieldCount: 0,
+      authForm: false,
+      hasApplyModal: true,
+      continueCount: 1,
+      continueCandidates: [{ text: "Sign up now for free", score: 80 }],
+      applyModalTitle: "Tell us about yourself",
+      pageText: "Salary expectations Desired job title Location",
+      fields: [
+        { label: "Location", type: "text", filled: true },
+        { label: "Salary expectations", type: "select", filled: false },
+        { label: "Desired job title", type: "text", filled: true },
+      ],
+    };
+    const c = classifyApplyStep(snap, { filled: [], unfilled: [{ type: "salary" }] }, []);
+    assert.equal(c.step, "form");
+    assert.match(c.reason, /preferences/i);
+  });
+
   it("never smart_fills when fieldCount is 0", () => {
     const c = classifyApplyStep({ ...listingSnap, fieldCount: 0 }, { filled: [] }, [
       { action: "click_apply", ok: true },
@@ -293,7 +357,7 @@ describe("applyStep", () => {
       continueCount: 0,
       submitCount: 0,
       pageText: "AUTO-REJECTED Your resume won't reach a human ATS software will filter you out",
-      overlayHints: ["resume-review-upsell"],
+      overlayHints: ["interstitial-dismiss"],
       dismissCandidates: [{ text: "Skip", score: 220 }],
       title: "Platform Engineer | JobLeads.com",
       url: "https://www.jobleads.com/us/job/example",
@@ -303,6 +367,59 @@ describe("applyStep", () => {
     const c = classifyApplyStep(snap, { filled: [] }, history);
     assert.equal(c.step, "overlay");
     assert.equal(stepToPlan(c, snap, history).type, "dismiss_overlay");
+  });
+
+  it("prefers upload when apply wizard is open despite upsell copy in page text", () => {
+    const snap = {
+      pageKind: "modal",
+      fieldCount: 0,
+      fileInputCount: 1,
+      entryCount: 3,
+      modalStepCount: 1,
+      hasApplyModal: true,
+      hasBlockingOverlay: false,
+      cookieBanner: true,
+      continueCount: 0,
+      submitCount: 0,
+      pageText: "increase your chances tailor your resume AUTO-REJECTED",
+      overlayHints: ["interstitial-dismiss"],
+      dismissCandidates: [{ text: "Skip", score: 220, source: "interstitial-dismiss" }],
+      applyModalTitle: "Continue application",
+      modalCandidates: [{ text: "Upload resume", score: 90, testId: "ui-uploader-label" }],
+      fileInputCandidates: [{ selector: '[data-testid="ui-uploader"]', testId: "ui-uploader", score: 120 }],
+      title: "Platform Engineer | JobLeads.com",
+      url: "https://www.jobleads.com/us/job/example",
+      bodyTextLength: 8000,
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.equal(c.step, "upload");
+    assert.equal(stepToPlan(c, snap, []).type, "upload_resume");
+  });
+
+  it("classifies second upsell with Skip to application after upload", () => {
+    const snap = {
+      pageKind: "listing",
+      fieldCount: 0,
+      fileInputCount: 0,
+      entryCount: 3,
+      modalStepCount: 0,
+      hasApplyModal: false,
+      hasBlockingOverlay: true,
+      modalCount: 1,
+      cookieBanner: false,
+      continueCount: 0,
+      submitCount: 0,
+      pageText: "Increase your chances by 78% to get invited tailor your resume in minutes",
+      overlayHints: ["interstitial-dismiss"],
+      dismissCandidates: [{ text: "Skip to application", score: 300, source: "interstitial-dismiss" }],
+      title: "Platform Engineer | JobLeads.com",
+      url: "https://www.jobleads.com/us/job/example",
+      bodyTextLength: 8000,
+    };
+    const history = [{ action: "upload_resume", ok: true, progress: true }];
+    const c = classifyApplyStep(snap, { filled: [] }, history);
+    assert.equal(c.step, "overlay");
+    assert.match(c.reason || "", /Skip to application/i);
   });
 
   it("classifies unloaded page as loading", () => {

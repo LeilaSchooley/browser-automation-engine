@@ -3,7 +3,7 @@
  * elements, returns click targets. No site-specific selectors in this layer.
  */
 import { getSettings } from "../runtime.js";
-import { pageFingerprintFromSnap } from "../heuristics.js";
+import { INTERSTITIAL_DISMISS_PATTERNS, isActiveApplyWizard, isBlockingInterstitial, pageFingerprintFromSnap } from "../heuristics.js";
 import {
   APPLY_TEXT,
   CONTINUE_TEXT,
@@ -59,6 +59,9 @@ function emptySnap(page, error = "") {
     signUpCandidates: [],
     confirmPasswordFieldCount: 0,
     newPasswordFieldCount: 0,
+    customControls: [],
+    customControlCount: 0,
+    controlCount: 0,
     hasBlockingOverlay: false,
     bodyLocked: false,
     dismissCount: 0,
@@ -283,7 +286,7 @@ async function scanDom(page, { listingMode = true } = {}) {
 
       function getApplyModalRoots() {
         const roots = queryDeep(
-          "[role='dialog'][aria-modal='true'], .ui-modal, [data-testid*='modal' i], [data-testid^='umja-'], [data-testid*='option-upload' i]",
+          "[role='dialog'][aria-modal='true'], [role='dialog'], .modal, [aria-modal='true'], [data-testid*='modal' i], [data-testid*='option-upload' i], [data-testid*='upload-resume' i]",
         ).filter((el) => {
           if (!isVisibleEl(el)) return false;
           const t = (el.innerText || el.textContent || "").slice(0, 700).toLowerCase();
@@ -291,10 +294,10 @@ async function scanDom(page, { listingMode = true } = {}) {
           if (/onetrust|cookie consent|accept all cookies/i.test(t) && !/application|resume/i.test(t)) {
             return false;
           }
-          if (/resume-builder-check|ui-modal-resume-builder|auto-?rejected|won[\u2019']?t reach a human|fix my resume in minutes/i.test(`${t} ${testId}`)) {
+          if (/resume-builder-check|auto-?rejected|won[\u2019']?t reach a human|fix my resume in minutes|expert review|not ready yet/i.test(`${t} ${testId}`)) {
             return false;
           }
-          if (/umja-|option-upload|upload-resume/i.test(testId)) return true;
+          if (/option-upload|upload-resume|have.?a.?resume/i.test(`${testId} ${t}`)) return true;
           return /application|resume|upload|sign up|get started|interested|apply|start your/i.test(t);
         });
         // Prefer outer dialog containers over inner option cards
@@ -599,6 +602,39 @@ async function scanDom(page, { listingMode = true } = {}) {
         return (el.autocomplete || "").toLowerCase() === "new-password";
       }).length;
 
+      const comboboxEls = queryDeep('[role="combobox"], [aria-haspopup="listbox"]').filter(isVisibleEl);
+      function mapComboboxLabel(label) {
+        const blob = (label || "").toLowerCase();
+        if (/salary|compensation|pay\s*expect|expected\s*pay/.test(blob)) return { mappedTo: "salary", type: "salary" };
+        if (/desired\s*job|job\s*title|target\s*role|position\s*sought/.test(blob)) return { mappedTo: "desiredtitle", type: "desiredtitle" };
+        if (/\blocation\b|where\s*are\s*you|based\s*in|city\s*region/.test(blob)) return { mappedTo: "location", type: "location" };
+        if (/\bcountry\b/.test(blob)) return { mappedTo: "country", type: "country" };
+        return { mappedTo: "custom", type: "custom" };
+      }
+      const customControls = comboboxEls.slice(0, 12).map((el) => {
+        const meta = elementMetaWithModal(el, applyModals);
+        const ariaLabel = (el.getAttribute("aria-label") || meta.aria || "").trim();
+        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        const label = ariaLabel || text.slice(0, 60) || "combobox";
+        const mapping = mapComboboxLabel(label);
+        const placeholderLike = /^(salary expectations|select|choose)$/i.test(text);
+        const filled = !!(text && !placeholderLike && text.length > 3);
+        return {
+          label,
+          mappedTo: mapping.mappedTo,
+          type: mapping.type,
+          role: el.getAttribute("role") || "combobox",
+          widgetType: "combobox",
+          text: text.slice(0, 80),
+          selector: elementSelector(el, meta),
+          triggerSelector: elementSelector(el, meta),
+          filled,
+          inModal: meta.inApplyModal || meta.inDialog,
+        };
+      });
+      const customControlCount = customControls.filter((c) => !c.filled).length;
+      const controlCountVal = fieldEls.length + comboboxEls.length;
+
       const interactive = queryDeep(interactiveSel).filter(isVisibleEl);
       const entryRaw = [];
       const cookieRaw = [];
@@ -707,8 +743,11 @@ async function scanDom(page, { listingMode = true } = {}) {
         .map((el) => ({ el, meta: elementMetaWithModal(el, applyModals) }))
         .filter(({ meta }) => meta.text || meta.aria || meta.testId || meta.href)
         .sort((a, b) => {
-          const dismissLike = (m) =>
-            /^(skip|no[, ]?thanks|not now|maybe later|dismiss|close)$/i.test(String(m.text || "").trim()) ? 6 : 0;
+          const dismissLike = (m) => {
+            const t = String(m.text || "").trim();
+            if (/skip\s*(and|&)\s*continue/i.test(t)) return 8;
+            return /^(skip|no[, ]?thanks|not now|maybe later|dismiss|close)$/i.test(t) ? 6 : 0;
+          };
           const w = (m) =>
             dismissLike(m) +
             (m.inDialog ? 4 : 0) +
@@ -719,7 +758,8 @@ async function scanDom(page, { listingMode = true } = {}) {
           return w(b.meta) - w(a.meta);
         });
       for (const { el, meta } of rankedInteractive) {
-        if (interactives.length >= 28) break;
+        const dense = entryCandidates.length === 0 && fieldEls.length === 0;
+        if (interactives.length >= (dense ? 48 : 28)) break;
         pushInteractive(el, meta, "control");
       }
 
@@ -754,7 +794,7 @@ async function scanDom(page, { listingMode = true } = {}) {
             /\b(create (an )?account|you have to be logged in|must be logged in|login required)\b/.test(signupBlob)));
       if (signupForm) pageKind = "auth";
       else if (authForm) pageKind = "auth";
-      else if (fieldEls.length >= 2) pageKind = "form";
+      else if (fieldEls.length >= 2 || comboboxEls.length >= 1) pageKind = "form";
       else if (hasApplyModal) pageKind = "modal";
       else if (entryCandidates.length > 0) pageKind = "listing";
       else if (cookieBanner) pageKind = "consent";
@@ -768,8 +808,11 @@ async function scanDom(page, { listingMode = true } = {}) {
         pageText,
         fieldCount: fieldEls.length,
         fields,
+        customControls,
+        customControlCount,
+        controlCount: controlCountVal,
         interactives,
-        hasForm: fieldEls.length > 0,
+        hasForm: fieldEls.length > 0 || comboboxEls.length > 0,
         pageKind,
         cookieBanner: cookieBanner && !hasApplyModal,
         cookieCandidates,
@@ -955,14 +998,40 @@ async function enrichResumeReviewUpsell(page, snap) {
         return out;
       }
 
-      const upsellPattern =
-        /auto-?rejected|won'?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score/i;
+      const dismissPatterns = [
+        /^skip and continue$/i,
+        /^skip & continue$/i,
+        /skip\s*(and|&)\s*continue/i,
+        /^skip to application$/i,
+        /^skip to apply$/i,
+        /^skip$/i,
+        /^no[, ]?thanks$/i,
+        /^not now$/i,
+        /^maybe later$/i,
+      ];
 
-      // Prefer JobLeads' exact modal markers, then generic dialogs.
+      function matchesDismiss(text) {
+        const t = normalizeText(text);
+        return dismissPatterns.some((p) => p.test(t));
+      }
+
+      const upsellPattern =
+        /auto-?rejected|won'?t reach a human|ats software will filter|fix my resume|quick wins|successful candidates score|increase your chances|tailor your resume|get more replies|expert review|free expert review|resume is not ready yet|not ready yet|upgrade|paywall/i;
+
+      const visibleDialogs = queryDeep("[role='dialog'], .ui-modal, [aria-modal='true']").filter(isVisibleEl);
+      const bodyHasExpertReview = visibleDialogs.some((el) =>
+        /expert review|not ready yet|free expert/i.test(normalizeText(el.innerText || el.textContent || "")),
+      );
+
+      // Active apply wizard — not a marketing upsell (unless expert review gate is on top).
+      const wizardRoot = visibleDialogs.find((el) => {
+        const t = normalizeText(el.innerText || el.textContent || "");
+        return /\bi have a resume\b|\bupload resume\b|\bcontinue with email\b|\bsign up with email\b/i.test(t);
+      });
+      if (wizardRoot && !bodyHasExpertReview) return null;
+
       const roots = [
-        ...queryDeep('[data-testid="ui-modal-resume-builder-check"]'),
-        ...queryDeep(".ui-modal--resume-builder-check"),
-        ...queryDeep("[role='dialog'], .ui-modal, [aria-modal='true']"),
+        ...queryDeep("[role='dialog'], .modal, [aria-modal='true']"),
       ];
       const seen = new Set();
 
@@ -974,73 +1043,83 @@ async function enrichResumeReviewUpsell(page, snap) {
         const klass = (root.getAttribute("class") || "").toLowerCase();
         const body = normalizeText(root.innerText || root.textContent || "");
         const isKnownModal =
-          testId.includes("resume-builder-check") || klass.includes("resume-builder-check");
+          /resume-builder|expert review|not ready yet|free expert|auto-?rejected|fix my resume/i.test(
+            `${testId} ${klass} ${body}`,
+          );
         if (!isKnownModal && !upsellPattern.test(body)) continue;
 
-        // Prefer real <button> Skip in the modal footer — never use shared testids like ds-button alone.
         const buttons = [...root.querySelectorAll("button, a, [role='button']")].filter(isVisibleEl);
-        let skipEl = buttons.find((el) => /^skip$/i.test(normalizeText(el.innerText || el.textContent)));
+        let skipEl = buttons.find((el) => matchesDismiss(el.innerText || el.textContent));
         if (!skipEl) {
           skipEl = [...root.querySelectorAll("button, a, [role='button'], span, p")]
             .filter(isVisibleEl)
-            .find((el) => /^skip$/i.test(normalizeText(el.innerText || el.textContent)));
+            .find((el) => matchesDismiss(el.innerText || el.textContent));
         }
         if (!skipEl) continue;
 
+        const label = normalizeText(skipEl.innerText || skipEl.textContent || "Skip");
         return {
           skip: {
             kind: "dismiss",
             tag: skipEl.tagName.toLowerCase(),
-            text: "Skip",
-            testId: "resume-review-upsell-skip",
+            text: label,
+            testId: "interstitial-dismiss",
             aria: (skipEl.getAttribute("aria-label") || "").slice(0, 80),
-            // No CSS selector — Skip shares data-testid="ds-button" with other CTAs.
-            // clickDismissCandidate scopes by modal + getByRole("button", { name: /^Skip$/i }).
             selector: "",
-            score: 280,
-            source: "resume-review-upsell",
+            score: label.toLowerCase().includes("skip and continue") || label.toLowerCase().includes("skip & continue")
+              ? 310
+              : label.toLowerCase().includes("skip to")
+                ? 300
+                : 280,
+            source: "interstitial-dismiss",
           },
         };
       }
       return null;
     });
 
-    // Playwright fallback: modal may exist even if evaluate missed nested text.
     let skip = hit?.skip || null;
     if (!skip) {
-      const modal = page.locator(
-        '[data-testid="ui-modal-resume-builder-check"], .ui-modal--resume-builder-check',
-      );
-      if (await modal.first().isVisible({ timeout: 400 }).catch(() => false)) {
-        const skipBtn = modal.getByRole("button", { name: /^Skip$/i }).first();
-        if (await skipBtn.isVisible({ timeout: 400 }).catch(() => false)) {
+      const modal = page.locator('[role="dialog"][aria-modal="true"], [role="dialog"], .modal, [aria-modal="true"]');
+      const modalCount = Math.min(await modal.count().catch(() => 0), 4);
+      for (let i = 0; i < modalCount; i += 1) {
+        const m = modal.nth(i);
+        if (!(await m.isVisible({ timeout: 300 }).catch(() => false))) continue;
+        for (const pattern of INTERSTITIAL_DISMISS_PATTERNS) {
+          const skipBtn = m.getByRole("button", { name: pattern }).first();
+          if (!(await skipBtn.isVisible({ timeout: 300 }).catch(() => false))) continue;
+          const label = ((await skipBtn.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim() || "Skip";
           skip = {
             kind: "dismiss",
             tag: "button",
-            text: "Skip",
-            testId: "resume-review-upsell-skip",
+            text: label,
+            testId: "interstitial-dismiss",
             aria: "",
             selector: "",
             score: 280,
-            source: "resume-review-upsell",
+            source: "interstitial-dismiss",
           };
+          break;
         }
+        if (skip) break;
       }
     }
 
     if (!skip) return;
 
     snap.hasBlockingOverlay = true;
-    snap.cookieBanner = false; // upsell blocks the page; prefer Skip over OneTrust
-    snap.overlayHints = [...new Set([...(snap.overlayHints || []), "resume-review-upsell"])];
+    snap.cookieBanner = false;
+    snap.overlayHints = [...new Set([...(snap.overlayHints || []), "interstitial-dismiss"])];
     snap.dismissCandidates = mergeCandidates([...(snap.dismissCandidates || []), skip], 20);
-    snap.hasApplyModal = false;
-    snap.modalStepCount = 0;
-    snap.applyModalTitle = "";
-    snap.modalCandidates = (snap.modalCandidates || []).filter(
-      (c) => !/resume-builder|auto-reject/i.test(`${c.testId || ""} ${c.text || ""}`),
-    );
-    if ((snap.fieldCount || 0) < 2 && (snap.entryCount || 0) > 0) snap.pageKind = "listing";
+    if (!snap.modalCandidates?.some((c) => /option-upload|upload-resume|have a resume|ui-uploader|file.?input/i.test(`${c.testId || ""} ${c.text || ""}`))) {
+      snap.hasApplyModal = false;
+      snap.modalStepCount = 0;
+      snap.applyModalTitle = "";
+      snap.modalCandidates = (snap.modalCandidates || []).filter(
+        (c) => !/resume-builder|auto-reject/i.test(`${c.testId || ""} ${c.text || ""}`),
+      );
+      if ((snap.fieldCount || 0) < 2 && (snap.entryCount || 0) > 0) snap.pageKind = "listing";
+    }
   } catch {
     /* ignore */
   }
@@ -1162,8 +1241,16 @@ export function logPageSnapshot(log, snap, layer = "inspect", classification = n
       "info",
     );
     for (const d of snap.dismissCandidates || []) {
-      log.layer(layer, `  dismiss: "${d.text || d.aria || "?"}" score=${d.score}`, "info");
+      log.layer(layer, `  dismiss: "${d.text || d.aria || "?"}" score=${d.score}${d.source ? ` src=${d.source}` : ""}`, "info");
     }
+  } else if (classification?.step === "overlay" || isBlockingInterstitial(snap)) {
+    log.layer(layer, "  interstitial likely (no hasBlockingOverlay flag)", "info");
+    for (const d of (snap.dismissCandidates || []).slice(0, 4)) {
+      log.layer(layer, `  dismiss candidate: "${d.text || d.aria || "?"}" score=${d.score || "?"}`, "info");
+    }
+  }
+  if (isActiveApplyWizard(snap) && (classification?.step === "overlay" || isBlockingInterstitial(snap))) {
+    log.layer(layer, "  note: apply wizard active — upsell classification suppressed", "info");
   }
   if (snap.continueCount) {
     for (const b of snap.continueCandidates || []) {

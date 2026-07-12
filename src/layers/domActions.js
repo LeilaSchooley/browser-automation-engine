@@ -8,7 +8,13 @@ import { loadSiteMappings } from "../siteMappings.js";
 import { getRuntime } from "../runtime.js";
 import { hostnameFromPage, resolveHostMapping } from "../host.js";
 import { inspectPage } from "./formDiscovery.js";
-import { isResumeChoiceStep, snapSuggestsFileUpload } from "../heuristics.js";
+import {
+  isExpertReviewGate,
+  isResumeChoiceStep,
+  snapSuggestsFileUpload,
+  uploadAlreadySucceeded,
+} from "../heuristics.js";
+import { dismissInterstitialDialog } from "./adDismiss.js";
 import { rankEntryCandidates, entryCandidateKey } from "./pageIntent.js";
 
 function modalHintsForHost(hostname) {
@@ -72,7 +78,7 @@ async function discoverFileSelectors(page, snap) {
 
 async function clickInModal(page, candidate, log, layer, label, { force = false } = {}) {
   const dialog = page
-    .locator("[role='dialog'][aria-modal='true'], .ui-modal, [data-testid^='umja-'], [data-testid*='modal' i]")
+    .locator("[role='dialog'][aria-modal='true'], [role='dialog'], .modal, [aria-modal='true'], [data-testid*='modal' i]")
     .first();
 
   const attempts = [];
@@ -246,7 +252,7 @@ function looksLikeCssSelector(s) {
  * element, addressed by snapshot interactives index, CSS selector, or text.
  * This is what lets the agent handle flows no step classifier anticipated.
  */
-export async function performGenericAct(page, plan, { snap = null, log = null, sessionId = null, layer = "agent" } = {}) {
+export async function performGenericAct(page, plan, { snap = null, log = null, sessionId = null, layer = "agent", context = null } = {}) {
   const action = (plan.action || "").toLowerCase();
   const item = Number.isInteger(plan.elementIndex)
     ? (snap?.interactives || []).find((i) => i.index === plan.elementIndex)
@@ -266,7 +272,11 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
     }
 
     case "fill": {
-      const value = String(plan.value ?? "").trim();
+      const { resolveIdentityFillValue } = await import("../fillProfile.js");
+      const { resolvePreferenceFillValue } = await import("../fillPreferences.js");
+      const hint = [targetStr, item?.text, item?.aria, item?.kind, item?.label].filter(Boolean).join(" ");
+      let value = String(resolveIdentityFillValue(hint, plan.value ?? "", context) || "").trim();
+      value = String(resolvePreferenceFillValue(hint, value, context) || "").trim();
       if (!value) return { ok: false };
       const locators = [];
       if (item?.selector) locators.push(() => page.locator(item.selector).first());
@@ -327,6 +337,88 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
       return { ok: !!ok };
     }
 
+    case "select": {
+      const value = String(plan.value ?? "").trim();
+      if (!value) return { ok: false };
+      const locators = [];
+      if (item?.selector) locators.push(() => page.locator(item.selector).first());
+      if (targetStr) {
+        if (looksLikeCssSelector(targetStr)) {
+          locators.push(() => page.locator(targetStr).first());
+        } else {
+          locators.push(() => page.getByLabel(targetStr).first());
+          locators.push(() => page.locator(`select:has-text("${value}")`).first());
+        }
+      }
+      for (const make of locators) {
+        try {
+          const loc = make();
+          if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) continue;
+          await loc.selectOption({ label: value }).catch(async () => {
+            await loc.selectOption({ value });
+          });
+          log?.layer(layer, `act: selected "${value.slice(0, 50)}"`, "info");
+          return { ok: true };
+        } catch {
+          /* try combobox path */
+        }
+      }
+      const comboboxLocators = [];
+      if (item?.selector) comboboxLocators.push(() => page.locator(item.selector).first());
+      if (targetStr) {
+        if (looksLikeCssSelector(targetStr)) {
+          comboboxLocators.push(() => page.locator(targetStr).first());
+        } else {
+          comboboxLocators.push(() => page.getByRole("combobox", { name: targetStr }));
+          comboboxLocators.push(() => page.getByText(targetStr, { exact: false }));
+        }
+      }
+      for (const make of comboboxLocators) {
+        try {
+          const trigger = make();
+          if (!(await trigger.isVisible({ timeout: 1500 }).catch(() => false))) continue;
+          await trigger.click({ timeout: 3000 });
+          const option = page.getByRole("option", { name: new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }).first();
+          if (await option.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await option.click({ timeout: 3000 });
+            log?.layer(layer, `act: combobox selected "${value.slice(0, 50)}"`, "info");
+            return { ok: true };
+          }
+        } catch {
+          /* next */
+        }
+      }
+      return { ok: false };
+    }
+
+    case "check":
+    case "uncheck": {
+      const wantChecked = action === "check";
+      const locators = [];
+      if (item?.selector) locators.push(() => page.locator(item.selector).first());
+      if (targetStr) {
+        if (looksLikeCssSelector(targetStr)) {
+          locators.push(() => page.locator(targetStr).first());
+        } else {
+          locators.push(() => page.getByLabel(targetStr).first());
+          locators.push(() => page.getByRole("checkbox", { name: targetStr }).first());
+        }
+      }
+      for (const make of locators) {
+        try {
+          const loc = make();
+          if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) continue;
+          if (wantChecked) await loc.check({ timeout: 4000 });
+          else await loc.uncheck({ timeout: 4000 });
+          log?.layer(layer, `act: ${action} "${(item?.text || targetStr).slice(0, 50)}"`, "info");
+          return { ok: true };
+        } catch {
+          /* next */
+        }
+      }
+      return { ok: false };
+    }
+
     default:
       return { ok: false };
   }
@@ -374,14 +466,20 @@ export async function clickDiscoveredEntry(page, log, layer = "page_prep", snap 
   return false;
 }
 
-export async function clickDiscoveredModalStep(page, log, layer = "agent", snap = null, sessionId = null) {
+export async function clickDiscoveredModalStep(page, log, layer = "agent", snap = null, sessionId = null, history = []) {
   const state = snap || (await inspectPage(page));
   const candidates = state.modalCandidates || [];
+  const uploaded = uploadAlreadySucceeded(history);
 
   const success = (candidate) => ({
     ok: true,
     selector: candidate?.selector || (candidate?.testId ? `[data-testid="${candidate.testId}"]` : ""),
   });
+
+  if ((uploaded || isExpertReviewGate(state)) && (state.modalCount > 0 || state.hasApplyModal)) {
+    log.layer(layer, "modal: resume uploaded — trying skip/dismiss before re-clicking wizard", "info");
+    if (await dismissInterstitialDialog(page, log, layer)) return { ok: true, selector: "skip-continue" };
+  }
 
   if (isResumeChoiceStep(state) || candidates.some((c) => /have a resume|option-upload/i.test(`${c.testId} ${c.text}`))) {
     log.layer(layer, "modal: resume choice step — click before upload", "info");
@@ -392,10 +490,16 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
     }
   }
 
-  if (state.fileInputCount > 0 || snapSuggestsFileUpload(state)) {
+  if ((state.fileInputCount > 0 || snapSuggestsFileUpload(state)) && !uploaded) {
     log.layer(layer, "modal: upload flow detected — use setInputFiles", "debug");
-    const uploaded = await uploadDiscoveredFile(page, log, layer, state, sessionId);
-    if (uploaded) return { ok: true, selector: "input[type=file]" };
+    const uploadedNow = await uploadDiscoveredFile(page, log, layer, state, sessionId);
+    if (uploadedNow) return { ok: true, selector: "input[type=file]" };
+  }
+
+  if (uploaded && isExpertReviewGate(state)) {
+    log.layer(layer, "modal: expert review gate after upload — dismiss only", "info");
+    if (await dismissInterstitialDialog(page, log, layer)) return { ok: true, selector: "skip-continue" };
+    return { ok: false };
   }
 
   if (!candidates.length) {
@@ -412,6 +516,7 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
 
   for (const c of candidates) {
     if (/close dialog|^x$/i.test(c.aria || c.text || "")) continue;
+    if (uploaded && /upload resume|upload cv|attach/i.test(`${c.text || ""} ${c.aria || ""}`)) continue;
     if (await clickCandidate(page, c, log, layer, "modal", { inModal: true })) return success(c);
     if (await clickCandidate(page, c, log, layer, "modal-force", { inModal: true, force: true })) return success(c);
   }

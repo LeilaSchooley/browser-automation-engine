@@ -18,7 +18,10 @@ export function initTestRuntime(overrides = {}) {
     resolveFileUpload: overrides.resolveFileUpload || (async () => ({ ok: false })),
     loadSiteMappings: overrides.loadSiteMappings || (() => ({})),
     planNextAction: overrides.planNextAction || null,
+    validateAction: overrides.validateAction || null,
+    assessEndState: overrides.assessEndState || null,
     answerUnfilledFields: overrides.answerUnfilledFields || null,
+    callLlm: overrides.callLlm || null,
     onStatus: overrides.onStatus || null,
   });
 }

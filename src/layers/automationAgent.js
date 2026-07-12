@@ -1,6 +1,6 @@
 import { getRuntime, getSettings } from "../runtime.js";
 import { isCloudflarePage, waitForCloudflareClear } from "../cloudflare.js";
-import { humanPause } from "../human.js";
+import { humanPause, humanPauseInterruptible } from "../human.js";
 import { uploadDiscoveredFile } from "./domActions.js";
 import {
   inspectPage,
@@ -13,7 +13,7 @@ import { classifyApplyStep, stepToPlan } from "./applyStep.js";
 import { adoptOpenedPage, isPageUnloaded, waitForApplySurface } from "./pageReady.js";
 import { allowsHostHop, normalizeHost } from "../host.js";
 import { gotoWithCloudflareRetry } from "../cloudflare.js";
-import { isStuck, shouldPreferUpload, uploadAlreadySucceeded, isBlockingInterstitial } from "../heuristics.js";
+import { isStuck, shouldPreferUpload, uploadAlreadySucceeded } from "../heuristics.js";
 import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
 import { looksLikeSignupForm } from "./signupActions.js";
 import { recordSiteLearning, loadSiteLearnings } from "../siteLearnings.js";
@@ -27,42 +27,26 @@ import { attemptObstacleRecovery } from "./obstacleActions.js";
 import { attemptVisionFallback } from "./visionFallback.js";
 import { attemptCaptchaSolve } from "./captchaSolve.js";
 import { executePlan } from "./executePlan.js";
+import {
+  shouldEscalateToAi,
+  shouldAiOverrideHeuristic,
+  attemptSemanticRecovery,
+  attemptFinalRecovery,
+} from "./semanticRecovery.js";
+import { tryAdoptFormIframe } from "./iframeAdopt.js";
 
 export async function decideNextAction(snap, fillResult, history, context) {
   const classification = classifyApplyStep(snap, fillResult, history, context);
   let plan = stepToPlan(classification, snap, history);
 
   const { planNextAction } = getRuntime();
-  // Heuristics are the fast path; the AI takes over not just on ambiguity but
-  // whenever the last steps made no progress — the classifier is out of moves.
-  // Also escalate when a non-apply dialog is likely blocking (upsell / interstitial)
-  // even if the classifier confidently picked cookies or listing.
-  const stalled = history.length >= 2 && history.slice(-2).every((h) => !h.progress);
-  const interstitialLikely =
-    isBlockingInterstitial(snap) ||
-    ((snap.modalCount || 0) > 0 &&
-      (snap.interactives || []).some(
-        (i) => i.inModal && /^(skip|no[, ]?thanks|not now|maybe later|dismiss)$/i.test(String(i.text || "").trim()),
-      ));
   const needsAi =
-    getSettings().agent_ai &&
-    planNextAction &&
-    (!plan ||
-      classification.confidence === "low" ||
-      classification.step === "ambiguous" ||
-      stalled ||
-      (interstitialLikely && ["consent", "listing", "ambiguous"].includes(classification.step)));
+    getSettings().agent_ai && planNextAction && shouldEscalateToAi(snap, history, classification);
 
   if (needsAi && !isPageUnloaded(snap)) {
     const aiPlan = await planNextAction(context, snap, history, fillResult, classification);
     if (aiPlan && !(aiPlan.type === "wait_user" && isPageUnloaded(snap))) {
-      if (
-        !plan ||
-        classification.step === "ambiguous" ||
-        classification.confidence === "low" ||
-        stalled ||
-        (interstitialLikely && ["consent", "listing"].includes(classification.step))
-      ) {
+      if (shouldAiOverrideHeuristic(snap, history, classification)) {
         plan = aiPlan;
       }
     }
@@ -111,6 +95,8 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
   let recoveryRounds = 0;
   const maxRecoveryRounds = 3;
+  let consecutiveNoProgress = 0;
+  const maxNoProgress = Math.max(2, settings.agent_max_no_progress || 4);
 
   const hopAllowed = allowsHostHop(agentContext);
   const maxHostHops = 6;
@@ -124,8 +110,10 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
   log.step("agent", `Dynamic agent (max ${maxSteps} steps, affordance-driven)…`);
 
+  const stopRequested = () => shouldStop?.();
+
   for (let step = 1; step <= maxSteps; step++) {
-    if (shouldStop?.()) {
+    if (stopRequested()) {
       log.layer("agent", "stop requested — exiting agent loop", "info");
       history.push({ step, action: "stopped", ok: true, fingerprint: pageFingerprint(lastSnap || {}), progress: false });
       break;
@@ -138,6 +126,22 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     let snap = await inspectPage(page);
     lastSnap = snap;
+
+    const iframeAdopt = await tryAdoptFormIframe(page, snap, log);
+    if (iframeAdopt.adopted) {
+      page = iframeAdopt.page;
+      snap = await waitForApplySurface(page, log, { timeoutMs: 15000 });
+      lastSnap = snap;
+      history.push({
+        step,
+        action: "iframe_adopt",
+        ok: true,
+        fingerprint: pageFingerprint(snap),
+        progress: true,
+        source: "iframe-adopt",
+      });
+      consecutiveNoProgress = 0;
+    }
 
     let { plan, classification } = await decideNextAction(snap, fillResult, history, agentContext);
     lastClassification = classification;
@@ -208,6 +212,24 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     if (!plan) {
+      const finalTry = await attemptFinalRecovery(page, snap, history, fillResult, agentContext, log, {
+        url,
+        sessionId,
+      });
+      if (finalTry.recovered) {
+        if (finalTry.fillResult) fillResult = finalTry.fillResult;
+        lastSnap = finalTry.snap || snap;
+        history.push({
+          step,
+          action: finalTry.plan?.type || "recovery",
+          ok: true,
+          fingerprint: pageFingerprint(lastSnap),
+          progress: true,
+          source: "end-state-recovery",
+        });
+        await humanPause(900, 1600);
+        continue;
+      }
       const stuck = isStuck(history, snap);
       log.layer(
         "agent",
@@ -412,10 +434,11 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     let progressReason = progressed ? "mechanical" : "no DOM change";
     let progressSource = "mechanical";
+    let verdict = null;
     const { validateAction } = getRuntime();
     if (typeof validateAction === "function") {
       try {
-        const verdict = await validateAction({
+        verdict = await validateAction({
           plan,
           snapBefore: snap,
           snapAfter,
@@ -444,6 +467,66 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
+    // Validator says "no real progress" — try to recover intelligently before counting toward stuck.
+    if (!progressed && ok && verdict && progressSource === "validator") {
+      const recovery = await attemptSemanticRecovery(page, snapAfter, {
+        verdict,
+        history,
+        lastPlan: plan,
+        log,
+        url,
+        sessionId,
+        fillResult,
+        context: agentContext,
+      });
+      if (recovery.ok) {
+        if (recovery.fillResult) fillResult = recovery.fillResult;
+        snapAfter = recovery.snap || (await inspectPage(page));
+        lastSnap = snapAfter;
+        progressed = true;
+        progressReason = `recovered: ${recovery.plan?.reason || verdict.reason}`;
+        progressSource = "semantic-recovery";
+        history.push({
+          step,
+          action: plan.type,
+          applyStep: classification.step,
+          ok,
+          entryKey: entryKeyForHistory || undefined,
+          fromFingerprint: fpBefore,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: false,
+          progressReason: verdict.reason,
+          progressSource: "validator",
+          source: plan.source || "step-classifier",
+          validatorRejected: true,
+        });
+        history.push({
+          step,
+          action: recovery.plan?.type || "semantic_recovery",
+          applyStep: recovery.plan?.type || "recovery",
+          ok: true,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: true,
+          progressReason: recovery.plan?.reason,
+          progressSource: "semantic-recovery",
+          source: recovery.plan?.source || "semantic-recovery",
+        });
+        if (stepLearnings && agentContext.targetHost) {
+          try {
+            const patch = {};
+            if (stepLearnings.authSelectors) patch.authSelectors = stepLearnings.authSelectors;
+            if (stepLearnings.modalSelector) patch.modalSelectors = [stepLearnings.modalSelector];
+            if (stepLearnings.controlSkills) patch.controlSkills = stepLearnings.controlSkills;
+            if (Object.keys(patch).length) recordSiteLearning(agentContext.targetHost, patch);
+          } catch {
+            /* ignore */
+          }
+        }
+        await humanPause(900, 1600);
+        continue;
+      }
+    }
+
     history.push({
       step,
       action: plan.type,
@@ -464,6 +547,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         const patch = {};
         if (stepLearnings.authSelectors) patch.authSelectors = stepLearnings.authSelectors;
         if (stepLearnings.modalSelector) patch.modalSelectors = [stepLearnings.modalSelector];
+        if (stepLearnings.controlSkills) patch.controlSkills = stepLearnings.controlSkills;
         if (Object.keys(patch).length) {
           recordSiteLearning(agentContext.targetHost, patch);
         }
@@ -489,11 +573,39 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         (filledCount >= 2 && progressed && ok));
 
     if (plan.type === "smart_fill" && readyForReview) {
-      log.layer("agent", "objective: form filled — ready for review", "info");
+      if (settings.auto_submit === true && (snapAfter.submitCount || 0) > 0) {
+        log.layer("agent", "objective: form filled — auto_submit enabled, clicking submit", "info");
+        const submitPlan = { type: "click_submit", reason: "auto_submit after fill", source: "auto-submit" };
+        const submitted = await executePlan(page, submitPlan, {
+          snap: snapAfter,
+          context: agentContext,
+          log,
+          url,
+          sessionId,
+          fillResult,
+          history,
+        });
+        history.push({
+          step,
+          action: "click_submit",
+          ok: submitted.ok,
+          fingerprint: pageFingerprint(submitted.snap || snapAfter),
+          progress: submitted.ok,
+          source: "auto-submit",
+        });
+      } else {
+        log.layer("agent", "objective: form filled — ready for human review/submit", "info");
+      }
       break;
     }
 
-    if (isStuck(history, snapAfter)) {
+    if (progressed && ok) {
+      consecutiveNoProgress = 0;
+    } else {
+      consecutiveNoProgress += 1;
+    }
+
+    if (isStuck(history, snapAfter) || consecutiveNoProgress >= maxNoProgress) {
       if (!uploadAlreadySucceeded(history) && shouldPreferUpload(snapAfter, history)) {
         log.layer("agent", "stuck — forcing upload recovery", "warn");
         const uploadOk = await uploadDiscoveredFile(page, log, "agent", snapAfter, sessionId);
@@ -507,15 +619,48 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           source: "stuck-recovery",
         });
         if (uploadOk) {
+          consecutiveNoProgress = 0;
           await humanPause(900, 1600);
           continue;
         }
       }
-      log.layer("agent", "stuck — no progress in last 3 steps", "warn");
+
+      const finalTry = await attemptFinalRecovery(page, snapAfter, history, fillResult, agentContext, log, {
+        url,
+        sessionId,
+      });
+      if (finalTry.recovered) {
+        if (finalTry.fillResult) fillResult = finalTry.fillResult;
+        lastSnap = finalTry.snap || snapAfter;
+        consecutiveNoProgress = 0;
+        history.push({
+          step,
+          action: finalTry.plan?.type || "recovery",
+          ok: true,
+          fingerprint: pageFingerprint(lastSnap),
+          progress: true,
+          source: "end-state-recovery",
+        });
+        await humanPause(900, 1600);
+        continue;
+      }
+
+      log.layer(
+        "agent",
+        consecutiveNoProgress >= maxNoProgress
+          ? `no progress for ${consecutiveNoProgress} steps — stopping for review`
+          : "stuck — no progress in last 3 steps",
+        "warn",
+      );
       break;
     }
 
-    await humanPause(900, 1600);
+    await humanPauseInterruptible(900, 1600, stopRequested);
+    if (stopRequested()) {
+      log.layer("agent", "stop requested — exiting agent loop", "info");
+      history.push({ step, action: "stopped", ok: true, fingerprint: pageFingerprint(lastSnap || {}), progress: false });
+      break;
+    }
   }
 
   const finalSnap = lastSnap || (await inspectPage(page));

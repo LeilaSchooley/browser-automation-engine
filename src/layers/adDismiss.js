@@ -3,6 +3,12 @@
  * Complements cookie consent — runs when the page is locked behind non-consent overlays.
  */
 import { humanPause } from "../human.js";
+import {
+  EXPERT_REVIEW_GATE_TEXT,
+  INTERSTITIAL_DISMISS_PATTERNS,
+  INTERSTITIAL_UPSELL_BODY,
+  SKIP_AND_CONTINUE_PATTERN,
+} from "../heuristics.js";
 
 /** Known close controls — tried before DOM scan candidates. */
 const STRUCTURAL_DISMISS_SELECTORS = [
@@ -153,12 +159,11 @@ export async function scanBlockingOverlays(page) {
         if (adNearby && score > 0) score += 40;
 
         // Generic interstitial: dialog with upsell/paywall copy + Skip / No thanks / etc.
-        const dismissLabel =
-          /^(skip|no[, ]?thanks|not now|maybe later|continue without|dismiss|no,? pass|i'?ll pass|skip (for )?now)$/i.test(
+        const dismissLabel = /^(skip|skip to (application|apply)|no[, ]?thanks|not now|maybe later|continue without( documents)?|dismiss|no,? pass|i'?ll pass|skip (for )?now)$/i.test(
             meta.text.trim(),
           );
         const upsellBody =
-          /auto-?rejected|won'?t reach a human|fix my resume|ats software will filter|quick wins|get more replies|upgrade|go premium|paywall|successful candidates score/i.test(
+          /auto-?rejected|won'?t reach a human|fix my resume|ats software will filter|quick wins|get more replies|increase your chances|tailor your resume|upgrade|go premium|paywall|successful candidates score/i.test(
             parentText,
           );
         if (parentDialog && dismissLabel && upsellBody) score += 200;
@@ -263,20 +268,34 @@ async function clickDismissCandidate(page, candidate, log, layer) {
   const attempts = [];
   const isUpsellSkip =
     candidate.source === "resume-review-upsell" ||
-    /resume-review-upsell/i.test(candidate.testId || "") ||
-    /^skip$/i.test((candidate.text || "").trim());
+    candidate.source === "interstitial-dismiss" ||
+    /resume-review-upsell|interstitial-dismiss/i.test(candidate.testId || "") ||
+    /^(skip|skip and continue|skip & continue)$/i.test((candidate.text || "").trim()) ||
+    SKIP_AND_CONTINUE_PATTERN.test(candidate.text || "");
 
   if (isUpsellSkip) {
     attempts.push(async () => {
       const modal = page.locator(
-        '[data-testid="ui-modal-resume-builder-check"], .ui-modal--resume-builder-check, [role="dialog"][aria-modal="true"]',
+        '[role="dialog"][aria-modal="true"], [role="dialog"], .modal, [aria-modal="true"]',
       );
-      const scoped = modal.getByRole("button", { name: /^Skip$/i }).first();
-      if (await scoped.isVisible({ timeout: 800 }).catch(() => false)) {
-        await scoped.click({ timeout: 6000 });
-        log?.layer(layer, 'dismiss: resume review upsell — skip "Skip"', "info");
-        return true;
+      for (const role of ["button", "link"]) {
+        const scoped = modal.getByRole(role).filter({ hasText: SKIP_AND_CONTINUE_PATTERN }).first();
+        if (await scoped.isVisible({ timeout: 800 }).catch(() => false)) {
+          await scoped.click({ timeout: 6000 });
+          log?.layer(layer, `dismiss: expert review — skip "${(await scoped.innerText().catch(() => "Skip and continue")).trim()}"`, "info");
+          return true;
+        }
       }
+      for (const pattern of INTERSTITIAL_DISMISS_PATTERNS) {
+        const scoped = modal.getByRole("button", { name: pattern }).first();
+        if (await scoped.isVisible({ timeout: 800 }).catch(() => false)) {
+          await scoped.click({ timeout: 6000 });
+          log?.layer(layer, `dismiss: interstitial — "${pattern.source}"`, "info");
+          return true;
+        }
+      }
+      // Design-system div buttons (e.g. ds-button)
+      if (await clickDismissByTextInDialog(modal.first(), log, layer)) return true;
       const anySkip = page.getByRole("button", { name: /^Skip$/i }).first();
       if (await anySkip.isVisible({ timeout: 800 }).catch(() => false)) {
         await anySkip.click({ timeout: 6000 });
@@ -399,11 +418,15 @@ async function removeStickyAdContainers(page, log, layer) {
 /**
  * Dismiss a blocking interstitial/upsell dialog by its secondary action
  * (Skip, No thanks, Not now, …) — works on any site from dialog text, not CSS ids.
+ *
+ * JobLeads-style UIs often render CTAs as <div class="ds-button"> rather than
+ * <button>, so role-based queries miss "Skip and continue" even when it's visible.
  */
 export async function dismissInterstitialDialog(page, log, layer = "page_prep") {
+  const unmatchedDialogs = [];
   try {
     const dialogs = page.locator(
-      '[role="dialog"][aria-modal="true"], [aria-modal="true"], [class*="ui-modal"]',
+      '[role="dialog"][aria-modal="true"], [aria-modal="true"], [role="dialog"], [class*="ui-modal"], [class*="modal" i]',
     );
     const n = Math.min(await dialogs.count().catch(() => 0), 6);
     const locked = await page
@@ -417,27 +440,105 @@ export async function dismissInterstitialDialog(page, log, layer = "page_prep") 
     for (let i = 0; i < n; i += 1) {
       const dialog = dialogs.nth(i);
       if (!(await dialog.isVisible({ timeout: 300 }).catch(() => false))) continue;
-      const body = ((await dialog.innerText().catch(() => "")) || "")
-        .replace(/[\u2018\u2019']/g, "'")
-        .toLowerCase();
+      const bodyRaw = ((await dialog.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      const body = bodyRaw.replace(/[\u2018\u2019']/g, "'").toLowerCase();
       const looksUpsell =
-        /auto-?rejected|won't reach a human|fix my resume|ats software will filter|quick wins|get more replies|upgrade|premium|paywall|successful candidates score/i.test(
-          body,
-        );
+        INTERSTITIAL_UPSELL_BODY.test(body) || EXPERT_REVIEW_GATE_TEXT.test(body);
       if (!looksUpsell && !locked) continue;
 
-      const patterns = [/^Skip$/i, /^No[, ]?thanks$/i, /^Not now$/i, /^Maybe later$/i, /^Dismiss$/i];
-      for (const pattern of patterns) {
-        const btn = dialog.getByRole("button", { name: pattern }).first();
-        if (!(await btn.isVisible({ timeout: 250 }).catch(() => false))) continue;
-        await btn.click({ timeout: 6000 });
+      // 1) Accessible roles first
+      for (const role of ["button", "link"]) {
+        const skipContinue = dialog.getByRole(role).filter({ hasText: SKIP_AND_CONTINUE_PATTERN }).first();
+        if (!(await skipContinue.isVisible({ timeout: 250 }).catch(() => false))) continue;
+        const label = ((await skipContinue.innerText().catch(() => "")) || "Skip and continue")
+          .replace(/\s+/g, " ")
+          .trim();
+        await skipContinue.click({ timeout: 6000 });
         await humanPause(700, 1400);
-        log?.layer(layer, `dismiss: interstitial — "${pattern.source}"`, "info");
+        log?.layer(layer, `dismiss: interstitial — clicked "${label}" (skip-and-continue)`, "info");
         return true;
       }
+
+      for (const pattern of INTERSTITIAL_DISMISS_PATTERNS) {
+        for (const role of ["button", "link"]) {
+          const btn = dialog.getByRole(role, { name: pattern }).first();
+          if (!(await btn.isVisible({ timeout: 250 }).catch(() => false))) continue;
+          const label = ((await btn.innerText().catch(() => "")) || pattern.source).replace(/\s+/g, " ").trim();
+          await btn.click({ timeout: 6000 });
+          await humanPause(700, 1400);
+          log?.layer(layer, `dismiss: interstitial — clicked "${label}" (${pattern.source})`, "info");
+          return true;
+        }
+      }
+
+      // 2) Div/span "buttons" (ds-button, cursor-pointer) — common on design systems
+      const clickedFake = await clickDismissByTextInDialog(dialog, log, layer);
+      if (clickedFake) return true;
+
+      unmatchedDialogs.push(bodyRaw.slice(0, 100));
+    }
+
+    if (unmatchedDialogs.length) {
+      log?.layer(
+        layer,
+        `dismiss: interstitial — ${unmatchedDialogs.length} upsell dialog(s), no dismiss button matched: ${unmatchedDialogs.map((t) => `"${t}"`).join("; ")}`,
+        "info",
+      );
     }
   } catch (exc) {
-    log?.layer(layer, `dismiss: interstitial failed (${exc.message})`, "debug");
+    log?.layer(layer, `dismiss: interstitial failed (${exc.message})`, "info");
+  }
+  return false;
+}
+
+/** Click Skip / No thanks even when rendered as a non-button element. */
+async function clickDismissByTextInDialog(dialog, log, layer) {
+  const patterns = [
+    SKIP_AND_CONTINUE_PATTERN,
+    /skip\s+to\s+(application|apply)/i,
+    /^skip$/i,
+    /^no[, ]?thanks$/i,
+    /^not now$/i,
+    /^maybe later$/i,
+  ];
+
+  for (const pattern of patterns) {
+    // Prefer compact clickable hosts over the whole dialog text node
+    const hosts = dialog.locator(
+      'button, a, [role="button"], [class*="button" i], [class*="btn" i], [class*="ds-button" i], [class*="cursor-pointer" i], span, div, p',
+    );
+    const n = Math.min(await hosts.count().catch(() => 0), 40);
+    let best = null;
+    let bestLen = Infinity;
+    for (let i = 0; i < n; i += 1) {
+      const el = hosts.nth(i);
+      if (!(await el.isVisible({ timeout: 100 }).catch(() => false))) continue;
+      const text = ((await el.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 80) continue;
+      if (!pattern.test(text)) continue;
+      // Exact-ish match preferred (avoid clicking a giant container that merely contains the words)
+      if (text.length < bestLen) {
+        best = el;
+        bestLen = text.length;
+      }
+    }
+    if (best) {
+      const label = ((await best.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      await best.click({ timeout: 6000 });
+      await humanPause(700, 1400);
+      log?.layer(layer, `dismiss: interstitial — clicked "${label}" (text fallback)`, "info");
+      return true;
+    }
+
+    // Last resort: getByText on the dialog
+    const byText = dialog.getByText(pattern).first();
+    if (await byText.isVisible({ timeout: 250 }).catch(() => false)) {
+      const label = ((await byText.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      await byText.click({ timeout: 6000 });
+      await humanPause(700, 1400);
+      log?.layer(layer, `dismiss: interstitial — clicked "${label}" (getByText)`, "info");
+      return true;
+    }
   }
   return false;
 }
@@ -449,7 +550,14 @@ export async function dismissResumeReviewUpsell(page, log, layer = "page_prep") 
 
 /** Dismiss blocking ad overlays. Returns true if any dismiss action succeeded. */
 export async function dismissBlockingOverlays(page, log, layer = "page_prep", snap = null) {
-  if (await dismissInterstitialDialog(page, log, layer)) return true;
+  // Chained upsells (e.g. Skip → Skip to application) — dismiss until none left.
+  let anyDismissed = false;
+  for (let chain = 0; chain < 3; chain += 1) {
+    if (!(await dismissInterstitialDialog(page, log, layer))) break;
+    anyDismissed = true;
+    await humanPause(500, 900);
+  }
+  if (anyDismissed) return true;
 
   const overlay =
     snap?.dismissCandidates != null
@@ -488,6 +596,6 @@ export async function dismissBlockingOverlays(page, log, layer = "page_prep", sn
 
   if (await removeStickyAdContainers(page, log, layer)) return true;
 
-  log?.layer(layer, "dismiss: overlay detected but no close control worked", "debug");
+  log?.layer(layer, "dismiss: overlay detected but no close control worked", "info");
   return false;
 }

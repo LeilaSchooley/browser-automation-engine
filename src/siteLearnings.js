@@ -53,6 +53,31 @@ export function mergeModalSelectors(prev = [], next = []) {
   return [...new Set(list)].slice(0, 16);
 }
 
+function skillKey(skill) {
+  return `${String(skill.mappedTo || skill.label || "").toLowerCase()}::${String(skill.label || "").toLowerCase()}`;
+}
+
+export function mergeControlSkills(prev = [], next = []) {
+  const map = new Map();
+  for (const s of [...(Array.isArray(prev) ? prev : []), ...(Array.isArray(next) ? next : [])]) {
+    if (!s || typeof s !== "object") continue;
+    const key = skillKey(s);
+    const existing = map.get(key);
+    if (existing) {
+      map.set(key, {
+        ...existing,
+        ...s,
+        successCount: (existing.successCount || 0) + (s.successCount || 1),
+        stagehandAction: s.stagehandAction || existing.stagehandAction,
+        triggerSelector: s.triggerSelector || existing.triggerSelector,
+      });
+    } else {
+      map.set(key, { ...s, successCount: s.successCount || 1 });
+    }
+  }
+  return [...map.values()].slice(0, 20);
+}
+
 function learningsPath() {
   return getSettings().site_learnings_path || "";
 }
@@ -101,6 +126,9 @@ export function recordSiteLearning(hostname, patch) {
   if (patch.avoidEntryKeys) {
     merged.avoidEntryKeys = [...new Set([...(prev.avoidEntryKeys || []), ...patch.avoidEntryKeys])];
   }
+  if (patch.controlSkills) {
+    merged.controlSkills = mergeControlSkills(prev.controlSkills, patch.controlSkills);
+  }
 
   store.hosts[key] = {
     ...merged,
@@ -129,6 +157,7 @@ export function learningsAsSiteMappings() {
         modalSteps: data.modalSelectors || [],
         avoidEntryKeys: data.avoidEntryKeys || [],
         authSelectors: data.authSelectors || {},
+        controlSkills: data.controlSkills || [],
       },
     };
   }

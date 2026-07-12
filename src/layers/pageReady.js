@@ -61,7 +61,7 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
 export async function waitAfterClickTransition(page) {
   await page
     .locator(
-      "[role='dialog'][aria-modal='true'], .ui-modal, [data-testid^='umja-'], [data-testid*='option-upload' i], input:not([type='hidden']), input[type='file']",
+      "[role='dialog'][aria-modal='true'], .modal, [aria-modal='true'], [data-testid*='option-upload' i], [data-testid*='upload-resume' i], input:not([type='hidden']), input[type='file']",
     )
     .first()
     .waitFor({ state: "visible", timeout: 6000 })

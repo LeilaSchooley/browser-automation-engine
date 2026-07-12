@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Survey gate | ApplyCo</title>
+    <style>
+      body.modal-open { overflow: hidden; }
+      .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); }
+      dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); border: 0; border-radius: 12px; padding: 24px; width: 360px; }
+      .hidden { display: none !important; }
+      #form { padding: 24px; }
+    </style>
+  </head>
+  <body class="modal-open">
+    <div class="overlay" id="overlay"></div>
+    <dialog id="survey" open aria-modal="true">
+      <h2>Quick feedback before you apply</h2>
+      <p>Help us improve — this takes 10 seconds. Subscribe to job alerts?</p>
+      <button type="button" id="subscribe">Subscribe</button>
+      <button type="button" id="no-thanks">No thanks</button>
+    </dialog>
+    <div id="form" class="hidden">
+      <h1>Apply now</h1>
+      <label>Name <input name="name" type="text" /></label>
+      <label>Email <input name="email" type="email" /></label>
+    </div>
+    <script>
+      document.getElementById("no-thanks").addEventListener("click", () => {
+        document.getElementById("survey").close();
+        document.getElementById("survey").classList.add("hidden");
+        document.getElementById("overlay").classList.add("hidden");
+        document.body.classList.remove("modal-open");
+        document.getElementById("form").classList.remove("hidden");
+      });
+    </script>
+  </body>
+</html>

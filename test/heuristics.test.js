@@ -4,12 +4,17 @@ import {
   candidateSuggestsFileUpload,
   computeApplyOutcome,
   countRecentAction,
+  isActiveApplyWizard,
+  isBlockingInterstitial,
+  isExpertReviewGate,
+  findBestDismissCandidate,
   isResumeChoiceStep,
   isStuck,
   outcomeJobStatus,
   pageFingerprintFromSnap,
   shouldPreferUpload,
   snapSuggestsFileUpload,
+  textMatchesInterstitialDismiss,
   textSuggestsFileUpload,
   uploadAlreadySucceeded,
 } from "../src/heuristics.js";
@@ -20,6 +25,47 @@ describe("heuristics", () => {
       modalCandidates: [{ text: "I have a resume", testId: "umja-option-upload-resume" }],
     };
     assert.equal(isResumeChoiceStep(snap), true);
+  });
+
+  it("detects active apply wizard and suppresses upsell interstitial", () => {
+    const snap = {
+      hasApplyModal: true,
+      fileInputCount: 1,
+      applyModalTitle: "Continue application",
+      modalCandidates: [{ text: "Upload resume", testId: "ui-uploader" }],
+      fileInputCandidates: [{ testId: "ui-uploader", selector: '[data-testid="ui-uploader"]' }],
+      pageText: "increase your chances tailor your resume",
+      overlayHints: ["interstitial-dismiss"],
+    };
+    assert.equal(isActiveApplyWizard(snap), true);
+    assert.equal(isBlockingInterstitial(snap), false);
+  });
+
+  it("matches extended interstitial dismiss labels", () => {
+    assert.equal(textMatchesInterstitialDismiss("Skip to application"), true);
+    assert.equal(textMatchesInterstitialDismiss("Skip and continue"), true);
+    assert.equal(textMatchesInterstitialDismiss("Skip & continue"), true);
+    assert.equal(textMatchesInterstitialDismiss("Continue without documents"), true);
+    assert.equal(textMatchesInterstitialDismiss("Tailor your resume"), false);
+  });
+
+  it("detects expert review gate and prefers Skip and continue dismiss", () => {
+    const snap = {
+      hasApplyModal: true,
+      fileInputCount: 1,
+      applyModalTitle: "Get a free expert review to improve your resume",
+      modalCandidates: [{ text: "Upload resume", testId: "ds-button" }],
+      dismissCandidates: [
+        { text: "Continue without documents", score: 200 },
+        { text: "Skip and continue", score: 280, source: "interstitial-dismiss" },
+      ],
+      pageText: "Your resume is not ready yet? Get a free expert review",
+    };
+    assert.equal(isExpertReviewGate(snap), true);
+    assert.equal(isActiveApplyWizard(snap), false);
+    assert.equal(isBlockingInterstitial(snap), true);
+    const best = findBestDismissCandidate(snap);
+    assert.match(best.text, /skip and continue/i);
   });
 
   it("detects file upload copy", () => {

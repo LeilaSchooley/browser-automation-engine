@@ -227,12 +227,13 @@ function runSmartFill(config, siteMappings) {
       inputType: ["textarea"],
       keywords: [
         "cover letter", "coverletter", "cover_letter",
-        "why interested", "why are you", "tell us about yourself",
+        "why interested", "why are you",
         "message to hiring", "motivation",
       ],
       antiKeywords: [
         "company", "website", "upload", "attach", "drag", "drop", "file",
         "additional information", "anything else", "other information",
+        "tell us about yourself", "salary", "desired job", "location",
       ],
       points: { keyword: 70, inputType: 30 },
     },
@@ -289,8 +290,31 @@ function runSmartFill(config, siteMappings) {
     country: {
       autocomplete: ["country", "country-name"],
       keywords: ["country"],
-      antiKeywords: ["country code", "dial"],
+      antiKeywords: ["country code", "dial", "location"],
       points: { autocomplete: 100, keyword: 60 },
+    },
+    location: {
+      autocomplete: ["address-level2"],
+      keywords: ["location", "where are you", "based in", "your location", "city region"],
+      antiKeywords: ["job location", "office location", "company location"],
+      points: { autocomplete: 80, keyword: 65 },
+    },
+    desiredtitle: {
+      inputType: ["text"],
+      keywords: [
+        "desired job title", "job title", "desired role", "position sought",
+        "role you want", "target role", "preferred role",
+      ],
+      antiKeywords: ["current job", "previous job", "company name", "employer"],
+      points: { keyword: 70, inputType: 20 },
+    },
+    salary: {
+      keywords: [
+        "salary", "salary expectations", "compensation", "pay expectation",
+        "expected salary", "desired salary", "expected pay",
+      ],
+      antiKeywords: ["job salary", "posted salary", "salary range"],
+      points: { keyword: 75 },
     },
   };
 
@@ -394,6 +418,31 @@ function runSmartFill(config, siteMappings) {
     return best;
   }
 
+  function applyPreferencesPositionHeuristic(bestMap) {
+    const blob = (document.body?.innerText || "").toLowerCase();
+    if (!/tell us about yourself|salary expectations|desired job title/i.test(blob)) return;
+    if (bestMap.salary) return;
+    const candidates = getAllFillable().filter((el) => {
+      if (hasUserValue(el) || el.disabled || el.readOnly) return false;
+      if (!isLikelyVisibleField(el) || isSiteSearchField(el)) return false;
+      const clue = buildFieldClueBlob(el).toLowerCase();
+      if (/email|password|phone|first name|last name/.test(clue)) return false;
+      return true;
+    });
+    const emptySelect = candidates.find((el) => (el.tagName || "").toLowerCase() === "select");
+    if (emptySelect) {
+      bestMap.salary = { score: 75, selector: generateStableSelector(emptySelect) };
+      return;
+    }
+    const unlabeled = candidates.find((el) => {
+      const label = ownLabelText(el) || String(el.placeholder || "").trim();
+      return !label || label === "?" || /salary|compensation/i.test(buildFieldClueBlob(el));
+    });
+    if (unlabeled) {
+      bestMap.salary = { score: 70, selector: generateStableSelector(unlabeled) };
+    }
+  }
+
   function setFieldValue(el, value) {
     if (!el || value == null) return false;
     const str = String(value);
@@ -409,6 +458,55 @@ function runSmartFill(config, siteMappings) {
         el.value = match.value;
         el.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
+      }
+      if (/salary|compensation|pay/i.test(buildFieldClueBlob(el))) {
+        const parseNums = (t) => {
+          const nums = [];
+          const s = String(t || "").toLowerCase().replace(/,/g, "");
+          let m;
+          const reK = /[$£€]?\s*(\d+(?:\.\d+)?)\s*k\b/gi;
+          while ((m = reK.exec(s))) nums.push(Math.round(parseFloat(m[1]) * 1000));
+          const reFull = /[$£€]\s*(\d{2,3})(\d{3})\b/g;
+          while ((m = reFull.exec(s))) nums.push(parseInt(m[1] + m[2], 10));
+          return nums.filter((n) => n >= 1000);
+        };
+        const targetNums = parseNums(str);
+        const mid = targetNums.length
+          ? (Math.min.apply(null, targetNums) + Math.max.apply(null, targetNums)) / 2
+          : 0;
+        if (mid) {
+          let best = null;
+          let bestDist = Infinity;
+          for (let i = 0; i < opts.length; i += 1) {
+            const o = opts[i];
+            if (!String(o.text || "").trim()) continue;
+            const nums = parseNums(o.text);
+            if (!nums.length) continue;
+            const lo = Math.min.apply(null, nums);
+            const hi = Math.max.apply(null, nums);
+            if (mid >= lo && mid <= hi) {
+              el.value = o.value;
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+              return true;
+            }
+            const dist = mid < lo ? lo - mid : mid - hi;
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = o;
+            }
+          }
+          if (best) {
+            el.value = best.value;
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          }
+        }
+        const fallback = opts.find((o, i) => i > 0 && String(o.text || "").trim());
+        if (fallback) {
+          el.value = fallback.value;
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
       }
       return false;
     }
@@ -440,6 +538,12 @@ function runSmartFill(config, siteMappings) {
     linkedinUrl: "linkedinurl",
     websiteUrl: "website",
     resumePath: "resume",
+    location: "location",
+    desiredJobTitle: "desiredtitle",
+    desiredTitle: "desiredtitle",
+    salary: "salary",
+    salaryExpectation: "salary",
+    salaryExpectations: "salary",
   };
 
   const TYPE_VALUE = {
@@ -459,12 +563,16 @@ function runSmartFill(config, siteMappings) {
     state: config.state,
     zip: config.postalCode,
     country: config.country,
+    location: config.location,
+    desiredtitle: config.desiredJobTitle || config.desiredTitle,
+    salary: config.salary || config.salaryExpectation || config.salaryExpectations,
   };
 
   const MIN_SCORE = {
     email: 40, firstname: 50, lastname: 50, fullname: 50, tel: 50,
     coverletter: 50, additionalinfo: 55, linkedinurl: 60, website: 50, resume: 70, description: 40,
     address1: 50, address2: 60, city: 50, state: 50, zip: 50, country: 50,
+    location: 55, desiredtitle: 55, salary: 55,
   };
 
   const DEFERRED_TYPES = ["coverletter", "additionalinfo"];
@@ -532,6 +640,7 @@ function runSmartFill(config, siteMappings) {
   });
 
   const domMap = scanDomFields();
+  applyPreferencesPositionHeuristic(domMap);
   for (const [fieldType, best] of Object.entries(domMap)) {
     if (fieldType === "additionalinfo" && !config.fillAdditionalInfo) continue;
     const value = String(TYPE_VALUE[fieldType] || "").trim();

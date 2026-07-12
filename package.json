@@ -1,26 +1,60 @@
 {
-  "name": "browser-automation-engine",
-  "version": "0.1.0",
+  "name": "@leilaschooley/browser-automation-engine",
+  "version": "0.1.1",
   "description": "Shared Playwright automation engine — dynamic click discovery, smart fill, and agent loop",
   "type": "module",
   "main": "src/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    }
   },
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch --preserveWatchOutput",
+    "typecheck": "tsc -b --pretty",
+    "prepublishOnly": "pnpm run build && pnpm test",
     "test": "node --test test/*.test.js",
     "test:unit": "node --test test/applyStep.test.js test/heuristics.test.js test/readyMessage.test.js",
     "test:fixtures": "node --test test/formDiscovery.test.js test/agentFlow.test.js test/smartFill.test.js test/agentActions.test.js test/pipeline.test.js test/siteMappings.test.js"
   },
-  "keywords": ["playwright", "automation", "form-fill"],
-  "license": "ISC",
+  "keywords": [
+    "playwright",
+    "automation",
+    "form-fill",
+    "agent"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeilaSchooley/browser-automation-engine.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "peerDependencies": {
+    "@browserbasehq/stagehand": "^3.6.0",
     "playwright": ">=1.50.0"
+  },
+  "peerDependenciesMeta": {
+    "@browserbasehq/stagehand": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
-    "playwright": "^1.61.0"
+    "playwright": "^1.61.0",
+    "typescript": "^5.8.3"
   }
 }

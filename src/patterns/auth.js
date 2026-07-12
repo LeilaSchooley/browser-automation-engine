@@ -87,6 +87,15 @@ export const SIGNUP_SUBMIT_PATTERNS = [
   /^register$/i,
   /get started/i,
   /^join$/i,
+  /sign up now/i,
+];
+
+/** Multi-step registration wizards (JobLeads-style) — Continue after identity/password. */
+export const REGISTRATION_CONTINUE_PATTERNS = [
+  /^continue\s*>?$/i,
+  /^continue$/i,
+  /^next$/i,
+  /^proceed$/i,
 ];
 
 /**

@@ -32,6 +32,23 @@ import { loadStorageState, saveStorageState, applyStorageStateToContext } from "
 import { looksLikeEmailVerifyWall, pollVerifyLink, attemptEmailVerify } from "./inboxVerify.js";
 import { gotoWithCloudflareRetry, isCloudflarePage, waitForCloudflareClear } from "./cloudflare.js";
 import { humanPause, humanGoto } from "./human.js";
+import { planNextAction } from "./layers/agentPlan.js";
+import {
+  validateActionOutcome,
+  assessAgentEndState,
+  computeMechanicalSignals,
+  isStrongMechanicalProgress,
+  shouldRunValidator,
+  parseValidatorResponse,
+  parseEndStateResponse,
+} from "./layers/actionValidator.js";
+import { tryAdoptFormIframe } from "./layers/iframeAdopt.js";
+import {
+  parseSalaryFromText,
+  parseSalaryNumbers,
+  pickClosestSalaryOption,
+  resolveSalaryExpectation,
+} from "./salaryExpectation.js";
 
 /**
  * @typedef {Object} EngineOptions
@@ -39,8 +56,10 @@ import { humanPause, humanGoto } from "./human.js";
  * @property {() => Record<string, unknown>} [loadSiteMappings]
  * @property {(context: unknown, opts: { sessionId?: string }) => Promise<Record<string, unknown>>} [buildFillConfig]
  * @property {(sessionId?: string, log?: unknown) => Promise<{ ok: boolean, path?: string, generated?: boolean }>} [resolveFileUpload]
+ * @property {(prompt: string | unknown, opts?: { imageBase64?: string }) => Promise<string | null>} [callLlm]
  * @property {(context: unknown, snap: unknown, history: unknown[], fillResult: unknown, classification: unknown) => Promise<{ type: string, reason?: string, target?: string, source?: string } | null>} [planNextAction]
- * @property {(args: { plan: unknown, snapBefore: unknown, snapAfter: unknown, fillResult: unknown, mechanicalProgress: boolean, actorOk: boolean, history: unknown[], context: unknown, classification?: unknown, filledBefore?: number }) => Promise<{ progressed: boolean, reason?: string, source?: string }>} [validateAction]
+ * @property {(args: { plan: unknown, snapBefore: unknown, snapAfter: unknown, fillResult: unknown, mechanicalProgress: boolean, actorOk: boolean, history: unknown[], context: unknown, classification?: unknown, filledBefore?: number }) => Promise<{ progressed: boolean, reason?: string, recovery?: string, source?: string }>} [validateAction]
+ * @property {(args: { snap: unknown, fillResult: unknown, history: unknown[], context: unknown }) => Promise<{ action: string, target?: string, reason?: string }>} [assessEndState]
  * @property {(context: unknown, opts: { unfilled: unknown[], sessionId?: string }) => Promise<Record<string, string>>} [answerUnfilledFields]
  * @property {(sessionId: string, payload: Record<string, unknown>) => void} [onStatus]
  */
@@ -60,6 +79,8 @@ export function createEngine(options = {}) {
     get settings() {
       return getSettings();
     },
+    /** Apply-oriented pipeline alias — apps set listing_mode/auto_submit via createEngine settings. */
+    apply: (page, opts = {}) => runPipeline(page, { entryLabel: "Apply", ...opts }),
     runPipeline,
     runAutomationAgent,
     runApplyAgent,
@@ -152,6 +173,19 @@ export {
   waitForCloudflareClear,
   humanPause,
   humanGoto,
+  planNextAction,
+  validateActionOutcome,
+  assessAgentEndState,
+  computeMechanicalSignals,
+  isStrongMechanicalProgress,
+  shouldRunValidator,
+  parseValidatorResponse,
+  parseEndStateResponse,
+  tryAdoptFormIframe,
+  parseSalaryFromText,
+  parseSalaryNumbers,
+  pickClosestSalaryOption,
+  resolveSalaryExpectation,
 };
 
 /** @deprecated use `patterns` */

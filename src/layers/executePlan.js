@@ -16,15 +16,25 @@ import {
 } from "./domActions.js";
 import { attemptAuthLogin, looksLikeAuthForm } from "./authActions.js";
 import { attemptAuthSignup, clickSignupEntry, looksLikeSignupForm } from "./signupActions.js";
+import { hasPreferencesGateFields } from "../fillPreferences.js";
+import { controlCount } from "../controlState.js";
+import { attemptImmediateControlRecovery } from "./controlRecovery.js";
+import { clickPreferencesSignupCta } from "../fillCustomControls.js";
 import { attemptObstacleRecovery } from "./obstacleActions.js";
 import { dismissBlockingOverlays, dismissInterstitialDialog } from "./adDismiss.js";
 import { attemptCaptchaSolve } from "./captchaSolve.js";
 import { recoverFromWrongNavigation, getTriedEntryKeys, clickRankedEntry } from "./navigationRecovery.js";
+import { shouldBlockAdvance } from "../gateComplete.js";
+import { shouldNeverDismiss } from "../workflowGates.js";
 import { isPageUnloaded, waitForApplySurface, waitAfterClickTransition } from "./pageReady.js";
 
 function unwrapActionResult(result) {
   if (typeof result === "boolean") return { ok: result };
   return result && typeof result === "object" ? result : { ok: false };
+}
+
+function preferencesFillHasSalary(fillResult) {
+  return (fillResult?.filled || []).some((f) => f.type === "salary" || f.mappedTo === "salary");
 }
 
 /**
@@ -65,12 +75,18 @@ export async function executePlan(page, plan, {
       break;
     }
     case "dismiss_overlay": {
+      if (shouldNeverDismiss(snap)) {
+        log?.layer("agent", "dismiss_overlay blocked — workflow gate modal (fill, don't close)", "warn");
+        ok = false;
+        break;
+      }
       ok = await dismissBlockingOverlays(page, log, "agent", snap);
       if (!ok) {
         const round = await runPagePrepRound(page, url, log, { mode: "dismiss" });
         prepActions.push(...(round.actions || []));
         ok = round.actions.includes("dismiss");
       }
+      if (!ok) log?.layer("agent", "dismiss_overlay: no dismiss control matched on this pass", "info");
       if (ok) await humanPause(800, 1500);
       break;
     }
@@ -89,7 +105,7 @@ export async function executePlan(page, plan, {
       break;
     }
     case "click_modal": {
-      const modalResult = await clickDiscoveredModalStep(page, log, "agent", snap, sessionId);
+      const modalResult = await clickDiscoveredModalStep(page, log, "agent", snap, sessionId, history);
       ok = modalResult.ok;
       if (!ok && plan.targetCandidate) {
         ok = await clickCandidate(page, plan.targetCandidate, log, "agent", "modal-target", { inModal: true });
@@ -113,22 +129,46 @@ export async function executePlan(page, plan, {
       break;
     }
     case "smart_fill": {
-      if ((snap.fieldCount || 0) === 0) {
+      const controls = controlCount(snap);
+      if (controls === 0 && (snap.customControlCount || 0) === 0) {
         log?.layer("agent", "smart_fill skipped — 0 fields on page", "warn");
         ok = false;
       } else if (looksLikeAuthForm(snap) || looksLikeSignupForm(snap)) {
-        log?.layer("agent", "smart_fill redirected — auth wall detected", "warn");
-        const authResult = unwrapActionResult(
-          looksLikeSignupForm(snap)
-            ? await attemptAuthSignup(page, snap, context, log)
-            : await attemptAuthLogin(page, snap, context, log),
-        );
-        ok = authResult.ok;
+        log?.layer("agent", "smart_fill redirected — auth/signup gate", "warn");
+        const authResult = unwrapActionResult(await attemptAuthSignup(page, snap, context, log));
+        ok = authResult.ok || authResult.filled === true;
         learnings = authResult.learnings;
         if (ok) await waitAfterClickTransition(page);
       } else {
-        nextFill = await runSmartFill(page, context, log, { sessionId });
+        nextFill = await runSmartFill(page, context, log, { sessionId, snap });
         ok = (nextFill.filled?.length || 0) > 0 || (nextFill.unfilled?.length || 0) > 0;
+
+        if (
+          (nextFill.filled?.length || 0) === 0 ||
+          (hasPreferencesGateFields(snap) && !preferencesFillHasSalary(nextFill))
+        ) {
+          const recovery = await attemptImmediateControlRecovery(page, snap, context, nextFill, {
+            log,
+            sessionId,
+            history,
+          });
+          if (recovery.ok) {
+            ok = true;
+            nextFill = recovery.fillResult || nextFill;
+            if (recovery.action) {
+              learnings = { controlSkills: [{ stagehandAction: recovery.action, source: "stagehand", mappedTo: "salary", label: "salary expectations", successCount: 1 }] };
+            }
+          }
+        }
+
+        if (
+          hasPreferencesGateFields(snap) &&
+          preferencesFillHasSalary(nextFill) &&
+          (await clickPreferencesSignupCta(page, log, "agent"))
+        ) {
+          await waitAfterClickTransition(page);
+        }
+
         if (!ok || (nextFill.filled?.length || 0) === 0) {
           const obstacle = await attemptObstacleRecovery(page, snap, log);
           if (obstacle.ok) ok = true;
@@ -137,6 +177,12 @@ export async function executePlan(page, plan, {
       break;
     }
     case "click_continue": {
+      const block = await shouldBlockAdvance(snap, fillResult, page);
+      if (block.block) {
+        log?.layer("agent", `click_continue blocked — ${block.reason}`, "warn");
+        ok = false;
+        break;
+      }
       ok = await clickDiscoveredContinue(page, log, "agent", snap);
       if (!ok && plan.target) {
         ok = await clickTargetCandidate(page, plan.target, log, "agent");
@@ -200,7 +246,7 @@ export async function executePlan(page, plan, {
       break;
     }
     case "act": {
-      const result = await performGenericAct(page, plan, { snap, log, sessionId });
+      const result = await performGenericAct(page, plan, { snap, log, sessionId, context });
       ok = result.ok;
       if (ok && (plan.action === "click" || plan.action === "goto")) {
         await waitAfterClickTransition(page);
@@ -208,6 +254,12 @@ export async function executePlan(page, plan, {
       break;
     }
     case "click_signup": {
+      const block = await shouldBlockAdvance(snap, fillResult, page);
+      if (block.block) {
+        log?.layer("agent", `click_signup blocked — ${block.reason}`, "warn");
+        ok = false;
+        break;
+      }
       ok = await clickSignupEntry(page, snap, log);
       if (ok) {
         await waitAfterClickTransition(page);

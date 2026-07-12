@@ -4,6 +4,10 @@ import { fileURLToPath } from "url";
 import { getRuntime, getSettings } from "./runtime.js";
 import { loadSiteMappings } from "./siteMappings.js";
 import { humanPause, humanType } from "./human.js";
+import { fillCustomControls } from "./fillCustomControls.js";
+import { recordSiteLearning, mergeControlSkills } from "./siteLearnings.js";
+import { normalizeHost } from "./host.js";
+import { hasPreferencesGateFields } from "./fillPreferences.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMART_FILL_JS = fs.readFileSync(path.join(__dirname, "smart_fill.js"), "utf8");
@@ -141,10 +145,46 @@ async function processTextEntry(page, entry, config, seen, allFilled, log) {
   }
 }
 
+async function applyCustomControlsResult(page, context, log, { snap, seen, allFilled, lastUnfilled, hostname }) {
+  const customResult = await fillCustomControls(page, context, {
+    snap,
+    learnedSkills: context?.siteLearnings?.controlSkills || [],
+    log,
+  });
+
+  log?.layer(
+    "custom_controls",
+    `filled=${customResult.filled.length} unfilled=${customResult.unfilled.length}`,
+    customResult.filled.length ? "info" : "debug",
+  );
+
+  for (const entry of customResult.filled) {
+    const key = entry.selector || `${entry.mappedTo}:${entry.label}`;
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      allFilled.push(entry);
+    }
+  }
+
+  if (customResult.unfilled.length) {
+    const existingTypes = new Set((lastUnfilled || []).map((u) => u.type));
+    for (const u of customResult.unfilled) {
+      if (!existingTypes.has(u.type)) lastUnfilled.push(u);
+    }
+  }
+
+  const host = normalizeHost(hostname || context?.targetHost || snap?.hostname || "");
+  if (host && customResult.skills?.length) {
+    recordSiteLearning(host, { controlSkills: mergeControlSkills([], customResult.skills) });
+  }
+
+  return customResult;
+}
+
 /**
  * Smart fill layer — heuristic DOM scoring + site mappings + optional AI fallback.
  */
-export async function runSmartFill(page, context, log = null, { sessionId = null } = {}) {
+export async function runSmartFill(page, context, log = null, { sessionId = null, snap = null } = {}) {
   const config = await getRuntime().buildFillConfig(context, { sessionId });
   const siteMappings = loadSiteMappings();
   const seen = new Set();
@@ -156,6 +196,20 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     "smart_fill",
     `config: name=${config.fullName || config.startupName || "?"} email=${config.email ? "✓" : "✗"} file=${config.resumePath || config.filePath ? "✓" : "✗"}`,
   );
+
+  const preferCustomFirst = snap && ((snap.customControlCount || 0) > 0 || hasPreferencesGateFields(snap));
+  let customRanEarly = false;
+  if (preferCustomFirst) {
+    log?.layer("smart_fill", "custom controls first (modal comboboxes)", "info");
+    await applyCustomControlsResult(page, context, log, {
+      snap,
+      seen,
+      allFilled,
+      lastUnfilled,
+      hostname: snap?.hostname,
+    });
+    customRanEarly = true;
+  }
 
   const passes = Math.max(1, getSettings().smart_fill_passes);
   for (let passNum = 0; passNum < passes; passNum++) {
@@ -244,6 +298,16 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     if (passNum < passes - 1) {
       await humanPause(400, 600);
     }
+  }
+
+  if (!customRanEarly || allFilled.length === 0) {
+    await applyCustomControlsResult(page, context, log, {
+      snap,
+      seen,
+      allFilled,
+      lastUnfilled,
+      hostname: lastResult.hostname,
+    });
   }
 
   let aiAnswers = {};

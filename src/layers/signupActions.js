@@ -4,8 +4,10 @@
  */
 import {
   attachAccountToContext,
+  canProvisionAccounts,
   markAccountVerified,
   resolveAccountForHost,
+  saveAccountForHost,
 } from "../accountStore.js";
 import { getAuthCredentials, LOGIN_WALL_TEXT, looksLikeAuthFailure, looksLikeAuthForm } from "./authActions.js";
 import {
@@ -13,19 +15,35 @@ import {
   SIGNUP_FORM_TEXT,
   OAUTH_PROVIDER_TEXT,
   SIGNUP_SUBMIT_PATTERNS,
+  REGISTRATION_CONTINUE_PATTERNS,
 } from "../patterns/index.js";
 import { clickRoleMatching, clickSubmitByPatterns } from "./fillPrimitives.js";
 import { fillSignupFormFromDom } from "./signupFieldFill.js";
 import { authSelectorsFromSignupFields } from "../learningRecorder.js";
 import { inspectPage } from "./formDiscovery.js";
 import { humanPause } from "../human.js";
+import { getApplicantProfile, hasIdentityRegistrationFields } from "../fillProfile.js";
+import { hasPreferencesGateFields } from "../fillPreferences.js";
+import { shouldBlockAdvance } from "../gateComplete.js";
 
-async function confirmSignupSucceeded(page, hostname, log) {
+async function confirmSignupSucceeded(page, hostname, log, before = null) {
   await humanPause(1200, 2000);
   const after = await inspectPage(page);
   if (looksLikeAuthFailure(after)) {
     log?.layer("signup", "signup rejected by site", "warn");
     return false;
+  }
+  if (hasPreferencesGateFields(after)) {
+    markAccountVerified(hostname);
+    return true;
+  }
+  if (before && hasIdentityRegistrationFields(before) && !hasIdentityRegistrationFields(after)) {
+    markAccountVerified(hostname);
+    return true;
+  }
+  if (before && (after.applyModalTitle || "") !== (before.applyModalTitle || "")) {
+    markAccountVerified(hostname);
+    return true;
   }
   if (looksLikeAuthForm(after) && !looksLikeSignupForm(after)) {
     log?.layer("signup", "still on login wall after signup submit", "warn");
@@ -35,9 +53,31 @@ async function confirmSignupSucceeded(page, hostname, log) {
   return true;
 }
 
+/** Click Continue / Next on multi-step registration (generic + testid). */
+export async function clickRegistrationContinue(page, log, layer = "signup") {
+  try {
+    const byTestId = page.locator('[data-testid="registration-form-confirm"]');
+    if ((await byTestId.count()) > 0 && (await byTestId.first().isVisible().catch(() => false))) {
+      await byTestId.first().click({ timeout: 8000 });
+      log?.layer(layer, "clicked registration Continue (testid)", "info");
+      return true;
+    }
+  } catch {
+    /* next */
+  }
+  if (await clickRoleMatching(page, REGISTRATION_CONTINUE_PATTERNS, { log, layer, roles: ["button"] })) {
+    return true;
+  }
+  if (await clickSubmitByPatterns(page, REGISTRATION_CONTINUE_PATTERNS, { log, layer, preferLast: false })) {
+    return true;
+  }
+  return false;
+}
+
 export function looksLikeSignupForm(snap) {
   if (!snap) return false;
   if (snap.signupForm) return true;
+  if (hasIdentityRegistrationFields(snap)) return true;
 
   const passwords = snap.passwordFieldCount || 0;
   const emails = snap.emailFieldCount || 0;
@@ -60,7 +100,9 @@ export function looksLikeSignupForm(snap) {
 }
 
 export function isRegistrationSurface(snap) {
-  if (!snap || !looksLikeSignupForm(snap)) return false;
+  if (!snap) return false;
+  if (hasIdentityRegistrationFields(snap)) return true;
+  if (!looksLikeSignupForm(snap)) return false;
   return (
     (snap.confirmPasswordFieldCount || 0) > 0 ||
     (snap.newPasswordFieldCount || 0) > 0 ||
@@ -148,7 +190,10 @@ async function checkTermsIfNeeded(page, log) {
  */
 export async function attemptAuthSignup(page, snap, context, log) {
   const hostname = snap?.hostname || new URL(page.url()).hostname;
-  const account = resolveAccountForHost(context, hostname);
+  let account = resolveAccountForHost(context, hostname, { provision: false });
+  if (!account) {
+    account = resolveAccountForHost(context, hostname, { provision: canProvisionAccounts(context) });
+  }
   if (!account) {
     log?.layer("signup", "could not provision account for host", "warn");
     return { ok: false };
@@ -156,13 +201,25 @@ export async function attemptAuthSignup(page, snap, context, log) {
 
   attachAccountToContext(context, account);
   const { email, username, password } = getAuthCredentials(context);
-  const fullName = context?.profile?.founderName || context?.profile?.startupName || "Founder";
+  const applicant = getApplicantProfile(context);
+  const fullName = applicant.fullName || "Applicant";
 
-  log?.layer("signup", `creating account ${username || email} on ${hostname}`, "info");
+  log?.layer(
+    "signup",
+    `${account.isNew ? "creating" : "reusing"} account ${username || email} on ${hostname} as ${fullName}`,
+    "info",
+  );
 
   const fillResult = await fillSignupFormFromDom(
     page,
-    { email, username, password, fullName },
+    {
+      email: applicant.email || email,
+      username,
+      password,
+      fullName,
+      firstName: applicant.firstName,
+      lastName: applicant.lastName,
+    },
     { log },
   );
 
@@ -181,18 +238,43 @@ export async function attemptAuthSignup(page, snap, context, log) {
     return { ok: false };
   }
 
+  if (fillResult.password && fillResult.password !== password) {
+    context.auth = { ...(context.auth || {}), password: fillResult.password };
+    saveAccountForHost(hostname, { ...account, password: fillResult.password });
+    log?.layer("signup", "stored password that satisfies site policy", "debug");
+  }
+
+  if (fillResult.passwordPolicyOk === false) {
+    log?.layer("signup", "password still fails site policy — not submitting", "warn");
+    return { ok: false };
+  }
+
+  const freshSnap = await inspectPage(page);
+  const advance = await shouldBlockAdvance(freshSnap, null, page);
+  if (advance.block) {
+    log?.layer("signup", `blocked submit — ${advance.reason}`, "warn");
+    return { ok: false };
+  }
+
   await checkTermsIfNeeded(page, log);
 
   const authSelectors = authSelectorsFromSignupFields(fillResult.fields);
   const learnings =
     Object.keys(authSelectors).length > 0 ? { authSelectors } : undefined;
 
+  const beforeSnap = snap;
+
+  if (await clickRegistrationContinue(page, log, "signup")) {
+    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ok, learnings: ok ? learnings : undefined };
+  }
+
   if (await clickRoleMatching(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup", roles: ["button"] })) {
-    const ok = await confirmSignupSucceeded(page, hostname, log);
+    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
     return { ok, learnings: ok ? learnings : undefined };
   }
   if (await clickSubmitByPatterns(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup", preferLast: true })) {
-    const ok = await confirmSignupSucceeded(page, hostname, log);
+    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
     return { ok, learnings: ok ? learnings : undefined };
   }
 
@@ -202,20 +284,20 @@ export async function attemptAuthSignup(page, snap, context, log) {
     if (count >= 2) {
       await submits.nth(count - 1).click({ timeout: 8000 });
       log?.layer("signup", "clicked last submit (register pair)", "info");
-      const ok = await confirmSignupSucceeded(page, hostname, log);
+      const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
       return { ok, learnings: ok ? learnings : undefined };
     }
     if (count === 1) {
       await submits.first().click({ timeout: 8000 });
-      const ok = await confirmSignupSucceeded(page, hostname, log);
+      const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
       return { ok, learnings: ok ? learnings : undefined };
     }
   } catch {
     /* ignore */
   }
 
-  log?.layer("signup", "could not find signup button", "warn");
-  return { ok: false };
+  log?.layer("signup", "could not find signup/continue button", "warn");
+  return { ok: false, filled: fillResult.complete };
 }
 
 export function scoreSignUpCandidate(meta) {

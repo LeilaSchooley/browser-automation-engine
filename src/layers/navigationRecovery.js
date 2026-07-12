@@ -29,6 +29,7 @@ export function enrichContextWithLearnings(context, hostname) {
     ...context,
     targetHost: context.targetHost || host,
     siteLearnings: learned,
+    controlSkills: learned.controlSkills || [],
     avoidEntryKeys: [
       ...(context.avoidEntryKeys || []),
       ...(learned.avoidEntryKeys || []),

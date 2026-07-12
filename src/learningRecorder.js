@@ -7,6 +7,7 @@ import {
   mergeAuthSelectors,
   mergeFieldHints,
   mergeModalSelectors,
+  mergeControlSkills,
   normalizeFieldHints,
 } from "./siteLearnings.js";
 
@@ -37,14 +38,27 @@ const SIGNUP_KIND_TO_AUTH = {
  */
 export function fieldHintsFromFilled(filled = []) {
   const hints = {};
+  const controlSkills = [];
   for (const entry of filled) {
     const selector = entry?.selector;
-    const type = String(entry?.type || "").toLowerCase();
-    if (!selector || !type) continue;
-    const mappedTo = FILL_TYPE_TO_CONFIG_KEY[type] || type;
-    hints[selector] = { mappedTo };
+    const type = String(entry?.type || entry?.mappedTo || "").toLowerCase();
+    if (!type) continue;
+    if (selector) {
+      const mappedTo = FILL_TYPE_TO_CONFIG_KEY[type] || type;
+      hints[selector] = { mappedTo };
+    }
+    if (entry.source === "custom_controls" || entry.widgetType === "combobox") {
+      controlSkills.push({
+        label: entry.label || type,
+        mappedTo: entry.mappedTo || type,
+        widgetType: entry.widgetType || "combobox",
+        triggerSelector: selector || "",
+        optionStrategy: type === "salary" ? "closest_salary_band" : "text_match",
+        successCount: 1,
+      });
+    }
   }
-  return hints;
+  return { hints, controlSkills };
 }
 
 export { normalizeFieldHints, mergeFieldHints, mergeAuthSelectors, mergeModalSelectors };
@@ -150,9 +164,12 @@ export function synthesizeLearningsFromRun({
     patch.entryHref = snap.url;
   }
 
-  const fieldHints = fieldHintsFromFilled(fillResult.filled || []);
+  const { hints: fieldHints, controlSkills } = fieldHintsFromFilled(fillResult.filled || []);
   if (Object.keys(fieldHints).length) {
     patch.fieldHints = fieldHints;
+  }
+  if (controlSkills.length) {
+    patch.controlSkills = mergeControlSkills([], controlSkills);
   }
 
   const fromHistory = learningsFromHistory(history);

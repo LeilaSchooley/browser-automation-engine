@@ -19,8 +19,16 @@ import {
   looksLikeSignupForm,
   isRegistrationSurface,
 } from "./signupActions.js";
+import { hasIdentityRegistrationFields } from "../fillProfile.js";
+import { hasPreferencesGateFields, preferencesGateIncomplete } from "../fillPreferences.js";
+import { hasEmptyRequiredControls, controlCount } from "../controlState.js";
 import { looksLikeEmailVerifyWall } from "../inboxVerify.js";
+import { shouldNeverDismiss } from "../workflowGates.js";
+import { isWorkflowGateModal } from "../workflowGates.js";
 import {
+  candidateSuggestsFileUpload,
+  findBestDismissCandidate,
+  isExpertReviewGate,
   isResumeChoiceStep,
   isResumeReviewUpsell,
   pageFingerprintFromSnap,
@@ -144,29 +152,57 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (snap.hasBlockingOverlay && (!snap.hasApplyModal || isResumeReviewUpsell(snap))) {
-    const top = snap.dismissCandidates?.[0];
+    if (!shouldNeverDismiss(snap)) {
+      const top = snap.dismissCandidates?.[0];
+      return {
+        step: "overlay",
+        confidence: "high",
+        reason: top
+          ? `blocking overlay — dismiss "${top.text || top.aria || "close"}"`
+          : isResumeReviewUpsell(snap)
+            ? "resume review upsell blocking apply"
+            : "blocking ad/overlay detected",
+        target: top || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+  }
+
+  if (hasPreferencesGateFields(snap)) {
+    if (preferencesGateIncomplete(snap, fillResult)) {
+      return {
+        step: "form",
+        confidence: filled === 0 ? "low" : "high",
+        reason: "preferences gate — fill location, desired title, and salary",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    const top = snap.continueCandidates?.[0] || snap.signUpCandidates?.[0] || snap.modalCandidates?.[0];
     return {
-      step: "overlay",
+      step: "continue",
       confidence: "high",
-      reason: top
-        ? `blocking overlay — dismiss "${top.text || top.aria || "close"}"`
-        : isResumeReviewUpsell(snap)
-          ? "resume review upsell blocking apply"
-          : "blocking ad/overlay detected",
+      reason: `preferences complete — ${top?.text || "continue / sign up"}`,
       target: top || null,
       affordances,
       fingerprint: fp,
     };
   }
 
-  if (isResumeReviewUpsell(snap)) {
-    const top = snap.dismissCandidates?.[0];
+  if (
+    (isResumeReviewUpsell(snap) || (uploadAlreadySucceeded(history) && isExpertReviewGate(snap))) &&
+    !hasPreferencesGateFields(snap) &&
+    !isWorkflowGateModal(snap)
+  ) {
+    const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
     return {
       step: "overlay",
       confidence: "high",
       reason: top
-        ? `resume review upsell — skip "${top.text || "Skip"}"`
-        : "resume review upsell — dismiss to continue apply",
+        ? `resume review gate — skip "${top.text || top._text || "Skip and continue"}"`
+        : "resume review gate — dismiss to continue apply",
       target: top || null,
       affordances,
       fingerprint: fp,
@@ -191,6 +227,19 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
       step: "verify_email",
       confidence: "high",
       reason: "email verification wall — polling inbox",
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  // Registration with personal name fields — fill from applicant profile via smart_fill
+  // even when auto-signup provisioning is off (job-apply uses real Settings identity).
+  if (hasIdentityRegistrationFields(snap) && (snap.fieldCount || 0) >= 2) {
+    return {
+      step: "form",
+      confidence: "high",
+      reason: "registration/identity fields — fill from applicant profile",
       target: null,
       affordances,
       fingerprint: fp,
@@ -388,6 +437,20 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   if (snap.hasApplyModal && (snap.modalStepCount || 0) > 0) {
     const top = snap.modalCandidates?.[0];
 
+    if (uploadAlreadySucceeded(history) && isExpertReviewGate(snap)) {
+      const skip = findBestDismissCandidate(snap);
+      return {
+        step: "overlay",
+        confidence: "high",
+        reason: skip
+          ? `expert review after upload — skip "${skip.text || skip._text || "Skip and continue"}"`
+          : "expert review after upload — dismiss to reach form",
+        target: skip || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+
     if (isResumeChoiceStep(snap) && (snap.fieldCount || 0) === 0) {
       return {
         step: "wizard_choice",
@@ -417,6 +480,21 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     }
 
     if ((snap.fieldCount || 0) === 0) {
+      if (uploadAlreadySucceeded(history) && candidateSuggestsFileUpload(top)) {
+        const skip = findBestDismissCandidate(snap);
+        if (skip || isExpertReviewGate(snap)) {
+          return {
+            step: "overlay",
+            confidence: "high",
+            reason: skip
+              ? `resume already uploaded — skip "${skip.text || skip._text || "Skip and continue"}"`
+              : "resume already uploaded — dismiss optional review step",
+            target: skip || null,
+            affordances,
+            fingerprint: fp,
+          };
+        }
+      }
       return {
         step: "wizard_choice",
         confidence: modalChoiceConfidence(snap),
@@ -438,6 +516,19 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
         h.ok &&
         (h.fromFingerprint ? h.fromFingerprint === fp : true),
     );
+    if (uploadAlreadySucceeded(history) && (snap.fieldCount || 0) === 0) {
+      const skip = findBestDismissCandidate(snap);
+      if (skip || isExpertReviewGate(snap) || (snap.modalCount || 0) > 0) {
+        return {
+          step: "overlay",
+          confidence: "high",
+          reason: "resume uploaded — dismiss review gate instead of restarting apply",
+          target: skip || null,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+    }
     if (!applySucceeded) {
       const top = snap.entryCandidates?.[0];
       return {
@@ -451,13 +542,24 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     }
   }
 
-  if ((snap.fieldCount || 0) >= 1 && !snap.authForm) {
+  if (hasEmptyRequiredControls(snap, fillResult) && filled === 0) {
+    return {
+      step: "form",
+      confidence: "low",
+      reason: "empty required controls — fill before advancing",
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  if ((controlCount(snap) >= 1 || (snap.customControlCount || 0) >= 1) && !snap.authForm) {
     const unfilled = fillResult?.unfilled_count ?? snap.fieldCount;
     if (unfilled > 0 || filled === 0) {
       return {
         step: "form",
-        confidence: "high",
-        reason: `${snap.fieldCount} field(s) visible, ${filled} filled`,
+        confidence: filled === 0 ? "low" : "high",
+        reason: `${controlCount(snap)} control(s) visible, ${filled} filled`,
         target: null,
         affordances,
         fingerprint: fp,
@@ -466,14 +568,14 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (uploadAlreadySucceeded(history) && (snap.fieldCount || 0) === 0) {
-    if (isResumeReviewUpsell(snap)) {
-      const top = snap.dismissCandidates?.[0];
+    if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) {
+      const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
       return {
         step: "overlay",
         confidence: "high",
         reason: top
-          ? `resume review upsell after upload — skip "${top.text || "Skip"}"`
-          : "resume review upsell after upload",
+          ? `resume review gate after upload — skip "${top.text || top._text || "Skip and continue"}"`
+          : "resume review gate after upload",
         target: top || null,
         affordances,
         fingerprint: fp,
@@ -490,6 +592,16 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (snap.continueCount > 0) {
+    if (preferencesGateIncomplete(snap, fillResult)) {
+      return {
+        step: "form",
+        confidence: "high",
+        reason: "preferences incomplete — fill before continue",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
     const top = snap.continueCandidates?.[0];
     if ((top?.text || "").length <= 80) {
       return {

@@ -1,66 +1,75 @@
-# browser-automation-engine
+# @leilaschooley/browser-automation-engine
 
-Shared Playwright automation engine for job-apply-ai, quicklisting-engine, and other Playwright automations.
+Shared Playwright automation engine for [job-apply-ai](https://github.com/LeilaSchooley/job-apply-ai), quicklisting-engine, and other Playwright automations.
+
+Published to **GitHub Packages** (private by default).
 
 ## Features
 
 - **Dynamic DOM discovery** — scores click targets (apply, continue, modal steps, cookies)
-- **Ad overlay dismissal** — GPT sticky units, interstitials, `body[aria-hidden]` locks
-- **Smart fill** — heuristic field matching + optional site mappings
+- **Custom controls** — combobox/listbox/contenteditable fill (`fillCustomControls`)
+- **Smart fill** — heuristic field matching + site mappings + AI fallback
 - **Agent loop** — observe → classify → decide → act
-- **Cloudflare handling** — auto-wait for challenges
+- **Stagehand fallback** — optional observe/act on existing Playwright `page`
 
-## Install
+## Monorepo dev (job-apply-ai)
 
 ```bash
-npm install file:../browser-automation-engine
+# from job-apply-ai root
+pnpm install
+pnpm run build:types
+pnpm run dev:all
+```
+
+Edit `src/` here — nodemon restarts the API when engine files change.
+
+## Install (GitHub Packages)
+
+Add to your app `.npmrc`:
+
+```
+@leilaschooley:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Token needs `read:packages` scope.
+
+```bash
+pnpm add @leilaschooley/browser-automation-engine
 ```
 
 ## Usage
 
 ```js
-import { createEngine, createLogger } from "browser-automation-engine";
+import { createEngine, createLogger } from "@leilaschooley/browser-automation-engine";
 
 const engine = createEngine({
-  settings: {
-    agent_enabled: true,
-    browser_human_behavior: true,
-  },
+  settings: { agent_enabled: true },
   buildFillConfig: async (context) => ({
     fullName: context.startupName,
     email: context.email,
-    websiteUrl: context.website,
-    tagline: context.tagline,
-    description: context.description,
   }),
-  resolveFileUpload: async () => ({ ok: false }),
-});
-
-const log = engine.createLogger({ sessionId: "sub-1" });
-const result = await engine.runPipeline(page, {
-  url: "https://betalist.com/submit",
-  context: { startupName: "Acme", email: "hi@acme.com" },
-  log,
 });
 ```
 
-## Apps using this engine
+## Publish
 
-- [job-apply-ai](../job-apply-ai) — job application automation
-- [quicklisting-engine](../quicklisting-engine) — startup directory submissions
+From job-apply-ai root (token needs `write:packages`):
+
+```bash
+pnpm run publish:engine
+```
+
+Or from this repo:
+
+```bash
+pnpm publish --no-git-checks
+```
 
 ## Tests
 
 ```bash
-npm install
-npx playwright install chromium   # first time only
-npm test                          # all tests
-npm run test:unit                 # pure logic (no browser)
-npm run test:fixtures             # HTML fixture + Playwright tests
+pnpm install
+npx playwright install chromium
+pnpm test
 ```
-
-Fixture tests load static HTML pages and verify the full chain:
-**DOM inspect → step classify → action plan → clicks/uploads → smart fill → pipeline**.
-
-Coverage includes stuck recovery, site-mapping hints, Cloudflare detection, and
-`runPipeline` with the agent disabled (linear prep path).

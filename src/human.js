@@ -11,6 +11,21 @@ export async function humanPause(minMs = 300, maxMs = 1200) {
   }
 }
 
+/** Pause in small chunks so shouldStop can interrupt without killing the browser mid-wait. */
+export async function humanPauseInterruptible(minMs = 300, maxMs = 1200, shouldStop = null, chunkMs = 200) {
+  const ms = getSettings().browser_human_behavior
+    ? Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
+    : 0;
+  let elapsed = 0;
+  while (elapsed < ms) {
+    if (typeof shouldStop === "function" && shouldStop()) return true;
+    const step = Math.min(chunkMs, ms - elapsed);
+    await new Promise((resolve) => setTimeout(resolve, step));
+    elapsed += step;
+  }
+  return typeof shouldStop === "function" && shouldStop();
+}
+
 function viewport(page) {
   const size = page.viewportSize();
   return size || { width: 1280, height: 720 };
@@ -56,7 +71,7 @@ export async function humanScroll(page, { direction = "down", amount = null } = 
 
 export async function humanReadPage(page) {
   if (!getSettings().browser_human_behavior) {
-    await page.waitForTimeout(2000);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
     return;
   }
 

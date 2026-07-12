@@ -8,7 +8,16 @@ export const DEFAULT_SETTINGS = {
   ai_fill_enabled: false,
   agent_enabled: true,
   agent_max_steps: 24,
+  /** Stop after this many consecutive no-progress steps (post-recovery). */
+  agent_max_no_progress: 4,
   agent_ai: false,
+  /** Semantic post-action validator (uses callLlm when available). */
+  action_validator: true,
+  /**
+   * When true, agent may click Submit after the form is filled.
+   * Job-apply products should leave this false (human reviews/submits).
+   */
+  auto_submit: false,
   objective_mode: true,
   cloudflare_wait_enabled: true,
   cloudflare_wait_timeout_sec: 120,
@@ -26,6 +35,9 @@ export const DEFAULT_SETTINGS = {
   email_imap_pass: "",
   vision_fallback_enabled: false,
   vision_include_screenshot: true,
+  stagehand_enabled: false,
+  stagehand_model: "",
+  stagehand_cache_enabled: true,
   captcha_solver_enabled: false,
   captcha_solver_url: "",
 };

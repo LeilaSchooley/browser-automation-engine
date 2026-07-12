@@ -2,6 +2,7 @@
  * Discover and fill signup form fields from live DOM — no site-specific selectors.
  */
 import { isUsernameFieldBlob } from "../patterns/auth.js";
+import { ensurePasswordForSignup } from "../passwordPolicy.js";
 
 /**
  * @typedef {{ kind: string, label: string, selector: string, type: string, order: number }} DiscoveredField
@@ -78,6 +79,13 @@ export async function discoverVisibleFormFields(page) {
         return "name";
       }
 
+      if (/\b(first\s*name|given\s*name|forename|fname)\b/.test(blob) || ac === "given-name") {
+        return "first_name";
+      }
+      if (/\b(last\s*name|surname|family\s*name|lname)\b/.test(blob) || ac === "family-name") {
+        return "last_name";
+      }
+
       if (type === "text" || type === "tel") {
         if (/\b(name|company|organization)\b/.test(blob)) return "name";
         return "text";
@@ -110,7 +118,7 @@ export async function discoverVisibleFormFields(page) {
 /**
  * Fill every visible signup field discovered from the DOM.
  * @param {import('playwright').Page} page
- * @param {{ email?: string, username?: string, password?: string, fullName?: string }} values
+ * @param {{ email?: string, username?: string, password?: string, fullName?: string, firstName?: string, lastName?: string }} values
  * @param {{ log?: { layer: Function } }} [opts]
  */
 export async function fillSignupFormFromDom(page, values, opts = {}) {
@@ -128,6 +136,8 @@ export async function fillSignupFormFromDom(page, values, opts = {}) {
   const confirmFields = fields.filter((f) => f.kind === "confirm_password");
   const usernameFields = fields.filter((f) => f.kind === "username");
   const nameFields = fields.filter((f) => f.kind === "name");
+  const firstNameFields = fields.filter((f) => f.kind === "first_name");
+  const lastNameFields = fields.filter((f) => f.kind === "last_name");
 
   async function fillField(field, value, label) {
     if (!value || !field.selector) return false;
@@ -145,6 +155,16 @@ export async function fillSignupFormFromDom(page, values, opts = {}) {
     }
   }
 
+  for (const field of firstNameFields) {
+    await fillField(field, values.firstName || values.fullName?.split(/\s+/)[0] || "", "first_name");
+  }
+  for (const field of lastNameFields) {
+    await fillField(
+      field,
+      values.lastName || values.fullName?.split(/\s+/).slice(1).join(" ") || "",
+      "last_name",
+    );
+  }
   for (const field of nameFields) {
     await fillField(field, values.fullName, "name");
   }
@@ -176,9 +196,21 @@ export async function fillSignupFormFromDom(page, values, opts = {}) {
   if (usernameFields.length && !result.filled.username) result.missing.push("username");
   if (passwordFields.length && !result.filled.password) result.missing.push("password");
   if (nameFields.length && !result.filled.name) result.missing.push("name");
+  if (firstNameFields.length && !result.filled.first_name) result.missing.push("first_name");
+  if (lastNameFields.length && !result.filled.last_name) result.missing.push("last_name");
 
   const hasIdentity = Boolean(result.filled.email || result.filled.username);
   const hasPassword = Boolean(result.filled.password);
+
+  if (hasPassword && values.password) {
+    const ensured = await ensurePasswordForSignup(page, values.password, { log });
+    if (ensured.password && ensured.password !== values.password) {
+      result.filled.password = true;
+      log?.layer("signup", "password adjusted to satisfy site policy", "info");
+    }
+    result.password = ensured.password;
+    result.passwordPolicyOk = ensured.ok;
+  }
 
   return {
     ...result,
