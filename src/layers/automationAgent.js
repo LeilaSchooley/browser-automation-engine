@@ -606,6 +606,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       progressSource,
       source: plan.source || "step-classifier",
       learnings: stepLearnings,
+      existingAccount: Boolean(stepLearnings?.existingAccount),
       preferencesSignup: executed.preferencesSignupClicked || false,
       decisionPath: decision?.path,
     });

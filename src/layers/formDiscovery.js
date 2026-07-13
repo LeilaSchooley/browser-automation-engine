@@ -632,7 +632,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         if (/\bsign in with (x|twitter|google|github|apple|microsoft|facebook)\b/.test(blob)) return 0;
         let score = 50;
         if (/sign in with email|log in with email/.test(blob)) score += 80;
-        if (/sign in now|already a member/.test(blob)) score += 55;
+        if (/sign in now|already a member|already have an account|have an account/.test(blob)) score += 55;
         if (meta.tag === "button" || meta.role === "button" || meta.tag === "a") score += 20;
         if (/magic link/.test(blob)) score -= 30;
         return score;

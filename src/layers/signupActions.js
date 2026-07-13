@@ -6,10 +6,17 @@ import {
   attachAccountToContext,
   canProvisionAccounts,
   markAccountVerified,
+  markAccountExists,
   resolveAccountForHost,
   saveAccountForHost,
 } from "../accountStore.js";
-import { getAuthCredentials, LOGIN_WALL_TEXT, looksLikeAuthFailure, looksLikeAuthForm } from "./authActions.js";
+import {
+  getAuthCredentials,
+  LOGIN_WALL_TEXT,
+  looksLikeAuthFailure,
+  looksLikeAuthForm,
+  looksLikeExistingAccount,
+} from "./authActions.js";
 import {
   SIGNUP_TEXT,
   SIGNUP_FORM_TEXT,
@@ -31,28 +38,37 @@ import { shouldBlockAdvance } from "../gateComplete.js";
 async function confirmSignupSucceeded(page, hostname, log, before = null) {
   await humanPause(1200, 2000);
   const after = await inspectPage(page);
+  if (looksLikeExistingAccount(after)) {
+    log?.layer("signup", "site says account already exists — switch to sign in", "warn");
+    markAccountExists(hostname);
+    return { ok: false, existingAccount: true };
+  }
   if (looksLikeAuthFailure(after)) {
     log?.layer("signup", "signup rejected by site", "warn");
-    return false;
+    return { ok: false };
   }
   if (hasPreferencesGateFields(after)) {
     markAccountVerified(hostname);
-    return true;
+    return { ok: true };
   }
   if (before && hasIdentityRegistrationFields(before) && !hasIdentityRegistrationFields(after)) {
     markAccountVerified(hostname);
-    return true;
+    return { ok: true };
   }
   if (before && (after.applyModalTitle || "") !== (before.applyModalTitle || "")) {
     markAccountVerified(hostname);
-    return true;
+    return { ok: true };
   }
   if (looksLikeAuthForm(after) && !looksLikeSignupForm(after)) {
-    log?.layer("signup", "still on login wall after signup submit", "warn");
-    return false;
+    // Landed on login after register attempt — often means account exists.
+    if (looksLikeExistingAccount(after) || /sign in|log in/i.test(`${after.title || ""} ${after.pageText || ""}`)) {
+      log?.layer("signup", "landed on login form after signup — treat as existing account", "warn");
+      markAccountExists(hostname);
+      return { ok: false, existingAccount: true };
+    }
   }
   markAccountVerified(hostname);
-  return true;
+  return { ok: true };
 }
 
 /** Click Continue / Next on multi-step registration (generic + testid). */
@@ -269,17 +285,17 @@ export async function attemptAuthSignup(page, snap, context, log) {
   const beforeSnap = snap;
 
   if (await clickRegistrationContinue(page, log, "signup")) {
-    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
-    return { ok, learnings: ok ? learnings : undefined };
+    const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ...result, learnings: result.ok ? learnings : undefined };
   }
 
   if (await clickRoleMatching(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup", roles: ["button"] })) {
-    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
-    return { ok, learnings: ok ? learnings : undefined };
+    const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ...result, learnings: result.ok ? learnings : undefined };
   }
   if (await clickSubmitByPatterns(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup", preferLast: true })) {
-    const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
-    return { ok, learnings: ok ? learnings : undefined };
+    const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ...result, learnings: result.ok ? learnings : undefined };
   }
 
   try {
@@ -288,13 +304,13 @@ export async function attemptAuthSignup(page, snap, context, log) {
     if (count >= 2) {
       await submits.nth(count - 1).click({ timeout: 8000 });
       log?.layer("signup", "clicked last submit (register pair)", "info");
-      const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
-      return { ok, learnings: ok ? learnings : undefined };
+      const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+      return { ...result, learnings: result.ok ? learnings : undefined };
     }
     if (count === 1) {
       await submits.first().click({ timeout: 8000 });
-      const ok = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
-      return { ok, learnings: ok ? learnings : undefined };
+      const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+      return { ...result, learnings: result.ok ? learnings : undefined };
     }
   } catch {
     /* ignore */

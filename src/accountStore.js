@@ -142,6 +142,19 @@ export function markAccountVerified(hostname) {
   return saveAccountForHost(hostname, { ...existing, pending: false, verified: true });
 }
 
+/** Site reported the account already exists — prefer sign-in next. */
+export function markAccountExists(hostname) {
+  const existing = loadAccountForHost(hostname);
+  if (!existing) return null;
+  return saveAccountForHost(hostname, {
+    ...existing,
+    pending: false,
+    verified: true,
+    existsOnSite: true,
+    lastExistingAccountAt: new Date().toISOString(),
+  });
+}
+
 /** Login rejected — keep credentials but allow signup retry on next step. */
 export function markAccountLoginFailed(hostname) {
   const existing = loadAccountForHost(hostname);

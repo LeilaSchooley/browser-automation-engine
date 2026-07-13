@@ -29,9 +29,20 @@ export const SIGN_IN_TEXT =
 export const OAUTH_PROVIDER_TEXT =
   /\b((continue|sign|log)\s+(in\s+)?with\s+(x|twitter|google|github|apple|microsoft|facebook|linkedin)|(sign|log)\s+up\s+with\s+(x|twitter|google|github|apple|microsoft|facebook))\b/i;
 
-/** Server-side rejection after a login/signup submit. */
+/** Server-side rejection after a login/signup submit (wrong password / not found). */
 export const AUTH_FAILURE_TEXT =
-  /\b(that email or password is incorrect|invalid (email|password|credentials)|incorrect password|wrong password|couldn'?t sign you in|login failed|authentication failed|no account found|user not found|account (does not|doesn't) exist|try again|email (is )?already (taken|registered))\b/i;
+  /\b(that email or password is incorrect|invalid (email|password|credentials)|incorrect password|wrong password|couldn'?t sign you in|login failed|authentication failed|no account found|user not found|account (does not|doesn't) exist|try again)\b/i;
+
+/**
+ * Site says this identity already has an account — switch signup → sign-in.
+ * Covers error toasts and "Already have an account? Sign in" prompts.
+ */
+export const EXISTING_ACCOUNT_TEXT =
+  /\b(already have an account|have an account\??|account already exists|email (is )?(already )?(taken|registered|in use)|user already exists|already registered|already a member|already signed up|an account with (this|that) email)\b/i;
+
+/** CTA language inviting sign-in for existing members. */
+export const EXISTING_ACCOUNT_SIGNIN_CTA =
+  /\b(already (have an )?account|already a member|have an account)\b.*\b(sign in|log in)\b|\b(sign in|log in)\b.*\b(already have|existing account)\b/i;
 
 /** Browser-evaluate source for username field detection (no module imports in page). */
 export const USERNAME_FIELD_PATTERN_SOURCE =

@@ -334,7 +334,28 @@ export async function executePlan(page, plan, {
       const authResult = unwrapActionResult(await attemptAuthSignup(page, snap, context, log));
       ok = authResult.ok;
       learnings = authResult.learnings;
-      if (ok) {
+      if (!ok && authResult.existingAccount) {
+        log?.layer("agent", "site says account already exists — switching to sign in", "warn");
+        const afterSignup = await inspectPage(page).catch(() => snap);
+        const switched = await clickSignInEntry(page, afterSignup, log);
+        if (switched) await waitAfterClickTransition(page);
+        nextSnap = await inspectPage(page).catch(() => afterSignup);
+        if (looksLikeAuthForm(nextSnap) || looksLikeSignupForm(nextSnap) === false) {
+          const login = unwrapActionResult(await attemptAuthLogin(page, nextSnap, context, log));
+          ok = login.ok;
+          learnings = login.learnings || learnings;
+          if (ok) {
+            await waitAfterClickTransition(page);
+            try {
+              await saveStorageState(page.context(), snap.hostname || context?.targetHost);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        // Preserve signal for classifier / history even if login still needs another step.
+        learnings = { ...(learnings || {}), existingAccount: true };
+      } else if (ok) {
         await waitAfterClickTransition(page);
         await humanPause(1500, 2600);
         try {

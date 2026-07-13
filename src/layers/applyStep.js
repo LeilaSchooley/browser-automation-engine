@@ -9,6 +9,9 @@ import {
   looksLikeAuthForm,
   looksLikeOAuthOnly,
   looksLikeHardGate,
+  looksLikeExistingAccount,
+  looksLikeExistingAccountError,
+  looksLikeExistingAccountSignInPrompt,
 } from "./authActions.js";
 import {
   canProvisionAccounts,
@@ -278,6 +281,45 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
       ? "learned: dismiss job-alert first"
       : "non-cookie popup";
     return classifyJobAlertDismiss(snap, affordances, fp, prefix);
+  }
+
+  // Site says account already exists (error toast / prior signup) → sign in.
+  // Soft "Already have an account?" CTA alone does not override a fresh signup path.
+  const signupSaidExists = (history || []).some(
+    (h) => h.action === "auth_signup" && (h.existingAccount || h.learnings?.existingAccount),
+  );
+  const hostname = snap.hostname || "";
+  const stored = hostname ? resolveAccountForHost(context, hostname, { provision: false }) : null;
+  const hasStoredCreds = Boolean(
+    (stored && (stored.email || stored.username) && stored.password) || hasAuthCredentials(context),
+  );
+  const forceSignIn =
+    signupSaidExists ||
+    looksLikeExistingAccountError(snap) ||
+    (looksLikeExistingAccountSignInPrompt(snap) && (hasStoredCreds || stored?.existsOnSite || stored?.verified));
+
+  if (forceSignIn) {
+    if (hostname) ensureAccount(context, hostname);
+    if ((snap.signInCount || 0) > 0) {
+      return {
+        step: "signin_entry",
+        confidence: "high",
+        reason: "site says account already exists — open sign in",
+        target: snap.signInCandidates?.[0] || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    if (looksLikeAuthForm(snap) || (snap.passwordFieldCount || 0) > 0) {
+      return {
+        step: "auth",
+        confidence: "high",
+        reason: "site says account already exists — log in",
+        target: snap.signInCandidates?.[0] || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
   }
 
   if (looksLikeApplySignupGate(snap)) {

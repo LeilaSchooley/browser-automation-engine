@@ -13,6 +13,8 @@ import {
   OAUTH_PROVIDER_TEXT,
   SIGN_IN_TEXT,
   AUTH_FAILURE_TEXT,
+  EXISTING_ACCOUNT_TEXT,
+  EXISTING_ACCOUNT_SIGNIN_CTA,
   USERNAME_SELECTORS,
   EMAIL_SELECTORS,
   PASSWORD_SELECTORS,
@@ -26,6 +28,7 @@ import { fillFirstVisible, fillFirstVisibleTracked, clickRoleMatching, clickSubm
 import { inspectPage } from "./formDiscovery.js";
 import { humanPause } from "../human.js";
 import { markAccountLoginFailed } from "../accountStore.js";
+import { safeTextLocator } from "../primitives/safeLocator.js";
 
 /** Merge default selectors with context/learnings overrides (modular per host). */
 export function resolveAuthSelectors(context, hostname, kind) {
@@ -79,8 +82,62 @@ export function hasEmailAuthPath(snap) {
 
 export function looksLikeAuthFailure(snap) {
   if (!snap) return false;
+  // Existing-account errors are handled separately (switch to sign-in, don't treat as wrong password).
+  if (looksLikeExistingAccount(snap)) return false;
   const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
   return AUTH_FAILURE_TEXT.test(blob);
+}
+
+/**
+ * Site says the identity already has an account (toast/error) or shows "Already have an account?".
+ */
+export function looksLikeExistingAccount(snap) {
+  if (!snap) return false;
+  const blob = [
+    snap.title,
+    snap.applyModalTitle,
+    snap.pageText,
+    snap.headings,
+    ...(snap.signInCandidates || []).map((c) => c.text),
+    ...(snap.continueCandidates || []).map((c) => c.text),
+    ...(snap.dismissCandidates || []).map((c) => c.text),
+    ...(snap.interactives || []).map((i) => `${i.text || ""} ${i.aria || ""}`),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return EXISTING_ACCOUNT_TEXT.test(blob) || EXISTING_ACCOUNT_SIGNIN_CTA.test(blob);
+}
+
+/** Strong error toast — email already registered / account exists (not just a Sign in link). */
+export function looksLikeExistingAccountError(snap) {
+  if (!snap) return false;
+  const blob = `${snap.title || ""} ${snap.applyModalTitle || ""} ${snap.pageText || ""} ${snap.headings || ""}`;
+  return /\b(email (is )?(already )?(taken|registered|in use)|account already exists|user already exists|already registered|already signed up|an account with (this|that) email)\b/i.test(
+    blob,
+  );
+}
+
+/** Prompt/CTA to switch to sign-in (often next to Sign up). */
+export function looksLikeExistingAccountSignInPrompt(snap) {
+  if (!snap) return false;
+  if ((snap.signInCount || 0) > 0 && EXISTING_ACCOUNT_SIGNIN_CTA.test(snapBlob(snap))) return true;
+  if ((snap.signInCount || 0) > 0 && /already (have an )?account|already a member/i.test(snapBlob(snap))) {
+    return true;
+  }
+  return false;
+}
+
+function snapBlob(snap) {
+  return [
+    snap.title,
+    snap.applyModalTitle,
+    snap.pageText,
+    snap.headings,
+    ...(snap.signInCandidates || []).map((c) => c.text),
+    ...(snap.signUpCandidates || []).map((c) => c.text),
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function looksLikeOAuthOnly(snap) {
@@ -299,7 +356,7 @@ export function scoreSignInCandidate(meta) {
   if (OAUTH_PROVIDER_TEXT.test(blob) && !/email/.test(blob)) return 0;
   let score = 50;
   if (/sign in with email|log in with email/.test(blob)) score += 80;
-  if (/sign in now|already a member/.test(blob)) score += 55;
+  if (/sign in now|already a member|already have an account|have an account/.test(blob)) score += 55;
   if (meta.tag === "button" || meta.role === "button" || meta.tag === "input" || meta.tag === "a") {
     score += 20;
   }
@@ -308,7 +365,9 @@ export function scoreSignInCandidate(meta) {
 }
 
 const SIGNIN_ENTRY_PATTERNS = [
+  /already have an account/i,
   /already a member/i,
+  /have an account\??/i,
   /sign in now/i,
   /^sign in$/i,
   /^log in$/i,
@@ -337,9 +396,13 @@ export async function clickSignInEntry(page, snap, log) {
   }
 
   try {
-    const byText = page.getByText(/already a member\??\s*sign in|sign in now/i).first();
+    const byText = safeTextLocator(
+      page,
+      /already have an account|already a member|have an account|sign in now/i,
+    ).first();
     if (await byText.isVisible({ timeout: 800 }).catch(() => false)) {
       await byText.click({ timeout: 8000 });
+      log?.layer("auth", "clicked existing-account sign-in text", "info");
       return true;
     }
   } catch {
@@ -350,4 +413,4 @@ export async function clickSignInEntry(page, snap, log) {
   return false;
 }
 
-export { LOGIN_WALL_TEXT, SIGN_IN_TEXT };
+export { LOGIN_WALL_TEXT, SIGN_IN_TEXT, EXISTING_ACCOUNT_TEXT };
