@@ -30,9 +30,24 @@ import { allowsHostHop, normalizeHost, resolveHostMapping, targetHostFromContext
 import { performGenericAct } from "./layers/domActions.js";
 import { loadStorageState, saveStorageState, applyStorageStateToContext } from "./sessionStore.js";
 import { looksLikeEmailVerifyWall, pollVerifyLink, attemptEmailVerify } from "./inboxVerify.js";
+import {
+  provideManualVerifyLink,
+  cancelManualVerifyLink,
+  hasPendingManualVerifyLink,
+  isImapConfigured,
+  normalizeVerifyLink,
+} from "./manualVerifyLink.js";
 import { gotoWithCloudflareRetry, isCloudflarePage, waitForCloudflareClear } from "./cloudflare.js";
 import { humanPause, humanGoto } from "./human.js";
-import { planNextAction } from "./layers/agentPlan.js";
+import { planNextAction, buildPageState } from "./layers/agentPlan.js";
+import { buildAgentContext } from "./layers/agentContext.js";
+import {
+  decideWithActionBrain,
+  resolveActionBrainMode,
+  shouldAttachVision,
+  preferIndexedAct,
+} from "./layers/actionBrain.js";
+import { resolveDialogScope } from "./layers/dialogScope.js";
 import {
   validateActionOutcome,
   assessAgentEndState,
@@ -43,12 +58,25 @@ import {
   parseEndStateResponse,
 } from "./layers/actionValidator.js";
 import { tryAdoptFormIframe } from "./layers/iframeAdopt.js";
+import { isQueueableApplyUrl } from "./layers/applyUrlSafety.js";
+import {
+  classifyApplyUrlHealth,
+  looksLikeScrapedMirrorUrl,
+  probeApplyUrlReachability,
+} from "./layers/applyUrlHealth.js";
 import {
   parseSalaryFromText,
   parseSalaryNumbers,
   pickClosestSalaryOption,
   resolveSalaryExpectation,
 } from "./salaryExpectation.js";
+import { buildDeterministicPlan, shouldInvokeLlm, isDeterministicState, smartFillStalledOnStep } from "./layers/deterministicPolicy.js";
+import { buildPagePerception, computePageDiff } from "./layers/pagePerception.js";
+import { recordEngineEvent, getLlmMetrics } from "./observability.js";
+import { mapLabelToMapped } from "./primitives/controlPatterns.js";
+import { readControlValue, verifyCommitted, interactWidget } from "./primitives/interactWidget.js";
+import { refreshSnapIfNeeded } from "./layers/pagePerception.js";
+import { loadAiLayers } from "./ai/runtimeHooks.js";
 
 /**
  * @typedef {Object} EngineOptions
@@ -111,6 +139,11 @@ export function createEngine(options = {}) {
     waitForCloudflareClear,
     humanPause,
     humanGoto,
+    provideManualVerifyLink,
+    cancelManualVerifyLink,
+    hasPendingManualVerifyLink,
+    isImapConfigured,
+    normalizeVerifyLink,
   };
 }
 
@@ -167,6 +200,11 @@ export {
   looksLikeEmailVerifyWall,
   pollVerifyLink,
   attemptEmailVerify,
+  provideManualVerifyLink,
+  cancelManualVerifyLink,
+  hasPendingManualVerifyLink,
+  isImapConfigured,
+  normalizeVerifyLink,
   buildReadyMessage,
   gotoWithCloudflareRetry,
   isCloudflarePage,
@@ -174,6 +212,13 @@ export {
   humanPause,
   humanGoto,
   planNextAction,
+  buildPageState,
+  buildAgentContext,
+  decideWithActionBrain,
+  resolveActionBrainMode,
+  shouldAttachVision,
+  preferIndexedAct,
+  resolveDialogScope,
   validateActionOutcome,
   assessAgentEndState,
   computeMechanicalSignals,
@@ -186,7 +231,35 @@ export {
   parseSalaryNumbers,
   pickClosestSalaryOption,
   resolveSalaryExpectation,
+  isQueueableApplyUrl,
+  looksLikeScrapedMirrorUrl,
+  probeApplyUrlReachability,
+  classifyApplyUrlHealth,
+  buildDeterministicPlan,
+  shouldInvokeLlm,
+  isDeterministicState,
+  smartFillStalledOnStep,
+  buildPagePerception,
+  computePageDiff,
+  recordEngineEvent,
+  getLlmMetrics,
+  mapLabelToMapped,
+  readControlValue,
+  verifyCommitted,
+  interactWidget,
+  refreshSnapIfNeeded,
+  loadAiLayers,
 };
+
+export {
+  AgentPlanSchema,
+  ValidatorResponseSchema,
+  EndStateResponseSchema,
+  GENERIC_ACTIONS,
+  HIGH_LEVEL_ACTIONS,
+  parseJsonFromLlm,
+} from "./ai/contracts.js";
+export { loadOptionalSharedContracts } from "./ai/sharedBridge.js";
 
 /** @deprecated use `patterns` */
 export const authPatterns = patterns;

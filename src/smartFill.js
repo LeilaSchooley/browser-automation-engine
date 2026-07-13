@@ -7,7 +7,11 @@ import { humanPause, humanType } from "./human.js";
 import { fillCustomControls } from "./fillCustomControls.js";
 import { recordSiteLearning, mergeControlSkills } from "./siteLearnings.js";
 import { normalizeHost } from "./host.js";
-import { hasPreferencesGateFields } from "./fillPreferences.js";
+import { hasPreferencesGateFields, getPreferencesFromContext } from "./fillPreferences.js";
+import { hasUnfilledYesNoOrEEOC } from "./fillApplicationAnswers.js";
+import { sortByVisualOrder } from "./fillOrder.js";
+import { SMART_FILL_SALARY_HELPER } from "./primitives/browserControlPatterns.js";
+import { looksLikeJobAlertSignupForm, looksLikeMarketingYesNoModal, looksLikeApplySignupGate } from "./heuristics.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMART_FILL_JS = fs.readFileSync(path.join(__dirname, "smart_fill.js"), "utf8");
@@ -23,12 +27,14 @@ export function splitName(fullName) {
 
 async function evaluateSmartFill(page, config, siteMappings) {
   return page.evaluate(
-    ({ js, config: cfg, siteMappings: maps }) => {
+    ({ js, helperJs, config: cfg, siteMappings: maps }) => {
+      // eslint-disable-next-line no-eval
+      eval(helperJs);
       // eslint-disable-next-line no-eval
       eval(js);
       return runSmartFill(cfg, maps);
     },
-    { js: SMART_FILL_JS, config, siteMappings },
+    { js: SMART_FILL_JS, helperJs: SMART_FILL_SALARY_HELPER, config, siteMappings },
   );
 }
 
@@ -175,7 +181,10 @@ async function applyCustomControlsResult(page, context, log, { snap, seen, allFi
 
   const host = normalizeHost(hostname || context?.targetHost || snap?.hostname || "");
   if (host && customResult.skills?.length) {
-    recordSiteLearning(host, { controlSkills: mergeControlSkills([], customResult.skills) });
+    const verifiedSkills = customResult.skills.filter((s) => (s.successCount || 0) >= 2);
+    if (verifiedSkills.length) {
+      recordSiteLearning(host, { controlSkills: mergeControlSkills([], verifiedSkills) });
+    }
   }
 
   return customResult;
@@ -197,7 +206,36 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     `config: name=${config.fullName || config.startupName || "?"} email=${config.email ? "✓" : "✗"} file=${config.resumePath || config.filePath ? "✓" : "✗"}`,
   );
 
-  const preferCustomFirst = snap && ((snap.customControlCount || 0) > 0 || hasPreferencesGateFields(snap));
+  const prefs = getPreferencesFromContext(context);
+  log?.layer(
+    "smart_fill",
+    `prefs: location=${prefs.location || "?"} title=${(prefs.desiredTitle || "?").slice(0, 48)} salary=${prefs.salary || "(from job/settings)"}`,
+    "info",
+  );
+
+  if (
+    snap &&
+    (looksLikeJobAlertSignupForm(snap) ||
+      looksLikeMarketingYesNoModal(snap) ||
+      looksLikeApplySignupGate(snap))
+  ) {
+    const reason = looksLikeApplySignupGate(snap)
+      ? "apply signup gate — use auth_signup flow"
+      : "job-alert/marketing signup — dismiss overlay first";
+    log?.layer("smart_fill", `skipped: ${reason}`, "info");
+    return {
+      filled: [],
+      unfilled: [],
+      unfilled_count: 0,
+      skipped: looksLikeApplySignupGate(snap) ? "apply_signup_gate" : "job_alert_signup",
+      hostname: snap.hostname || "",
+    };
+  }
+
+  const preferCustomFirst =
+    snap &&
+    (hasPreferencesGateFields(snap) ||
+      (snap.customControls || []).some((c) => !c.filled && c.widgetType === "combobox"));
   let customRanEarly = false;
   if (preferCustomFirst) {
     log?.layer("smart_fill", "custom controls first (modal comboboxes)", "info");
@@ -228,13 +266,13 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
       lastResult.fileTargets,
     );
 
-    // 1) Profile / short fields first (human-typed when enabled)
-    for (const entry of shortText) {
+    // 1) Profile / short fields — top-to-bottom on the page
+    for (const entry of sortByVisualOrder(shortText)) {
       await processTextEntry(page, entry, config, seen, allFilled, log);
     }
 
-    // 2) Resume / cover uploads before optional long text
-    for (const entry of files) {
+    // 2) Resume / cover uploads in visual order
+    for (const entry of sortByVisualOrder(files)) {
       const sel = entry.selector || "";
       if (!sel || seen.has(sel) || !filePath) continue;
       if (await uploadFile(page, sel, filePath)) {
@@ -249,8 +287,8 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
 
     const resumePath = config.resumePath || config.filePath || "";
     const coverPath = config.coverLetterPath || "";
-    const pendingTargets = (lastResult.fileTargets || []).filter(
-      (t) => t.selector && !seen.has(t.selector),
+    const pendingTargets = sortByVisualOrder(
+      (lastResult.fileTargets || []).filter((t) => t.selector && !seen.has(t.selector)),
     );
 
     function classifyUploadTarget(target, index, total) {
@@ -290,8 +328,8 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
       }
     }
 
-    // 3) Cover letter / additional info last
-    for (const entry of longText) {
+    // 3) Cover letter / additional info last (top-to-bottom among long fields)
+    for (const entry of sortByVisualOrder(longText)) {
       await processTextEntry(page, entry, config, seen, allFilled, log);
     }
 
@@ -300,7 +338,12 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     }
   }
 
-  if (!customRanEarly || allFilled.length === 0) {
+  const needsLateCustom =
+    !customRanEarly ||
+    allFilled.length === 0 ||
+    hasUnfilledYesNoOrEEOC(snap) ||
+    (snap?.customControls || []).some((c) => !c.filled);
+  if (needsLateCustom) {
     await applyCustomControlsResult(page, context, log, {
       snap,
       seen,
@@ -313,10 +356,13 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
   let aiAnswers = {};
   const answerUnfilled = getRuntime().answerUnfilledFields;
   if (getSettings().ai_fill_enabled && lastUnfilled.length && answerUnfilled) {
-    log?.layer("smart_fill", `AI fallback for ${lastUnfilled.length} unfilled field(s)`, "info");
-    aiAnswers = await answerUnfilled(context, { unfilled: lastUnfilled, sessionId });
-    for (const [selector, value] of Object.entries(aiAnswers)) {
-      if (seen.has(selector)) continue;
+    const orderedUnfilled = sortByVisualOrder(lastUnfilled);
+    log?.layer("smart_fill", `AI fallback for ${orderedUnfilled.length} unfilled field(s)`, "info");
+    aiAnswers = await answerUnfilled(context, { unfilled: orderedUnfilled, sessionId });
+    for (const entry of orderedUnfilled) {
+      const selector = entry.selector || "";
+      const value = aiAnswers[selector];
+      if (!selector || !value || seen.has(selector)) continue;
       const longText = value.length > getSettings().human_long_text_threshold;
       if (await fillViaPlaywright(page, selector, value, { longText })) {
         seen.add(selector);

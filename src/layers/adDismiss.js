@@ -8,10 +8,15 @@ import {
   INTERSTITIAL_DISMISS_PATTERNS,
   INTERSTITIAL_UPSELL_BODY,
   SKIP_AND_CONTINUE_PATTERN,
+  SKIP_FREE_EXPERT_REVIEW_PATTERN,
 } from "../heuristics.js";
 
 /** Known close controls — tried before DOM scan candidates. */
 const STRUCTURAL_DISMISS_SELECTORS = [
+  ".phlexPopup .close",
+  ".phlexPopup [class*='close' i]",
+  ".jdJbeAlertPopUp .close",
+  ".ajPopUpFrame .close",
   ".bb-sticky-close",
   ".bb-sticky-container .bb-sticky-close",
   "[class*='sticky-close' i]",
@@ -145,6 +150,9 @@ export async function scanBlockingOverlays(page) {
 
         if (/bb-sticky-close|sticky-close|ad-close|ad_close/i.test(meta.className)) score += 120;
         if (meta.inStickyAd) score += 80;
+        if (el.closest(".phlexPopup, .jdJbeAlertPopUp, [class*='phlexPopup' i]")) {
+          if (/^close$|^[×✕x]$/i.test(meta.text.trim()) || /close/i.test(meta.className)) score += 150;
+        }
         if (/^close$/i.test(meta.text.trim()) || /^[×✕x]$/i.test(meta.text.trim())) score += 70;
         if (/close/i.test(meta.aria)) score += 65;
         if (/close/i.test(meta.className) && meta.area < 12000) score += 50;
@@ -152,7 +160,7 @@ export async function scanBlockingOverlays(page) {
         if (meta.zIndex >= 1000 && score > 0) score += 20;
 
         const parentDialog = el.closest(
-          "[role='dialog'], [aria-modal='true'], .modal, [class*='ui-modal' i], [class*='interstitial' i], .bb-sticky-box",
+          "[role='dialog'], [aria-modal='true'], .modal, [class*='ui-modal' i], [class*='interstitial' i], .bb-sticky-box, .phlexPopup, .jdJbeAlertPopUp",
         );
         const parentText = (parentDialog?.innerText || "").slice(0, 600).toLowerCase().replace(/[\u2018\u2019]/g, "'");
         const adNearby = AD_CONTEXT.test(parentText) || AD_CONTEXT.test(blob) || meta.inAdFrame || meta.inStickyAd;
@@ -204,9 +212,13 @@ export async function scanBlockingOverlays(page) {
         if (dismissCandidates.length >= 8) break;
       }
 
+      const phlexOverlays = queryDeep(".phlexOverlay, [class*='phlexOverlay' i]").filter(isVisibleEl);
+      if (phlexOverlays.length) overlayHints.push(`phlex-overlay:${phlexOverlays.length}`);
+
       const hasBlockingOverlay =
         bodyLocked ||
         stickyContainers.length > 0 ||
+        phlexOverlays.length > 0 ||
         (fullscreenFixed.length > 0 && dismissCandidates.length > 0) ||
         dismissCandidates.some((c) => c.score >= 100) ||
         dismissCandidates.some((c) => c.source === "interstitial-dismiss");
@@ -416,6 +428,41 @@ async function removeStickyAdContainers(page, log, layer) {
 }
 
 /**
+ * WhatJobs Phlex job-alert popup — close X, not role=dialog.
+ */
+export async function dismissPhlexPopup(page, log, layer = "page_prep") {
+  try {
+    const popup = page.locator(".phlexPopup, .jdJbeAlertPopUp, [class*='phlexPopup' i]").first();
+    if (!(await popup.isVisible({ timeout: 400 }).catch(() => false))) return false;
+
+    for (const sel of [
+      ".close",
+      "[class*='close' i]",
+      "a[title='Close']",
+      "button[aria-label='Close' i]",
+    ]) {
+      const close = popup.locator(sel).first();
+      if (!(await close.isVisible({ timeout: 250 }).catch(() => false))) continue;
+      await close.click({ timeout: 6000, force: true });
+      await humanPause(600, 1100);
+      log?.layer(layer, `dismiss: phlex job-alert popup — clicked ${sel}`, "info");
+      return true;
+    }
+
+    const overlay = page.locator(".phlexOverlay, [class*='phlexOverlay' i]").first();
+    if (await overlay.isVisible({ timeout: 250 }).catch(() => false)) {
+      await overlay.click({ timeout: 4000, force: true, position: { x: 5, y: 5 } });
+      await humanPause(600, 1100);
+      log?.layer(layer, "dismiss: phlex overlay — backdrop click", "info");
+      return true;
+    }
+  } catch (exc) {
+    log?.layer(layer, `dismiss: phlex popup failed (${exc.message})`, "debug");
+  }
+  return false;
+}
+
+/**
  * Dismiss a blocking interstitial/upsell dialog by its secondary action
  * (Skip, No thanks, Not now, …) — works on any site from dialog text, not CSS ids.
  *
@@ -494,6 +541,7 @@ export async function dismissInterstitialDialog(page, log, layer = "page_prep") 
 /** Click Skip / No thanks even when rendered as a non-button element. */
 async function clickDismissByTextInDialog(dialog, log, layer) {
   const patterns = [
+    SKIP_FREE_EXPERT_REVIEW_PATTERN,
     SKIP_AND_CONTINUE_PATTERN,
     /skip\s+to\s+(application|apply)/i,
     /^skip$/i,
@@ -550,6 +598,8 @@ export async function dismissResumeReviewUpsell(page, log, layer = "page_prep") 
 
 /** Dismiss blocking ad overlays. Returns true if any dismiss action succeeded. */
 export async function dismissBlockingOverlays(page, log, layer = "page_prep", snap = null) {
+  if (await dismissPhlexPopup(page, log, layer)) return true;
+
   // Chained upsells (e.g. Skip → Skip to application) — dismiss until none left.
   let anyDismissed = false;
   for (let chain = 0; chain < 3; chain += 1) {

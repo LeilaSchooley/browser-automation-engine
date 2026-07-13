@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Funding Choices consent</title>
+  <style>
+    .fc-consent-root { position: fixed; inset: 0; z-index: 2147483647; }
+    .fc-dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); }
+    .fc-dialog { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); background: #fff; padding: 1.5rem; z-index: 2; }
+    .listing { padding: 2rem; }
+    a.apply { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; background: #333; color: #fff; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="listing">
+    <h1>Remote Hotel Reservationist</h1>
+    <a class="apply" href="https://example.com/apply">Apply Job!</a>
+  </div>
+  <div class="fc-consent-root">
+    <div class="fc-dialog-overlay"></div>
+    <div class="fc-dialog" role="dialog">
+      <p>We use cookies</p>
+      <button type="button" id="fc-consent-btn">Consent</button>
+    </div>
+  </div>
+  <script>
+    document.getElementById('fc-consent-btn').addEventListener('click', () => {
+      document.querySelector('.fc-consent-root').style.display = 'none';
+    });
+  </script>
+</body>
+</html>

@@ -103,6 +103,43 @@ describe("applyStep", () => {
     assert.equal(c.step, "continue");
   });
 
+  it("waits after preferences signup instead of dismissing modal-close on listing", () => {
+    const snap = {
+      pageKind: "listing",
+      fieldCount: 0,
+      entryCount: 3,
+      modalCount: 1,
+      hasApplyModal: false,
+      hasBlockingOverlay: false,
+      cookieBanner: true,
+      entryCandidates: [{ text: "I'm interested", testId: "job-preview-apply-button", score: 203 }],
+      dismissCandidates: [{ text: "", testId: "modal-close", score: 200 }],
+      url: "https://www.jobleads.com/us/job/example",
+      title: "Platform Engineer | JobLeads.com",
+    };
+    const history = [{ action: "smart_fill", ok: true, progress: true, preferencesSignup: true }];
+    const c = classifyApplyStep(snap, { filled: [{ type: "salary" }], unfilled: [] }, history);
+    assert.equal(c.step, "loading");
+    assert.match(c.reason || "", /post-preferences/i);
+  });
+
+  it("suppresses entry replay after learned affordance entry act on same page", () => {
+    const snap = {
+      pageKind: "listing",
+      fieldCount: 0,
+      entryCount: 3,
+      entryCandidates: [{ text: "I'm interested", testId: "job-preview-apply-button", score: 203 }],
+      url: "https://www.jobleads.com/us/job/example",
+      title: "Platform Engineer | JobLeads.com",
+    };
+    const fp = pageFingerprintFromSnap(snap);
+    const history = [
+      { action: "act", applyStep: "entry", ok: true, progress: true, fromFingerprint: fp },
+    ];
+    const c = classifyApplyStep(snap, { filled: [] }, history);
+    assert.notEqual(c.step, "entry");
+  });
+
   it("never classifies identity registration as overlay dismiss", () => {
     const snap = {
       pageKind: "auth",
@@ -121,6 +158,29 @@ describe("applyStep", () => {
     const c = classifyApplyStep(snap, { filled: [] }, []);
     assert.notEqual(c.step, "overlay");
     assert.equal(c.step, "form");
+  });
+
+  it("classifies Ashby job board filters as entry not preferences form", () => {
+    const snap = {
+      pageKind: "content",
+      fieldCount: 4,
+      passwordFieldCount: 0,
+      authForm: false,
+      hasApplyModal: false,
+      entryCount: 0,
+      fileInputCount: 0,
+      url: "https://jobs.ashbyhq.com/ditto",
+      pageText: "Open Positions",
+      fields: [
+        { name: "departmentId", label: "Department", type: "select-one" },
+        { name: "employmentType", label: "Employment Type", type: "select-one" },
+        { name: "locationId", label: "Location", type: "select-one" },
+        { name: "workplaceType", label: "Location Type", type: "select-one" },
+      ],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, [], { job: { title: "Engineer", company: "Ditto" } });
+    assert.equal(c.step, "entry");
+    assert.match(c.reason, /job board index/i);
   });
 
   it("classifies preferences gate with empty salary as form not continue", () => {
@@ -152,17 +212,53 @@ describe("applyStep", () => {
     assert.notEqual(stepToPlan(c, { ...listingSnap, fieldCount: 0 }, [])?.type, "smart_fill");
   });
 
-  it("classifies cookie banner as consent", () => {
+  it("classifies cookie banner as consent with high confidence", () => {
     const snap = {
       ...listingSnap,
       cookieBanner: true,
+      structuralCookieBanner: true,
       cookieCandidates: [{ text: "Accept all cookies", score: 90 }],
       entryCount: 0,
       pageKind: "consent",
+      pageText: "We use cookies",
     };
     const c = classifyApplyStep(snap, { filled: [] }, []);
     assert.equal(c.step, "consent");
+    assert.equal(c.confidence, "high");
     assert.equal(stepToPlan(c, snap, []).type, "accept_cookies");
+  });
+
+  it("classifies job-alert popup as overlay not consent", () => {
+    const snap = {
+      pageKind: "form",
+      fieldCount: 7,
+      modalCount: 1,
+      cookieBanner: true,
+      entryCount: 0,
+      pageText: "Be the first to know Receive the Latest Jobs",
+      fields: [
+        { label: "Email Address", type: "email" },
+        { label: "Receive the Latest Jobs", type: "submit" },
+      ],
+      dismissCandidates: [{ text: "×", score: 150, testId: "close" }],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.equal(c.step, "overlay");
+    assert.notEqual(c.step, "consent");
+  });
+
+  it("classifies weak cookie candidate as medium confidence consent", () => {
+    const snap = {
+      ...listingSnap,
+      cookieBanner: true,
+      structuralCookieBanner: true,
+      cookieCandidates: [{ text: "Agree", score: 65 }],
+      pageText: "cookie policy",
+      fieldCount: 0,
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.equal(c.step, "consent");
+    assert.equal(c.confidence, "medium");
   });
 
   it("classifies blocking ad overlay before consent", () => {
@@ -422,6 +518,33 @@ describe("applyStep", () => {
     assert.match(c.reason || "", /Skip to application/i);
   });
 
+  it("classifies JobLeads resume score gate as overlay dismiss", () => {
+    const snap = {
+      pageKind: "listing",
+      fieldCount: 0,
+      fileInputCount: 0,
+      entryCount: 3,
+      modalStepCount: 0,
+      hasApplyModal: false,
+      hasBlockingOverlay: true,
+      modalCount: 1,
+      cookieBanner: false,
+      continueCount: 0,
+      submitCount: 0,
+      pageText:
+        "Applying with a 36/100 resume score is not recommended! Save your free expert resume review to improve it",
+      overlayHints: ["interstitial-dismiss"],
+      dismissCandidates: [{ text: "Skip free expert review", score: 320, source: "interstitial-dismiss" }],
+      title: "Platform Engineer | JobLeads.com",
+      url: "https://www.jobleads.com/us/job/example",
+      bodyTextLength: 8000,
+    };
+    const history = [{ action: "upload_resume", ok: true, progress: true }];
+    const c = classifyApplyStep(snap, { filled: [] }, history);
+    assert.equal(c.step, "overlay");
+    assert.match(c.reason || "", /Skip free expert review/i);
+  });
+
   it("classifies unloaded page as loading", () => {
     const snap = {
       pageKind: "unknown",
@@ -446,5 +569,91 @@ describe("applyStep", () => {
       { action: "click_apply", ok: true, progress: true },
     ]);
     assert.notEqual(c.step, "entry");
+  });
+
+  it("blocks devitjobs alert signup after apply redirect", () => {
+    const snap = {
+      url: "https://devitjobs.uk/jobs/Assura-Protect-Azure-Data-DevOps-Engineer",
+      hostname: "devitjobs.uk",
+      pageKind: "form",
+      fieldCount: 3,
+      entryCount: 0,
+      submitCount: 0,
+      fileInputCount: 0,
+      title: "Azure Data DevOps Engineer Job in London | Assura Protect",
+      pageText: "Data Alert £60,000 Full-Time",
+      fields: [
+        { name: "techCategory", label: "DevOps Java JavaScript", type: "select-one" },
+        { name: "personName", label: "Your name", type: "text" },
+        { name: "personEmail", label: "Your email", type: "email" },
+      ],
+    };
+    const history = [{ action: "click_apply", ok: true, progress: true }];
+    const c = classifyApplyStep(snap, { filled: [] }, history);
+    assert.equal(c.step, "blocked");
+    assert.equal(c.hardStop, true);
+    assert.match(c.reason, /alert signup|no apply/i);
+    assert.notEqual(stepToPlan(c, snap, history)?.type, "smart_fill");
+  });
+
+  it("classifies Jobright sign-up-to-apply modal as signup not smart_fill", () => {
+    const snap = {
+      url: "https://jobright.ai/jobs/info/6a286da82d6c332ee52e5fcb",
+      hostname: "jobright.ai",
+      pageKind: "modal",
+      fieldCount: 1,
+      passwordFieldCount: 0,
+      emailFieldCount: 1,
+      hasApplyModal: true,
+      applyModalTitle: "Apply to Technical Support Specialist @Baker Tilly Canada",
+      pageText: "Sign Up to Apply",
+      fields: [{ id: "sign-up_email", label: "Email", type: "text" }],
+      submitCandidates: [{ text: "SIGN UP TO APPLY" }],
+    };
+    const c = classifyApplyStep(
+      snap,
+      { filled: [] },
+      [{ action: "click_apply", ok: true }],
+      { applicant: { email: "test@example.com", fullName: "Test User" } },
+    );
+    assert.equal(c.step, "signup");
+    assert.equal(stepToPlan(c, snap, [])?.type, "auth_signup");
+    assert.notEqual(stepToPlan(c, snap, [])?.type, "smart_fill");
+  });
+
+  it("blocks Jooble jdp when original job requires local presence", () => {
+    const snap = {
+      url: "https://jooble.org/jdp/9177318897283547463",
+      hostname: "jooble.org",
+      pageKind: "listing",
+      fieldCount: 1,
+      entryCount: 1,
+      fileInputCount: 0,
+      title: "[Full Remote] Junior Web Developer at Joinrs US – Jooble",
+      pageText:
+        "This position requires local presence. Please view similar jobs below. Similar jobs that could be interesting for you",
+      entryCandidates: [{ text: "Apply", score: 90, href: "https://jooble.org/away/9177318897283547463" }],
+      fields: [{ name: "email", placeholder: "example@mail.com", type: "text" }],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.equal(c.step, "blocked");
+    assert.equal(c.hardStop, true);
+    assert.match(c.reason, /unavailable|similar jobs/i);
+    assert.notEqual(stepToPlan(c, snap, [])?.type, "click_apply");
+  });
+
+  it("blocks Jooble SearchResult when closedJob=True in URL", () => {
+    const snap = {
+      url: "https://jooble.org/SearchResult?closedJob=True&ukw=junior%20web%20developer",
+      hostname: "jooble.org",
+      pageKind: "form",
+      fieldCount: 1,
+      entryCount: 0,
+      pageText: "Subscribe and receive similar vacancies",
+      fields: [{ name: "email", type: "email" }],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, [{ action: "click_apply", ok: true }]);
+    assert.equal(c.step, "blocked");
+    assert.match(c.reason, /closed/i);
   });
 });

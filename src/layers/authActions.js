@@ -7,7 +7,7 @@ import {
   resolveAccountForHost,
 } from "../accountStore.js";
 import { hostKey } from "../host.js";
-import { loadSiteLearnings } from "../siteLearnings.js";
+import { loadSiteLearnings, stableAuthSelector } from "../siteLearnings.js";
 import {
   LOGIN_WALL_TEXT,
   OAUTH_PROVIDER_TEXT,
@@ -114,9 +114,11 @@ export function getAuthCredentials(context) {
 export async function attemptAuthLogin(page, snap, context, log) {
   const hostname = snap?.hostname || "";
   const authSelectorsUsed = {};
-  const trackSelector = (kind, selector) => {
+  const trackSelector = (kind, selector, meta = {}) => {
     if (!kind || !selector) return;
-    authSelectorsUsed[kind] = [...new Set([...(authSelectorsUsed[kind] || []), selector])];
+    const stable = stableAuthSelector(selector, { kind, ...meta });
+    if (!stable) return;
+    authSelectorsUsed[kind] = [...new Set([...(authSelectorsUsed[kind] || []), stable])];
   };
 
   let account = null;
@@ -150,7 +152,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
       try {
         await identityLoc.nth(pairIndex).fill(username || identity, { timeout: 5000 });
         filledIdentity = true;
-        trackSelector("username", `input[type="text"]:nth-of-type(${pairIndex + 1})`);
+        trackSelector("username", `input[type="text"]:nth-of-type(${pairIndex + 1})`, { kind: "username" });
       } catch {
         /* fallback */
       }
@@ -163,7 +165,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
         { log, layer: "auth", label: "username" },
       );
       filledIdentity = r.ok;
-      if (r.ok) trackSelector("username", r.selector);
+      if (r.ok) trackSelector("username", r.selector, { kind: "username" });
     }
   }
   if (!filledIdentity) {
@@ -174,7 +176,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
       { log, layer: "auth", label: "email" },
     );
     filledIdentity = r.ok;
-    if (r.ok) trackSelector("email", r.selector);
+    if (r.ok) trackSelector("email", r.selector, { kind: "email" });
   }
   if (!filledIdentity) {
     const r = await fillFirstVisibleTracked(page, ['input[type="text"]'], identity, {
@@ -183,7 +185,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
       label: "identity",
     });
     filledIdentity = r.ok;
-    if (r.ok) trackSelector("username", r.selector);
+    if (r.ok) trackSelector("username", r.selector, { kind: "username" });
   }
 
   let filledPassword = false;
@@ -193,7 +195,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
       await pw.click({ timeout: 3000 });
       await pw.fill(password, { timeout: 5000 });
       filledPassword = true;
-      trackSelector("password", 'input[type="password"]');
+      trackSelector("password", 'input[type="password"]', { kind: "password" });
       log?.layer("auth", "filled password", "debug");
     } catch {
       /* fallback */
@@ -207,7 +209,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
       { log, layer: "auth", label: "password" },
     );
     filledPassword = r.ok;
-    if (r.ok) trackSelector("password", r.selector);
+    if (r.ok) trackSelector("password", r.selector, { kind: "password" });
   }
 
   if (!filledIdentity || !filledPassword) {

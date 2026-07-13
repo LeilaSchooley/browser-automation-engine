@@ -470,9 +470,17 @@ function runSmartFill(config, siteMappings) {
           while ((m = reFull.exec(s))) nums.push(parseInt(m[1] + m[2], 10));
           return nums.filter((n) => n >= 1000);
         };
-        const targetNums = parseNums(str);
-        const mid = targetNums.length
-          ? (Math.min.apply(null, targetNums) + Math.max.apply(null, targetNums)) / 2
+        const picked = typeof __pickClosestSalaryOption === "function"
+          ? __pickClosestSalaryOption(opts, str)
+          : null;
+        if (picked) {
+          el.value = picked.value;
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+        const targetNumsLegacy = parseNums(str);
+        const mid = targetNumsLegacy.length
+          ? (Math.min.apply(null, targetNumsLegacy) + Math.max.apply(null, targetNumsLegacy)) / 2
           : 0;
         if (mid) {
           let best = null;
@@ -591,8 +599,28 @@ function runSmartFill(config, siteMappings) {
     return true;
   }
 
-  function pushFilled(entry) {
-    filled.push(entry);
+  function fieldPosition(el) {
+    if (!el) return { top: 1e9, left: 0 };
+    try {
+      const r = el.getBoundingClientRect();
+      return {
+        top: Math.round(r.top + (window.scrollY || 0)),
+        left: Math.round(r.left + (window.scrollX || 0)),
+      };
+    } catch (e) {
+      return { top: 1e9, left: 0 };
+    }
+  }
+
+  function withPosition(entry, el) {
+    const pos = fieldPosition(el || (entry.selector ? findElement(entry.selector) : null));
+    entry.top = pos.top;
+    entry.left = pos.left;
+    return entry;
+  }
+
+  function pushFilled(entry, el) {
+    filled.push(withPosition(entry, el));
   }
 
   function resolveHostMappings(mappings, hostname) {
@@ -624,17 +652,17 @@ function runSmartFill(config, siteMappings) {
     const el = findElement(selector);
     if (!el || (el.value && String(el.value).trim())) return;
     if (el.type === "file") {
-      filled.push({ type: fieldType, selector, score: 100, file: true });
+      filled.push(withPosition({ type: fieldType, selector, score: 100, file: true }, el));
       return;
     }
     if (fieldType === "additionalinfo" && !config.fillAdditionalInfo) return;
     if (shouldDeferFill(fieldType, el)) {
-      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping", deferred: true });
+      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping", deferred: true }, el);
       siteMapped.push(selector);
       return;
     }
     if (setFieldValue(el, value)) {
-      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping" });
+      pushFilled({ type: fieldType, selector, score: 100, source: "site_mapping" }, el);
       siteMapped.push(selector);
     }
   });
@@ -653,24 +681,27 @@ function runSmartFill(config, siteMappings) {
     if (el.type === "file") {
       // Only file-path types may target file inputs; a text value never goes here.
       if (fieldType === "resume") {
-        filled.push({ type: fieldType, selector: best.selector, score: best.score, file: true });
+        filled.push(withPosition({ type: fieldType, selector: best.selector, score: best.score, file: true }, el));
       }
       continue;
     }
     // Never type a filesystem path into a text field.
     if (fieldType === "resume") continue;
     if (shouldDeferFill(fieldType, el)) {
-      pushFilled({
-        type: fieldType,
-        selector: best.selector,
-        score: best.score,
-        source: "dom_scan",
-        deferred: true,
-      });
+      pushFilled(
+        {
+          type: fieldType,
+          selector: best.selector,
+          score: best.score,
+          source: "dom_scan",
+          deferred: true,
+        },
+        el,
+      );
       continue;
     }
     if (setFieldValue(el, value)) {
-      pushFilled({ type: fieldType, selector: best.selector, score: best.score, source: "dom_scan" });
+      pushFilled({ type: fieldType, selector: best.selector, score: best.score, source: "dom_scan" }, el);
     }
   }
 
@@ -693,14 +724,19 @@ function runSmartFill(config, siteMappings) {
     const t = (scope.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
     return [dn, t].filter(Boolean).join(" ");
   }
-  function upsertFileTarget(selector, clue) {
+  function upsertFileTarget(selector, clue, el) {
     if (!selector) return;
     const existing = fileTargets.find((t) => t.selector === selector);
+    const pos = fieldPosition(el);
     if (existing) {
       if ((clue || "").length > (existing.clue || "").length) existing.clue = clue;
+      if (pos.top < (existing.top ?? 1e9)) {
+        existing.top = pos.top;
+        existing.left = pos.left;
+      }
       return;
     }
-    fileTargets.push({ selector, clue: clue || "" });
+    fileTargets.push({ selector, clue: clue || "", top: pos.top, left: pos.left });
   }
 
   const formRoot = document.querySelector("form.wpforms-form, form[id^='wpforms-form']");
@@ -711,7 +747,7 @@ function runSmartFill(config, siteMappings) {
       const embedded = u.querySelector('input[type="file"]');
       const fileEl = embedded || formFiles[idx];
       if (!fileEl || fileEl.disabled) return;
-      upsertFileTarget(generateStableSelector(fileEl), wpformsUploaderClue(u));
+      upsertFileTarget(generateStableSelector(fileEl), wpformsUploaderClue(u), fileEl);
     });
   }
 
@@ -748,7 +784,7 @@ function runSmartFill(config, siteMappings) {
           detachedIdx += 1;
         }
       }
-      upsertFileTarget(generateStableSelector(el), clue || "");
+      upsertFileTarget(generateStableSelector(el), clue || "", el);
     }
   }
 
@@ -762,22 +798,28 @@ function runSmartFill(config, siteMappings) {
       const blob = buildFieldClueBlob(el);
       if (isAdditionalInfoBlob(blob)) {
         if (config.fillAdditionalInfo) {
-          pushFilled({
-            type: "additionalinfo",
-            selector: generateStableSelector(el),
-            score: 40,
-            source: "textarea_fallback",
-            deferred: true,
-          });
+          pushFilled(
+            {
+              type: "additionalinfo",
+              selector: generateStableSelector(el),
+              score: 40,
+              source: "textarea_fallback",
+              deferred: true,
+            },
+            el,
+          );
         }
       } else {
-        pushFilled({
-          type: "coverletter",
-          selector: generateStableSelector(el),
-          score: 30,
-          source: "textarea_fallback",
-          deferred: true,
-        });
+        pushFilled(
+          {
+            type: "coverletter",
+            selector: generateStableSelector(el),
+            score: 30,
+            source: "textarea_fallback",
+            deferred: true,
+          },
+          el,
+        );
       }
     }
   }
@@ -795,13 +837,16 @@ function runSmartFill(config, siteMappings) {
     if (filledSelectors.has(selector)) continue;
     const clue = buildFieldClueBlob(el);
     if (!clue && el.tagName !== "SELECT") continue;
-    const entry = {
-      selector,
-      clue,
-      tagName: el.tagName.toLowerCase(),
-      inputType: (el.type || "").toLowerCase(),
-      required: el.required || el.getAttribute("aria-required") === "true",
-    };
+    const entry = withPosition(
+      {
+        selector,
+        clue,
+        tagName: el.tagName.toLowerCase(),
+        inputType: (el.type || "").toLowerCase(),
+        required: el.required || el.getAttribute("aria-required") === "true",
+      },
+      el,
+    );
     if (el.tagName === "SELECT") {
       entry.options = Array.from(el.options || []).slice(0, 20).map((o) => o.text.trim()).filter(Boolean);
     }

@@ -24,10 +24,22 @@ export function parsePasswordRequirementsFromText(text) {
   if (!blob.trim()) return { ...DEFAULT_PASSWORD_RULES };
 
   const mentionsPolicy =
-    /one\s+lowercase|one\s+uppercase|one\s+number|one\s+special|minimum\s+of\s+\d+\s+character|at\s+least\s+\d+\s+character/i.test(
+    /one\s+lowercase|one\s+uppercase|one\s+number|one\s+special|minimum\s+of\s+\d+\s+character|at\s+least\s+\d+\s+character|both numbers and letters|numbers and letters/i.test(
       blob,
     );
   if (!mentionsPolicy) return { ...DEFAULT_PASSWORD_RULES };
+
+  if (/both numbers and letters|numbers and letters/i.test(blob)) {
+    const minMatch = blob.match(/(\d+)\s+minimum|minimum\s+(?:of\s+)?(\d+)|at\s+least\s+(\d+)/i);
+    const minLength = parseInt(minMatch?.[1] || minMatch?.[2] || minMatch?.[3] || "8", 10) || 8;
+    return {
+      lowercase: true,
+      uppercase: false,
+      digit: true,
+      special: false,
+      minLength,
+    };
+  }
 
   const rules = {
     lowercase: /one\s+lowercase|lowercase\s+character/i.test(blob),

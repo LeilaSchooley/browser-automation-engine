@@ -1,6 +1,6 @@
 {
   "name": "@leilaschooley/browser-automation-engine",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "Shared Playwright automation engine — dynamic click discovery, smart fill, and agent loop",
   "type": "module",
   "main": "src/index.js",
@@ -49,6 +49,9 @@
     "@browserbasehq/stagehand": {
       "optional": true
     }
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Portaled listbox</title>
+  <style>
+    .field { padding: 0.5rem; border: 1px solid #ccc; width: 200px; cursor: pointer; }
+    .popover { position: fixed; top: 120px; left: 40px; background: #fff; border: 1px solid #ccc; z-index: 9999; }
+    .option { padding: 0.5rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div role="dialog" aria-modal="true" aria-label="Preferences">
+    <label>Location</label>
+    <div id="loc-trigger" role="combobox" aria-expanded="true" class="field">?</div>
+  </div>
+  <div class="popover" role="listbox" data-popper-placement="bottom">
+    <div role="option" class="option">Germany</div>
+    <div role="option" class="option">France</div>
+  </div>
+  <script>
+    document.querySelectorAll('[role=option]').forEach((opt) => {
+      opt.addEventListener('click', () => {
+        document.getElementById('loc-trigger').textContent = opt.textContent.trim();
+        document.querySelector('.popover').style.display = 'none';
+      });
+    });
+  </script>
+</body>
+</html>

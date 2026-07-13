@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Submit confirm picker</title>
+  <style>
+    .picker { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
+    .panel { background: #fff; padding: 1rem; min-width: 280px; }
+    .option { padding: 0.5rem; cursor: pointer; }
+    .option.selected { background: #eef; }
+    .submit-btn { margin-top: 1rem; padding: 0.75rem; background: #2563eb; color: #fff; border: none; width: 100%; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="overlay" role="presentation">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Tell us about yourself">
+      <h2>Tell us about yourself</h2>
+      <label>Salary expectations</label>
+      <div id="salary-trigger" role="combobox" class="field" tabindex="0">?</div>
+    </div>
+  </div>
+  <div id="salary-picker" class="picker" role="dialog" aria-modal="true" aria-label="Salary" style="display:none">
+    <div class="panel">
+      <div role="listbox">
+        <div role="option" class="option">USD 60,000 - 80,000</div>
+      </div>
+      <button type="button" class="submit-btn">Submit</button>
+    </div>
+  </div>
+  <script>
+    const trigger = document.getElementById('salary-trigger');
+    const picker = document.getElementById('salary-picker');
+    picker.querySelector('[role=option]').addEventListener('click', (e) => {
+      picker.querySelectorAll('.option').forEach((o) => o.classList.remove('selected'));
+      e.target.classList.add('selected');
+    });
+    trigger.addEventListener('click', () => { picker.style.display = 'flex'; });
+    picker.querySelector('.submit-btn').addEventListener('click', () => {
+      const sel = picker.querySelector('.option.selected');
+      if (sel) trigger.textContent = sel.textContent.trim();
+      picker.style.display = 'none';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Application — Ashby-style</title>
+  </head>
+  <body>
+    <form class="ashby-application-form">
+      <div class="ashby-application-form-field-entry">
+        <div class="ashby-application-form-question-title">
+          Will you now or in the future require visa sponsorship for employment?
+        </div>
+        <div class="_yesno_abc123">
+          <button type="button">Yes</button>
+          <button type="button">No</button>
+        </div>
+      </div>
+
+      <div class="ashby-application-form-field-entry">
+        <div class="ashby-application-form-question-title">
+          Are you legally authorized to work in the United States?
+        </div>
+        <div class="_yesno_def456">
+          <button type="button">Yes</button>
+          <button type="button">No</button>
+        </div>
+      </div>
+
+      <fieldset id="eeoc-gender">
+        <legend>Gender</legend>
+        <label><input type="radio" name="gender" value="female" /> Female</label>
+        <label><input type="radio" name="gender" value="male" /> Male</label>
+        <label><input type="radio" name="gender" value="decline" /> Decline to self-identify</label>
+      </fieldset>
+
+      <fieldset id="eeoc-veteran">
+        <legend>Veteran status</legend>
+        <label><input type="radio" name="veteran" value="yes" /> I am a veteran</label>
+        <label><input type="radio" name="veteran" value="no" /> I am not a veteran</label>
+        <label><input type="radio" name="veteran" value="decline" /> I do not want to answer</label>
+      </fieldset>
+    </form>
+  </body>
+</html>

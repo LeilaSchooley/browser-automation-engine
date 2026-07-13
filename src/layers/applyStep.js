@@ -3,6 +3,7 @@
  */
 import { looksLikeApplyForm } from "./formDiscovery.js";
 import { isPageUnloaded } from "./pageReady.js";
+import { looksLikeDeadApplyDestination, looksLikeAggregatorTrap } from "./applyUrlSafety.js";
 import {
   hasAuthCredentials,
   looksLikeAuthForm,
@@ -26,6 +27,11 @@ import { looksLikeEmailVerifyWall } from "../inboxVerify.js";
 import { shouldNeverDismiss } from "../workflowGates.js";
 import { isWorkflowGateModal } from "../workflowGates.js";
 import {
+  looksLikeRealCookieConsent,
+  isNonCookiePopup,
+  topCookieCandidateScore,
+} from "../consentDetection.js";
+import {
   candidateSuggestsFileUpload,
   findBestDismissCandidate,
   isExpertReviewGate,
@@ -34,6 +40,19 @@ import {
   pageFingerprintFromSnap,
   shouldPreferUpload,
   uploadAlreadySucceeded,
+  preferencesSignupSubmitted,
+  applyEntrySucceeded,
+  countRecentAction,
+  looksLikeFakeJobListing,
+  looksLikeClosedJobListing,
+  looksLikeJobBoardIndex,
+  looksLikeInlineApplicationForm,
+  hasUnfilledApplicationFields,
+  uploadStalled,
+  isJobAlertInterstitial,
+  looksLikeMarketingYesNoModal,
+  looksLikeJobAlertSignupForm,
+  looksLikeApplySignupGate,
 } from "../heuristics.js";
 import { BLOCKED_TEXT } from "../patterns/index.js";
 
@@ -58,8 +77,9 @@ export const STEP_ACTIONS = {
   ambiguous: null,
 };
 
-export function applyAffordances(snap) {
+export function applyAffordances(snap, pageState = null) {
   if (!snap) return {};
+  const ps = pageState || null;
   return {
     pageKind: snap.pageKind,
     fieldCount: snap.fieldCount || 0,
@@ -76,6 +96,12 @@ export function applyAffordances(snap) {
     topEntry: snap.entryCandidates?.[0]?.text || "",
     topModal: snap.modalCandidates?.[0]?.text || "",
     topContinue: snap.continueCandidates?.[0]?.text || "",
+    dialogStackDepth: ps?.dialogStackDepth ?? (snap.dialogStack || []).length,
+    pickerOpen: ps?.pickerOpen ?? !!snap.pickerOpen,
+    uiPhase: ps?.uiPhase ?? (snap.pickerOpen ? "picker_open" : "idle"),
+    pendingCommits: ps?.pendingCommits ?? [],
+    confirmCount: snap.confirmCount || 0,
+    activeDialogIndex: ps?.activeDialogIndex ?? snap.activeDialogIndex ?? -1,
   };
 }
 
@@ -131,6 +157,47 @@ function getAuthFromContext(context) {
   };
 }
 
+function classifyJobAlertDismiss(snap, affordances, fp, reasonPrefix = "non-cookie popup") {
+  const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
+  return {
+    step: "overlay",
+    confidence: "high",
+    reason: top
+      ? `${reasonPrefix} — dismiss "${top.text || top.aria || top._text || "close"}"`
+      : `${reasonPrefix} blocking apply — dismiss first`,
+    target: top || null,
+    affordances,
+    fingerprint: fp,
+  };
+}
+
+function shouldDismissJobAlertFirst(snap, context = null) {
+  if (
+    looksLikeMarketingYesNoModal(snap) ||
+    isNonCookiePopup(snap) ||
+    isJobAlertInterstitial(snap)
+  ) {
+    return true;
+  }
+
+  const hasModalSurface = (snap?.modalCount || 0) > 0 || snap?.hasBlockingOverlay;
+  if (hasModalSurface && looksLikeJobAlertSignupForm(snap)) {
+    return true;
+  }
+
+  const learnings = context?.siteLearnings || {};
+  if (learnings.dismissFirst || learnings.avoidFillWhenAlert) {
+    if ((snap?.modalCount || 0) > 0 || snap?.hasBlockingOverlay) {
+      return true;
+    }
+    const blob = `${snap?.pageText || ""} ${snap?.title || ""} ${snap?.applyModalTitle || ""}`.toLowerCase();
+    if (/job alert|new vacancies|subscribe|time for a new job/i.test(blob)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Classify the current apply surface from a DOM snapshot.
  * @returns {{ step: string, confidence: "high"|"low", reason: string, target?: object|null, affordances: object }}
@@ -151,6 +218,137 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     };
   }
 
+  const dead = looksLikeDeadApplyDestination(snap);
+  if (dead.dead) {
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: dead.reason,
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  const closedJob = looksLikeClosedJobListing(snap);
+  if (closedJob.closed) {
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: closedJob.reason,
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  const trap = looksLikeAggregatorTrap(snap, history);
+  if (trap.trapped) {
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: trap.reason,
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  // Marketing/job-alert modals — dismiss before fake-listing trap or form fill.
+  if (shouldDismissJobAlertFirst(snap, context)) {
+    const prefix = context?.siteLearnings?.dismissFirst
+      ? "learned: dismiss job-alert first"
+      : "non-cookie popup";
+    return classifyJobAlertDismiss(snap, affordances, fp, prefix);
+  }
+
+  if (looksLikeApplySignupGate(snap)) {
+    if (canProvisionAccounts(context)) {
+      ensureAccount(context, snap.hostname || "");
+      return {
+        step: "signup",
+        confidence: "high",
+        reason: "platform signup gate — create account to apply",
+        target: snap.signUpCandidates?.[0] || snap.submitCandidates?.[0] || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: "sign up required on this job board — create account manually to apply",
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  const fakeListing = looksLikeFakeJobListing(snap, history);
+  if (fakeListing.fake) {
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: fakeListing.reason,
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  // After preferences signup CTA, JobLeads briefly shows listing + modal-close overlay.
+  // Dismissing it resets the funnel — wait for auth/registration instead.
+  if (preferencesSignupSubmitted(history)) {
+    if (looksLikeEmailVerifyWall(snap)) {
+      return {
+        step: "verify_email",
+        confidence: "high",
+        reason: "post-preferences signup — email activation required",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    if (looksLikeAuthForm(snap) || hasIdentityRegistrationFields(snap)) {
+      /* fall through to auth/registration handlers below */
+    } else if (snap.hasApplyModal && (snap.modalStepCount || 0) > 0) {
+      /* fall through to wizard handlers below */
+    } else {
+      const dismiss = snap.dismissCandidates?.[0];
+      const genericClose =
+        dismiss?.testId === "modal-close" ||
+        /^(close|×|x)$/i.test(String(dismiss?.text || dismiss?.aria || "").trim());
+      if (
+        genericClose ||
+        (snap.pageKind === "listing" && (snap.modalCount || 0) > 0 && !uploadAlreadySucceeded(history))
+      ) {
+        if ((snap.modalCount || 0) > 0 && countRecentAction(history, "wait_load", 3) >= 2) {
+          return {
+            step: "verify_email",
+            confidence: "high",
+            reason: "post-preferences signup — account activation modal (poll inbox)",
+            target: null,
+            affordances,
+            fingerprint: fp,
+          };
+        }
+        return {
+          step: "loading",
+          confidence: "high",
+          reason: "post-preferences signup — waiting for registration surface (do not close modal)",
+          target: null,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+    }
+  }
+
   if (snap.hasBlockingOverlay && (!snap.hasApplyModal || isResumeReviewUpsell(snap))) {
     if (!shouldNeverDismiss(snap)) {
       const top = snap.dismissCandidates?.[0];
@@ -167,6 +365,21 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
         fingerprint: fp,
       };
     }
+  }
+
+  if (looksLikeJobBoardIndex(snap)) {
+    const title = String(context?.job?.title || context?.listingTitle || "").trim();
+    const company = String(context?.job?.company || context?.company || "").trim();
+    const label = title ? `"${title}"` : "matching role";
+    const at = company ? ` at ${company}` : "";
+    return {
+      step: "entry",
+      confidence: "high",
+      reason: `job board index — pick listing for ${label}${at}`,
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
   }
 
   if (hasPreferencesGateFields(snap)) {
@@ -411,23 +624,47 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (filled >= 2 && looksLikeApplyForm(snap, 2) && !snap.authForm) {
+    if (!isNonCookiePopup(snap) && !looksLikeMarketingYesNoModal(snap)) {
+      return {
+        step: "review",
+        confidence: "high",
+        reason: `${filled} field(s) filled — ready for manual review`,
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+  }
+
+  // Non-cookie popups (job alerts, newsletters, phlex) — dismiss, never accept_cookies.
+  if (isNonCookiePopup(snap) || looksLikeMarketingYesNoModal(snap)) {
+    return classifyJobAlertDismiss(snap, affordances, fp);
+  }
+
+  if (snap.cookieBanner && !looksLikeRealCookieConsent(snap) && !snap.hasApplyModal) {
+    const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
     return {
-      step: "review",
+      step: "overlay",
       confidence: "high",
-      reason: `${filled} field(s) filled — ready for manual review`,
-      target: null,
+      reason: top
+        ? `mis-flagged banner — dismiss "${top.text || top.aria || "close"}"`
+        : "mis-flagged cookie banner — dismiss first",
+      target: top || null,
       affordances,
       fingerprint: fp,
     };
   }
 
-  // OneTrust / cookie chrome often stays in DOM while resume-score upsell is open —
-  // never prefer consent over Skip when the upsell markers are present.
-  if (snap.cookieBanner && !snap.hasApplyModal && !isResumeReviewUpsell(snap)) {
+  if (looksLikeRealCookieConsent(snap) && !snap.hasApplyModal && !isResumeReviewUpsell(snap)) {
+    const cookieScore = topCookieCandidateScore(snap);
+    const confidence = cookieScore >= 80 ? "high" : "medium";
     return {
       step: "consent",
-      confidence: "high",
-      reason: "cookie banner visible (no apply modal blocking)",
+      confidence,
+      reason:
+        confidence === "high"
+          ? "cookie consent — accept button or known consent chrome"
+          : "cookie consent — weak candidate, may need brain",
       target: snap.cookieCandidates?.[0] || null,
       affordances,
       fingerprint: fp,
@@ -436,6 +673,21 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
 
   if (snap.hasApplyModal && (snap.modalStepCount || 0) > 0) {
     const top = snap.modalCandidates?.[0];
+
+    if (looksLikeInlineApplicationForm(snap)) {
+      if (hasUnfilledApplicationFields(snap, fillResult) || uploadStalled(history)) {
+        return {
+          step: "form",
+          confidence: uploadStalled(history) ? "low" : "high",
+          reason: uploadStalled(history)
+            ? "inline application form — upload stalled, fill fields"
+            : "inline application form — fill required fields",
+          target: null,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+    }
 
     if (uploadAlreadySucceeded(history) && isExpertReviewGate(snap)) {
       const skip = findBestDismissCandidate(snap);
@@ -463,9 +715,10 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     }
 
     if (
-      shouldPreferUpload(snap, history) &&
+      shouldPreferUpload(snap, history, fillResult) &&
       !uploadAlreadySucceeded(history) &&
-      !isResumeChoiceStep(snap)
+      !isResumeChoiceStep(snap) &&
+      !uploadStalled(history)
     ) {
       return {
         step: "upload",
@@ -510,12 +763,7 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     // Only suppress the entry step if we already clicked apply FROM this same page
     // (fromFingerprint). Redirect chains land on new pages that need their own
     // apply click; a global "already clicked once" check breaks multi-hop flows.
-    const applySucceeded = history.some(
-      (h) =>
-        h.action === "click_apply" &&
-        h.ok &&
-        (h.fromFingerprint ? h.fromFingerprint === fp : true),
-    );
+    const applySucceeded = applyEntrySucceeded(history, fp);
     if (uploadAlreadySucceeded(history) && (snap.fieldCount || 0) === 0) {
       const skip = findBestDismissCandidate(snap);
       if (skip || isExpertReviewGate(snap) || (snap.modalCount || 0) > 0) {

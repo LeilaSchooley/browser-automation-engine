@@ -1,39 +1,20 @@
 import { pageFingerprint } from "./formDiscovery.js";
 import { getRuntime, getSettings } from "../runtime.js";
+import { buildAgentContext } from "./agentContext.js";
+import {
+  EndStateResponseSchema,
+  ValidatorResponseSchema,
+  parseJsonFromLlm,
+} from "../ai/contracts.js";
 
-function renderInteractives(snap, limit = 22) {
-  const items = (snap?.interactives || []).slice(0, limit);
-  if (!items.length) return "(no interactives)";
-  return items
-    .map((i) => {
-      const flags = [i.inModal ? "modal" : "", i.inNav ? "nav" : ""].filter(Boolean).join(",");
-      const href = i.href ? ` href=${i.href.slice(0, 80)}` : "";
-      return `#${i.index} [${i.kind}/${i.tag}] "${i.text || i.aria || "?"}"${href}${flags ? ` (${flags})` : ""}`;
-    })
-    .join("\n");
-}
-
-function renderFields(snap, limit = 10) {
-  const fields = (snap?.fields || []).slice(0, limit);
-  if (!fields.length) return "(none)";
-  return fields
-    .map(
-      (f) =>
-        `- ${f.type} "${f.label || f.name || "?"}"${f.required ? " (required)" : ""}${f.filled ? " [filled]" : ""}`,
-    )
-    .join("\n");
-}
-
-function snapSummary(snap) {
+function snapSummary(snap, layoutBlock = "") {
   if (!snap) return "(missing snapshot)";
   return [
     `URL: ${snap.url || "?"}`,
     `Title: ${snap.title || "?"}`,
     `pageKind=${snap.pageKind || "?"} fields=${snap.fieldCount || 0} fileInputs=${snap.fileInputCount || 0}`,
-    `applyModal=${snap.hasApplyModal ? "yes" : "no"} cookieBanner=${snap.cookieBanner ? "yes" : "no"}`,
-    `blockingOverlay=${snap.hasBlockingOverlay ? "yes" : "no"}`,
-    `Fields:\n${renderFields(snap)}`,
-    `Elements:\n${renderInteractives(snap)}`,
+    `applyModal=${snap.hasApplyModal ? "yes" : "no"} pickerOpen=${snap.pickerOpen ? "yes" : "no"}`,
+    layoutBlock,
   ].join("\n");
 }
 
@@ -46,7 +27,19 @@ function objectiveLabel(context) {
 }
 
 /** @param {Record<string, unknown>} snapBefore @param {Record<string, unknown>} snapAfter */
-export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore = 0, filledAfter = 0 } = {}) {
+function salaryUnfilledCount(snap) {
+  return (snap?.customControls || []).filter(
+    (c) => !c.filled && (c.mappedTo === "salary" || /salary|compensation/i.test(String(c.label || ""))),
+  ).length;
+}
+
+export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore = 0, filledAfter = 0, uiPhaseBefore = "idle", uiPhaseAfter = "idle" } = {}) {
+  const salaryBefore = salaryUnfilledCount(snapBefore);
+  const salaryAfter = salaryUnfilledCount(snapAfter);
+  const commitCompleted =
+    uiPhaseBefore === "option_selected_uncommitted" &&
+    (uiPhaseAfter === "ready_to_continue" || uiPhaseAfter === "idle") &&
+    !snapAfter?.pickerOpen;
   return {
     fingerprintChanged: pageFingerprint(snapBefore) !== pageFingerprint(snapAfter),
     urlChanged: String(snapBefore?.url || "") !== String(snapAfter?.url || ""),
@@ -54,18 +47,30 @@ export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore =
     fileInputDelta: (snapAfter?.fileInputCount || 0) - (snapBefore?.fileInputCount || 0),
     modalAppeared: !snapBefore?.hasApplyModal && Boolean(snapAfter?.hasApplyModal),
     filledDelta: filledAfter - filledBefore,
+    salaryCommittedDelta: salaryBefore - salaryAfter,
+    pickerClosed: Boolean(snapBefore?.pickerOpen) && !snapAfter?.pickerOpen,
+    commitCompleted,
+    uiPhaseBefore,
+    uiPhaseAfter,
   };
 }
 
 /** Strong DOM signals — safe to trust without an LLM call. */
-export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk) {
+export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan = null) {
   if (!actorOk || !mechanicalProgress) return false;
+  const customFill = plan?.type === "smart_fill" || plan?.type === "act";
+  if (customFill && signals.filledDelta > 0 && !signals.commitCompleted && !signals.salaryCommittedDelta && !signals.pickerClosed) {
+    return false;
+  }
   return (
     signals.urlChanged ||
     signals.fieldCountDelta > 0 ||
     signals.fileInputDelta > 0 ||
     signals.modalAppeared ||
-    signals.filledDelta > 0
+    (signals.filledDelta > 0 && !customFill) ||
+    signals.salaryCommittedDelta > 0 ||
+    signals.pickerClosed ||
+    signals.commitCompleted
   );
 }
 
@@ -78,58 +83,40 @@ export function shouldRunValidator({ actorOk, mechanicalProgress, signals }) {
   return true;
 }
 
-const RECOVERY_ACTIONS = new Set([
-  "dismiss_overlay",
-  "upload_resume",
-  "click_modal",
-  "click_apply",
-  "click_continue",
-  "accept_cookies",
-  "smart_fill",
-  "wait_load",
-  "manual",
-  "done",
-  "wait_user",
-  "ai_replan",
-]);
-
 export function parseValidatorResponse(text) {
-  if (!text) return null;
-  let raw = String(text).trim();
-  if (raw.startsWith("```")) {
-    raw = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
-  }
-  const data = JSON.parse(raw);
-  if (typeof data.progressed !== "boolean") return null;
-  const recovery =
-    data.recovery && RECOVERY_ACTIONS.has(String(data.recovery)) ? String(data.recovery) : null;
+  const data = parseJsonFromLlm(text, ValidatorResponseSchema);
+  if (!data) return null;
   return {
     progressed: data.progressed,
-    reason: String(data.reason || "validator").slice(0, 240),
-    recovery,
+    reason: data.reason || "validator",
+    recovery: data.recovery || null,
     source: "validator",
   };
 }
 
 export function parseEndStateResponse(text) {
-  if (!text) return null;
-  let raw = String(text).trim();
-  if (raw.startsWith("```")) {
-    raw = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
-  }
-  const data = JSON.parse(raw);
-  const action = String(data.action || "manual").toLowerCase();
-  if (!RECOVERY_ACTIONS.has(action) && action !== "manual") {
-    return { action: "manual", reason: String(data.reason || "").slice(0, 240) };
-  }
+  const data = parseJsonFromLlm(text, EndStateResponseSchema);
+  if (!data) return { action: "manual", reason: "", target: "" };
   return {
-    action,
-    target: String(data.target || "").slice(0, 200),
-    reason: String(data.reason || "end-state assessor").slice(0, 240),
+    action: data.action,
+    target: data.target || "",
+    reason: data.reason || "end-state assessor",
   };
 }
 
-async function runValidatorLlm({ plan, snapBefore, snapAfter, fillResult, mechanicalProgress, actorOk, history, context, signals }) {
+async function runValidatorLlm({
+  plan,
+  snapBefore,
+  snapAfter,
+  fillResult,
+  mechanicalProgress,
+  actorOk,
+  history,
+  context,
+  signals,
+  layoutBefore = "",
+  layoutAfter = "",
+}) {
   const { callLlm } = getRuntime();
   const recent = (history || [])
     .slice(-6)
@@ -147,10 +134,10 @@ Filled fields after action: ${fillResult?.filled?.length || 0}
 Recent history: ${recent || "none"}
 
 --- BEFORE ---
-${snapSummary(snapBefore)}
+${snapSummary(snapBefore, layoutBefore)}
 
 --- AFTER ---
-${snapSummary(snapAfter)}
+${snapSummary(snapAfter, layoutAfter)}
 
 Did this action progress toward reaching and filling the real application form (not ads, cookie settings, unrelated navigation, or swapping one blocker for another)?
 If progressed is false, suggest ONE recovery action the agent should try next.
@@ -215,9 +202,19 @@ export async function validateActionOutcome({
   history,
   context,
   filledBefore = 0,
+  page = null,
 }) {
   const filledAfter = fillResult?.filled?.length || 0;
-  const signals = computeMechanicalSignals(snapBefore, snapAfter, { filledBefore, filledAfter });
+  const agentBefore = await buildAgentContext(snapBefore, fillResult, page).catch(() => null);
+  const agentAfter = await buildAgentContext(snapAfter, fillResult, page).catch(() => null);
+  const signals = computeMechanicalSignals(snapBefore, snapAfter, {
+    filledBefore,
+    filledAfter,
+    uiPhaseBefore: agentBefore?.pageState?.uiPhase || "idle",
+    uiPhaseAfter: agentAfter?.pageState?.uiPhase || "idle",
+  });
+  const layoutBefore = agentBefore?.layoutBlock || "";
+  const layoutAfter = agentAfter?.layoutBlock || "";
 
   if (!actorOk && !mechanicalProgress) {
     return {
@@ -228,7 +225,7 @@ export async function validateActionOutcome({
     };
   }
 
-  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk)) {
+  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan)) {
     return {
       progressed: true,
       reason: "strong mechanical progress (url, fields, modal, or fill)",
@@ -255,6 +252,8 @@ export async function validateActionOutcome({
       history,
       context,
       signals,
+      layoutBefore,
+      layoutAfter,
     });
     if (verdict) return verdict;
   } catch {

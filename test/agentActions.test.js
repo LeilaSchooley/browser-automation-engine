@@ -140,7 +140,7 @@ describe("stuck recovery", () => {
 
     const { plan, classification } = await decideNextAction(snap, { filled: [] }, history, {});
     assert.equal(plan?.type, "upload_resume");
-    assert.equal(plan?.source, "stuck-recovery");
+    assert.match(plan?.source, /stuck-recovery|action-catalog/);
     assert.ok(classification);
   });
 });

@@ -40,10 +40,14 @@ export function mergeFieldHints(prev = {}, next = {}) {
 }
 
 export function mergeAuthSelectors(prev = {}, next = {}) {
-  const out = { ...prev };
-  for (const [kind, selectors] of Object.entries(next)) {
-    if (!Array.isArray(selectors) || !selectors.length) continue;
-    out[kind] = [...new Set([...(out[kind] || []), ...selectors])].slice(0, 12);
+  const out = {};
+  const kinds = new Set([...Object.keys(prev || {}), ...Object.keys(next || {})]);
+  for (const kind of kinds) {
+    const merged = [...(prev[kind] || []), ...(next[kind] || [])]
+      .map((s) => String(s || "").trim())
+      .filter((s) => s && !isVolatileSelector(s));
+    if (!merged.length) continue;
+    out[kind] = [...new Set(merged)].slice(0, 12);
   }
   return out;
 }
@@ -69,13 +73,262 @@ export function mergeControlSkills(prev = [], next = []) {
         ...s,
         successCount: (existing.successCount || 0) + (s.successCount || 1),
         stagehandAction: s.stagehandAction || existing.stagehandAction,
-        triggerSelector: s.triggerSelector || existing.triggerSelector,
+        requiresConfirm: s.requiresConfirm ?? existing.requiresConfirm,
+        confirmPattern: s.confirmPattern || existing.confirmPattern,
+        steps: s.steps?.length ? s.steps : existing.steps,
       });
     } else {
       map.set(key, { ...s, successCount: s.successCount || 1 });
     }
   }
   return [...map.values()].slice(0, 20);
+}
+
+function normalizeTextSig(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+/** Volatile DOM ids (Vue/React) — do not persist for auth replay. */
+export function isVolatileSelector(selector) {
+  const s = String(selector || "").trim();
+  if (!s) return true;
+  if (/^#v-\d+(-\d+)+$/i.test(s)) return true;
+  if (/^#[a-z]+-\d+(-\d+){2,}$/i.test(s)) return true;
+  if (/^#[0-9a-f]{10,}$/i.test(s)) return true;
+  return false;
+}
+
+/**
+ * Prefer stable selectors for auth fields; drop volatile ids.
+ * @param {string} selector
+ * @param {{ kind?: string, type?: string, testId?: string, name?: string, autocomplete?: string }} [field]
+ */
+export function stableAuthSelector(selector, field = {}) {
+  const raw = String(selector || "").trim();
+  if (raw && !isVolatileSelector(raw)) return raw;
+  if (field.testId) return `[data-testid="${String(field.testId).replace(/"/g, '\\"')}"]`;
+  if (field.name) return `[name="${String(field.name).replace(/"/g, '\\"')}"]`;
+  if (field.autocomplete) return `[autocomplete="${field.autocomplete}"]`;
+  const kind = String(field.kind || field.type || "").toLowerCase();
+  if (kind === "email") return 'input[type="email"]';
+  if (kind === "password" || kind === "confirm_password") return 'input[type="password"]';
+  if (kind === "username") return 'input[type="text"]';
+  return "";
+}
+
+export const AFFORDANCE_INTENTS = {
+  ENTRY_APPLY: "entry_apply",
+  WIZARD_CONTINUE: "wizard_continue",
+  UPSELL_DISMISS: "upsell_dismiss",
+  AUTH_SUBMIT: "auth_submit",
+  UNKNOWN: "unknown",
+};
+
+const FILL_STAGES = new Set(["form", "auth", "signup", "signup_entry"]);
+
+/** Infer why a click worked — used for replay gating and merge keys. */
+export function inferAffordanceIntent(item, snap = null, classification = null) {
+  const sig = affordanceSignature(item);
+  const text = sig.textNorm;
+  const testId = sig.testId.toLowerCase();
+  const stage = classification?.step || "";
+
+  if (isDismissAffordanceSignature(sig)) return AFFORDANCE_INTENTS.UPSELL_DISMISS;
+  if (/\b(skip|continue without|continue applying|no thanks|maybe later|not now|dismiss)\b/.test(text)) {
+    return AFFORDANCE_INTENTS.UPSELL_DISMISS;
+  }
+
+  if (FILL_STAGES.has(stage) || snapHasFillableSurface(snap, classification)) {
+    if (/\b(continue|sign up|register|create account|submit|log in|login)\b/.test(text)) {
+      return AFFORDANCE_INTENTS.AUTH_SUBMIT;
+    }
+  }
+
+  if (
+    stage === "wizard_choice" ||
+    /\b(have a resume|need a resume|continue with email|upload resume|start application)\b/.test(text) ||
+    /continue-with-email|wizard-option|modal-cta|apply-cta/i.test(testId) ||
+    /continue with email|sign up with email/i.test(text)
+  ) {
+    return AFFORDANCE_INTENTS.WIZARD_CONTINUE;
+  }
+
+  if (
+    stage === "entry" ||
+    /\b(i.?m interested|apply now|apply for|quick apply)\b/.test(text) ||
+    /apply|interested/i.test(testId)
+  ) {
+    return AFFORDANCE_INTENTS.ENTRY_APPLY;
+  }
+
+  if (stage === "overlay" && sig.inModal) {
+    return AFFORDANCE_INTENTS.UPSELL_DISMISS;
+  }
+
+  return AFFORDANCE_INTENTS.UNKNOWN;
+}
+
+function intentForStep(stage, snap, classification = null) {
+  if (FILL_STAGES.has(stage)) return null;
+  if (stage === "wizard_choice") return AFFORDANCE_INTENTS.WIZARD_CONTINUE;
+  if (stage === "entry") return AFFORDANCE_INTENTS.ENTRY_APPLY;
+  if (stage === "overlay") {
+    if ((snap?.passwordFieldCount || 0) > 0 || (snap?.fieldCount || 0) > 2) return null;
+    return AFFORDANCE_INTENTS.UPSELL_DISMISS;
+  }
+  return null;
+}
+
+function intentMatchesStage(skill, stage, snap, classification) {
+  const expected = intentForStep(stage, snap, classification);
+  if (!expected) return false;
+  if (!skill.intent || skill.intent === AFFORDANCE_INTENTS.UNKNOWN) return true;
+  return skill.intent === expected;
+}
+
+/** Stable signature for an interactive affordance (no brittle CSS). */
+export function affordanceSignature(item = {}) {
+  return {
+    role: String(item.role || item.kind || "").toLowerCase().slice(0, 40),
+    textNorm: normalizeTextSig(item.text || item.aria),
+    inModal: !!item.inModal,
+    testId: String(item.testId || "").slice(0, 80),
+    kind: String(item.kind || "").slice(0, 40),
+  };
+}
+
+/** Close / dismiss controls — must not replay over signup or application forms. */
+export function isDismissAffordanceSignature(signature = {}) {
+  const text = String(signature.textNorm || "").toLowerCase();
+  const testId = String(signature.testId || "").toLowerCase();
+  if (testId === "modal-close" || testId.includes("close-modal")) return true;
+  if (/^(close|dismiss|×|x)$/.test(text)) return true;
+  return text.includes("close modal");
+}
+
+function snapHasFillableSurface(snap, classification = null) {
+  const stage = classification?.step || "";
+  if (FILL_STAGES.has(stage)) return true;
+  if (!snap) return false;
+  if ((snap.fieldCount || 0) > 0) return true;
+  if (snap.authForm) return true;
+  if ((snap.passwordFieldCount || 0) > 0) return true;
+  return (snap.emailFieldCount || 0) > 0 && (snap.passwordFieldCount || 0) > 0;
+}
+
+/** Never use affordance replay when the page needs typing/auth. */
+export function shouldSkipAffordanceReplay(snap, classification = null) {
+  const stage = classification?.step || "";
+  if (FILL_STAGES.has(stage)) return true;
+  return snapHasFillableSurface(snap, classification);
+}
+
+function affordanceKey(skill) {
+  const s = skill?.signature || skill || {};
+  return `${skill.intent || ""}::${s.role || ""}::${s.textNorm || ""}::${s.inModal ? 1 : 0}::${s.testId || ""}::${s.kind || ""}`;
+}
+
+export function mergeAffordanceSkills(prev = [], next = []) {
+  const map = new Map();
+  for (const s of [...(Array.isArray(prev) ? prev : []), ...(Array.isArray(next) ? next : [])]) {
+    if (!s || typeof s !== "object") continue;
+    const key = affordanceKey(s);
+    if (!key.replace(/:/g, "")) continue;
+    const existing = map.get(key);
+    if (existing) {
+      map.set(key, {
+        ...existing,
+        ...s,
+        successCount: (existing.successCount || 0) + (s.successCount || 1),
+        signature: s.signature || existing.signature,
+      });
+    } else {
+      map.set(key, { ...s, successCount: s.successCount || 1 });
+    }
+  }
+  return [...map.values()]
+    .sort((a, b) => (b.successCount || 0) - (a.successCount || 0))
+    .slice(0, 24);
+}
+
+export function interactiveMatchesSignature(item, signature) {
+  if (!item || !signature) return false;
+  const sig = affordanceSignature(item);
+  if (signature.testId && sig.testId && signature.testId === sig.testId) return true;
+  if (signature.textNorm && sig.textNorm && signature.textNorm === sig.textNorm) {
+    if (!!signature.inModal === !!sig.inModal) return true;
+  }
+  return false;
+}
+
+/** Mark interactives that previously succeeded on this host. */
+export function boostInteractivesWithLearnings(interactives = [], siteLearnings = null) {
+  const skills = siteLearnings?.affordanceSkills || [];
+  if (!skills.length || !interactives?.length) return interactives;
+  return interactives.map((item) => {
+    const match = skills.find((s) => interactiveMatchesSignature(item, s.signature));
+    if (!match) return item;
+    return {
+      ...item,
+      learned: true,
+      hintScore: (item.hintScore || 0) + 12 + Math.min(8, match.successCount || 1),
+    };
+  });
+}
+
+/**
+ * If exactly one interactive matches a high-confidence learned skill for this stage, replay it.
+ */
+export function findLearnedAffordanceReplay(snap, siteLearnings, classification = null) {
+  const skills = siteLearnings?.affordanceSkills || [];
+  if (!skills.length || !snap?.interactives?.length) return null;
+
+  if (shouldSkipAffordanceReplay(snap, classification)) return null;
+
+  const stage = classification?.step || "";
+  const candidates = [];
+  for (const skill of skills) {
+    if ((skill.successCount || 0) < 2) continue;
+    if (skill.stage && stage && skill.stage !== stage && skill.stage !== "any") continue;
+    if (!intentMatchesStage(skill, stage, snap, classification)) continue;
+    const matches = snap.interactives.filter((i) => interactiveMatchesSignature(i, skill.signature));
+    if (matches.length === 1) {
+      candidates.push({ skill, item: matches[0] });
+    }
+  }
+  if (candidates.length !== 1) return null;
+  const { skill, item } = candidates[0];
+  const intentLabel = skill.intent && skill.intent !== AFFORDANCE_INTENTS.UNKNOWN ? ` [${skill.intent}]` : "";
+  return {
+    type: "act",
+    action: skill.action || "click",
+    elementIndex: item.index,
+    target: item.text || item.selector || "",
+    reason: `learned affordance replay${intentLabel} — ${item.text || item.testId || `#${item.index}`}`,
+    source: "affordance-memory",
+  };
+}
+
+export function affordanceSkillFromAct(plan, snap, { stage = "any", classification = null } = {}) {
+  if (!plan || plan.type !== "act") return null;
+  if (!Number.isInteger(plan.elementIndex)) return null;
+  const item = (snap?.interactives || []).find((i) => i.index === plan.elementIndex);
+  if (!item) return null;
+  const signature = affordanceSignature(item);
+  const intent = inferAffordanceIntent(item, snap, classification || { step: stage });
+  if (shouldSkipAffordanceReplay(snap, classification || { step: stage })) return null;
+  if (intent === AFFORDANCE_INTENTS.UNKNOWN && snapHasFillableSurface(snap, classification)) return null;
+  return {
+    stage,
+    action: plan.action || "click",
+    signature,
+    intent,
+    successCount: 1,
+  };
 }
 
 function learningsPath() {
@@ -112,6 +365,9 @@ export function recordSiteLearning(hostname, patch) {
 
   const key = normalizeHost(hostname);
   const prev = store.hosts[key] || {};
+  if (prev.authSelectors) {
+    prev.authSelectors = mergeAuthSelectors(prev.authSelectors, {});
+  }
 
   const merged = { ...prev, ...patch };
   if (patch.fieldHints) {
@@ -128,6 +384,9 @@ export function recordSiteLearning(hostname, patch) {
   }
   if (patch.controlSkills) {
     merged.controlSkills = mergeControlSkills(prev.controlSkills, patch.controlSkills);
+  }
+  if (patch.affordanceSkills) {
+    merged.affordanceSkills = mergeAffordanceSkills(prev.affordanceSkills, patch.affordanceSkills);
   }
 
   store.hosts[key] = {
@@ -158,6 +417,11 @@ export function learningsAsSiteMappings() {
         avoidEntryKeys: data.avoidEntryKeys || [],
         authSelectors: data.authSelectors || {},
         controlSkills: data.controlSkills || [],
+        affordanceSkills: data.affordanceSkills || [],
+        dismissFirst: data.dismissFirst || false,
+        avoidFillWhenAlert: data.avoidFillWhenAlert || false,
+        skipAggregatorApply: data.skipAggregatorApply || false,
+        closedAggregator: data.closedAggregator || false,
       },
     };
   }

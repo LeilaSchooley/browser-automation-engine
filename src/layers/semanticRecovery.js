@@ -9,6 +9,8 @@ import {
   shouldPreferUpload,
   textMatchesInterstitialDismiss,
   uploadAlreadySucceeded,
+  recentPreferencesSignup,
+  preferencesSignupSubmitted,
 } from "../heuristics.js";
 import { dismissBlockingOverlays } from "./adDismiss.js";
 import { humanPause } from "../human.js";
@@ -17,7 +19,11 @@ import { executePlan } from "./executePlan.js";
 import { hasIdentityRegistrationFields } from "../fillProfile.js";
 import { hasPreferencesGateFields, preferencesGateIncomplete } from "../fillPreferences.js";
 import { isWorkflowGateModal, shouldNeverDismiss } from "../workflowGates.js";
+import { looksLikeRealCookieConsent } from "../consentDetection.js";
 import { hasEmptyRequiredControls } from "../controlState.js";
+import { pageStateSummary } from "./pageState.js";
+import { canUseStagehand } from "./stagehandAdapter.js";
+import { buildStagehandPlan } from "./stagehandPolicy.js";
 
 const RECOVERY_ACTIONS = new Set([
   "dismiss_overlay",
@@ -52,8 +58,12 @@ export function modalHasDismissControl(snap) {
 /** When to involve the AI planner (broad — any stuck/confused state). */
 export function shouldEscalateToAi(snap, history, classification) {
   if (!getSettings().agent_ai) return false;
+  const layout = pageStateSummary(snap);
+  const uncommittedPicker = layout.uiPhase === "option_selected_uncommitted" || snap?.pickerOpen;
   const stalled = history.length >= 2 && history.slice(-2).every((h) => !h.progress);
   const emptyControls = hasEmptyRequiredControls(snap, history[history.length - 1]?.fillResult);
+  const lastAction = history[history.length - 1]?.action;
+  const smartFillStuck = lastAction === "smart_fill" && validatorRecentlyRejected(history);
   const interstitialLikely =
     !shouldNeverDismiss(snap) &&
     !emptyControls &&
@@ -64,6 +74,8 @@ export function shouldEscalateToAi(snap, history, classification) {
     classification.step === "ambiguous" ||
     stalled ||
     emptyControls ||
+    uncommittedPicker ||
+    smartFillStuck ||
     validatorRecentlyRejected(history) ||
     repeatedActionWithoutProgress(history, 2) ||
     interstitialLikely
@@ -116,6 +128,13 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
       source: "semantic-recovery",
     };
   }
+  if (raw === "dismiss_overlay" && (recentPreferencesSignup(history) || preferencesSignupSubmitted(history))) {
+    return {
+      type: "verify_email",
+      reason: "post-preferences signup — poll inbox for activation link",
+      source: "semantic-recovery",
+    };
+  }
   if (raw && raw !== "null" && raw !== "ai_replan" && RECOVERY_ACTIONS.has(raw)) {
     return {
       type: raw,
@@ -152,12 +171,29 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
     };
   }
   if (
+    (preferencesSignupSubmitted(history) || recentPreferencesSignup(history)) &&
+    /activate your account|activation modal|check your email|verify your email/i.test(reason)
+  ) {
+    return {
+      type: "verify_email",
+      reason: verdict?.reason || "account activation — poll inbox",
+      source: "semantic-recovery",
+    };
+  }
+  if (
     /upsell|interstitial|modal|block|dialog|overlay|another|still blocking|dismiss|marketing|expert review|skip and continue/i.test(
       reason,
     ) ||
     isBlockingInterstitial(snap) ||
     isExpertReviewGate(snap)
   ) {
+    if (preferencesSignupSubmitted(history) || recentPreferencesSignup(history)) {
+      return {
+        type: "verify_email",
+        reason: verdict?.reason || "post-preferences signup — poll inbox",
+        source: "semantic-recovery",
+      };
+    }
     return {
       type: "dismiss_overlay",
       reason: verdict?.reason || "blocking dialog still visible",
@@ -193,6 +229,13 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
     };
   }
   if (/cookie|consent|onetrust/i.test(reason) && snap?.cookieBanner) {
+    if (!looksLikeRealCookieConsent(snap)) {
+      return {
+        type: "dismiss_overlay",
+        reason: verdict?.reason || "misclassified popup — dismiss not accept cookies",
+        source: "semantic-recovery",
+      };
+    }
     return {
       type: "accept_cookies",
       reason: verdict?.reason || "cookie banner blocking",
@@ -333,6 +376,34 @@ export async function attemptFinalRecovery(
   }
 
   if (planNextAction && getSettings().agent_ai) {
+    if (canUseStagehand(context || {}).ok) {
+      const shPlan = buildStagehandPlan(
+        snap,
+        { step: "ambiguous", confidence: "low", reason: "final recovery before manual handoff" },
+        history,
+        context || {},
+      );
+      log?.layer("agent", `final Stagehand recovery → ${shPlan.instruction.slice(0, 80)}`, "warn");
+      const executed = await executePlan(page, shPlan, {
+        snap,
+        context: context || {},
+        log,
+        url,
+        sessionId,
+        fillResult,
+        history,
+        classification: { step: "ambiguous", confidence: "low" },
+      });
+      if (executed.ok) {
+        return {
+          recovered: true,
+          plan: shPlan,
+          snap: executed.snap || (await inspectPage(page)),
+          fillResult: executed.fillResult,
+        };
+      }
+    }
+
     const aiPlan = await planNextAction(context, snap, history, fillResult, {
       step: "ambiguous",
       confidence: "low",

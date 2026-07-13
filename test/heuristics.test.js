@@ -6,10 +6,16 @@ import {
   countRecentAction,
   isActiveApplyWizard,
   isBlockingInterstitial,
+  isJobAlertInterstitial,
   isExpertReviewGate,
   findBestDismissCandidate,
   isResumeChoiceStep,
   isStuck,
+  looksLikeFakeJobListing,
+  looksLikeJobAlertSignupForm,
+  looksLikeApplySignupGate,
+  looksLikeJobBoardIndex,
+  hasRealApplyAffordance,
   outcomeJobStatus,
   pageFingerprintFromSnap,
   shouldPreferUpload,
@@ -20,6 +26,39 @@ import {
 } from "../src/heuristics.js";
 
 describe("heuristics", () => {
+  it("detects Ashby job board index with filter dropdowns", () => {
+    const snap = {
+      url: "https://jobs.ashbyhq.com/ditto",
+      title: "Ditto Careers",
+      pageText: "Open Positions Join our team",
+      passwordFieldCount: 0,
+      fileInputCount: 0,
+      fieldCount: 4,
+      fields: [
+        { name: "departmentId", label: "Department", type: "select-one" },
+        { name: "employmentType", label: "Employment Type", type: "select-one" },
+        { name: "locationId", label: "Location", type: "select-one" },
+        { name: "workplaceType", label: "Location Type", type: "select-one" },
+      ],
+    };
+    assert.equal(looksLikeJobBoardIndex(snap), true);
+  });
+
+  it("does not treat real apply form as job board index", () => {
+    const snap = {
+      url: "https://jobs.ashbyhq.com/ditto/apply",
+      passwordFieldCount: 0,
+      fileInputCount: 1,
+      fieldCount: 3,
+      fields: [
+        { name: "email", label: "Email", type: "email" },
+        { name: "name", label: "Full name", type: "text" },
+        { name: "resume", label: "Resume", type: "file" },
+      ],
+    };
+    assert.equal(looksLikeJobBoardIndex(snap), false);
+  });
+
   it("detects resume-choice wizard steps", () => {
     const snap = {
       modalCandidates: [{ text: "I have a resume", testId: "umja-option-upload-resume" }],
@@ -123,6 +162,67 @@ describe("heuristics", () => {
       { action: "click_apply", fingerprint: fp, ok: true, progress: false },
     ];
     assert.equal(isStuck(history, snap), true);
+  });
+
+  it("detects WhatJobs job-alert popup as interstitial", () => {
+    const snap = {
+      fieldCount: 7,
+      modalCount: 1,
+      pageText: "Be the first to know when new jobs like this one gets posted",
+      fields: [
+        { label: "Email Address", type: "email" },
+        { label: "Receive the Latest Jobs", type: "submit" },
+      ],
+    };
+    assert.equal(isJobAlertInterstitial(snap), true);
+  });
+
+  it("detects devitjobs inline alert signup form", () => {
+    const snap = {
+      fieldCount: 3,
+      entryCount: 0,
+      fileInputCount: 0,
+      pageText: "Data Alert Azure Data DevOps Engineer",
+      title: "Azure Data DevOps Engineer Job in London | Assura Protect",
+      fields: [
+        { name: "techCategory", label: "C# DevOps Java JavaScript PHP", type: "select-one" },
+        { name: "personName", label: "Your name", type: "text" },
+        { name: "personEmail", label: "Your email", type: "email" },
+      ],
+    };
+    assert.equal(looksLikeJobAlertSignupForm(snap), true);
+    assert.equal(hasRealApplyAffordance(snap), false);
+    const fake = looksLikeFakeJobListing(snap, [{ action: "click_apply", ok: true }]);
+    assert.equal(fake.fake, true);
+    assert.match(fake.reason, /alert signup/i);
+  });
+
+  it("does not flag real apply forms as job-alert signup", () => {
+    const snap = {
+      fieldCount: 5,
+      fileInputCount: 1,
+      fields: [
+        { label: "Full name", type: "text" },
+        { label: "Email", type: "email" },
+        { label: "Phone", type: "tel" },
+        { label: "Resume", type: "file" },
+        { label: "Cover letter", type: "textarea" },
+      ],
+    };
+    assert.equal(looksLikeJobAlertSignupForm(snap), false);
+  });
+
+  it("detects job-board sign up to apply modal (Jobright-style)", () => {
+    const snap = {
+      hostname: "jobright.ai",
+      hasApplyModal: true,
+      applyModalTitle: "Apply to Technical Support Specialist @Baker Tilly Canada",
+      pageText: "Sign Up to Apply Sign up with Google",
+      fieldCount: 1,
+      fields: [{ id: "sign-up_email", label: "Email", type: "text" }],
+      submitCandidates: [{ text: "SIGN UP TO APPLY" }],
+    };
+    assert.equal(looksLikeApplySignupGate(snap), true);
   });
 
   it("keeps page fingerprints stable for identical snaps", () => {

@@ -9,14 +9,24 @@ import {
   pageFingerprint,
   progressScore,
 } from "./formDiscovery.js";
-import { classifyApplyStep, stepToPlan } from "./applyStep.js";
 import { adoptOpenedPage, isPageUnloaded, waitForApplySurface } from "./pageReady.js";
 import { allowsHostHop, normalizeHost } from "../host.js";
+import {
+  isAggregatorHost,
+  looksLikeDeadApplyDestination,
+  looksLikeAggregatorTrap,
+  shouldBlockApplyNavigation,
+} from "./applyUrlSafety.js";
 import { gotoWithCloudflareRetry } from "../cloudflare.js";
-import { isStuck, shouldPreferUpload, uploadAlreadySucceeded } from "../heuristics.js";
+import { isStuck, shouldPreferUpload, uploadAlreadySucceeded, uploadStalled, hasUnfilledApplicationFields, looksLikeApplySignupGate } from "../heuristics.js";
+import { hasUnfilledYesNoOrEEOC } from "../fillApplicationAnswers.js";
+import { attemptApplicationControlsStagehand } from "./stagehandPolicy.js";
+import { fillCustomControls } from "../fillCustomControls.js";
 import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
 import { looksLikeSignupForm } from "./signupActions.js";
 import { recordSiteLearning, loadSiteLearnings } from "../siteLearnings.js";
+import { recordEngineEvent, captureDebugScreenshot } from "../observability.js";
+import { buildPagePerception, refreshSnapIfNeeded } from "./pagePerception.js";
 import { recordLearningsFromRun } from "../learningRecorder.js";
 import {
   enrichContextWithLearnings,
@@ -28,44 +38,18 @@ import { attemptVisionFallback } from "./visionFallback.js";
 import { attemptCaptchaSolve } from "./captchaSolve.js";
 import { executePlan } from "./executePlan.js";
 import {
-  shouldEscalateToAi,
-  shouldAiOverrideHeuristic,
   attemptSemanticRecovery,
   attemptFinalRecovery,
 } from "./semanticRecovery.js";
 import { tryAdoptFormIframe } from "./iframeAdopt.js";
+import { decideWithActionBrain } from "./actionBrain.js";
 
-export async function decideNextAction(snap, fillResult, history, context) {
-  const classification = classifyApplyStep(snap, fillResult, history, context);
-  let plan = stepToPlan(classification, snap, history);
-
-  const { planNextAction } = getRuntime();
-  const needsAi =
-    getSettings().agent_ai && planNextAction && shouldEscalateToAi(snap, history, classification);
-
-  if (needsAi && !isPageUnloaded(snap)) {
-    const aiPlan = await planNextAction(context, snap, history, fillResult, classification);
-    if (aiPlan && !(aiPlan.type === "wait_user" && isPageUnloaded(snap))) {
-      if (shouldAiOverrideHeuristic(snap, history, classification)) {
-        plan = aiPlan;
-      }
-    }
-  }
-
-  if (!plan && isStuck(history, snap) && shouldPreferUpload(snap, history)) {
-    plan = {
-      type: "upload_resume",
-      reason: "stuck — force file upload attempt",
-      source: "stuck-recovery",
-      step: "upload",
-    };
-  }
-
-  return { plan, classification };
+export async function decideNextAction(snap, fillResult, history, context, page = null) {
+  return decideWithActionBrain(snap, fillResult, history, context, page);
 }
 
 /**
- * Dynamic automation agent — observe → classify step → decide → act loop.
+ * Dynamic automation agent — observe → action catalog → act loop.
  */
 export async function runAutomationAgent(page, context, log, { url, sessionId = null, shouldStop = null, submitUrl = null } = {}) {
   const settings = getSettings();
@@ -99,8 +83,10 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
   const maxNoProgress = Math.max(2, settings.agent_max_no_progress || 4);
 
   const hopAllowed = allowsHostHop(agentContext);
-  const maxHostHops = 6;
+  const maxHostHops = 4;
+  const maxAggregatorHops = 2;
   let hostHops = 0;
+  let aggregatorHops = 0;
   let knownPages = new Set();
   try {
     knownPages = new Set(page.context().pages());
@@ -125,7 +111,40 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     let snap = await inspectPage(page);
+    const perception = await buildPagePerception(page, snap).catch(() => null);
+    if (perception?.enabled) snap._perception = perception;
+    recordEngineEvent("agent_step", { step, url: snap.url, pageKind: snap.pageKind, perceptionDiff: perception?.diff });
     lastSnap = snap;
+
+    const deadDestination = looksLikeDeadApplyDestination(snap);
+    if (deadDestination.dead) {
+      log.layer("agent", `dead apply destination — ${deadDestination.reason}`, "warn");
+      history.push({
+        step,
+        action: "wait_user",
+        applyStep: "blocked",
+        ok: true,
+        fingerprint: pageFingerprint(snap),
+        progress: false,
+        reason: deadDestination.reason,
+      });
+      break;
+    }
+
+    const aggregatorTrap = looksLikeAggregatorTrap(snap, history);
+    if (aggregatorTrap.trapped) {
+      log.layer("agent", `aggregator trap — ${aggregatorTrap.reason}`, "warn");
+      history.push({
+        step,
+        action: "wait_user",
+        applyStep: "blocked",
+        ok: true,
+        fingerprint: pageFingerprint(snap),
+        progress: false,
+        reason: aggregatorTrap.reason,
+      });
+      break;
+    }
 
     const iframeAdopt = await tryAdoptFormIframe(page, snap, log);
     if (iframeAdopt.adopted) {
@@ -143,8 +162,18 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       consecutiveNoProgress = 0;
     }
 
-    let { plan, classification } = await decideNextAction(snap, fillResult, history, agentContext);
+    let { plan, classification, decision } = await decideNextAction(snap, fillResult, history, agentContext, page);
     lastClassification = classification;
+
+    if (decision?.path) {
+      recordEngineEvent("agent_decide", {
+        path: decision.path,
+        step: classification?.step,
+        confidence: classification?.confidence,
+        planType: plan?.type,
+        reason: decision.reason?.slice(0, 200),
+      });
+    }
 
     logPageSnapshot(log, snap, "agent", classification);
 
@@ -294,7 +323,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     log.step("agent", `Step ${step}/${maxSteps}: ${plan.type}`);
     log.layer(
       "agent",
-      `step ${step}/${maxSteps}: ${plan.type} (classified=${classification.step}, conf=${classification.confidence}) — ${plan.reason}`,
+      `step ${step}/${maxSteps}: ${plan.type} (classified=${classification.step}, conf=${classification.confidence}, via=${decision?.path || plan.source || "?"}) — ${plan.reason}`,
       "info",
     );
 
@@ -308,6 +337,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       sessionId,
       fillResult,
       history,
+      classification,
     });
 
     let ok = executed.ok;
@@ -342,7 +372,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
-    let snapAfter = await inspectPage(page);
+    let snapAfter = await refreshSnapIfNeeded(page, snap, inspectPage, {
+      force: ["click_apply", "click_modal", "click_continue", "click_signup", "act", "smart_fill", "upload_resume"].includes(plan.type),
+    });
     lastSnap = snapAfter;
     let progressed = pageFingerprint(snapAfter) !== fpBefore || progressScore(snapAfter, fillResult) > score;
 
@@ -359,14 +391,20 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         resolved = "";
       }
       if (resolved && resolved !== (snapAfter.url || "")) {
-        log.layer("agent", `entry click had no effect — navigating directly to ${resolved.slice(0, 120)}`, "warn");
-        try {
-          await gotoWithCloudflareRetry(page, resolved, { sessionId });
-          snapAfter = await waitForApplySurface(page, log, { timeoutMs: 15000 });
-          lastSnap = snapAfter;
-          progressed = pageFingerprint(snapAfter) !== fpBefore;
-        } catch {
-          /* keep original state */
+        const block = shouldBlockApplyNavigation(resolved, snap.url || url);
+        if (block.block) {
+          log.layer("agent", `skipping toxic apply href — ${block.reason}`, "warn");
+          ok = false;
+        } else {
+          log.layer("agent", `entry click had no effect — navigating directly to ${resolved.slice(0, 120)}`, "warn");
+          try {
+            await gotoWithCloudflareRetry(page, resolved, { sessionId });
+            snapAfter = await waitForApplySurface(page, log, { timeoutMs: 15000 });
+            lastSnap = snapAfter;
+            progressed = pageFingerprint(snapAfter) !== fpBefore;
+          } catch {
+            /* keep original state */
+          }
         }
       }
     }
@@ -377,6 +415,26 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       const newHost = normalizeHost(snapAfter.hostname || snapAfter.url);
       if (newHost && agentContext.targetHost && newHost !== agentContext.targetHost) {
         hostHops += 1;
+        if (isAggregatorHost(newHost)) {
+          aggregatorHops += 1;
+          if (aggregatorHops > maxAggregatorHops) {
+            log.layer(
+              "agent",
+              `aggregator mirror chain limit (${aggregatorHops}) — stopping at ${newHost}`,
+              "warn",
+            );
+            history.push({
+              step,
+              action: "wait_user",
+              applyStep: "blocked",
+              ok: true,
+              fingerprint: pageFingerprint(snapAfter),
+              progress: false,
+              reason: "job listing aggregator chain — no real apply form",
+            });
+            break;
+          }
+        }
         if (hostHops > maxHostHops) {
           log.layer("agent", `too many host hops (${hostHops}) — stopping chain`, "warn");
           break;
@@ -449,6 +507,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           context: agentContext,
           classification,
           filledBefore,
+          page,
         });
         if (verdict && typeof verdict.progressed === "boolean") {
           if (verdict.progressed !== progressed) {
@@ -517,6 +576,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
             if (stepLearnings.authSelectors) patch.authSelectors = stepLearnings.authSelectors;
             if (stepLearnings.modalSelector) patch.modalSelectors = [stepLearnings.modalSelector];
             if (stepLearnings.controlSkills) patch.controlSkills = stepLearnings.controlSkills;
+            if (stepLearnings.affordanceSkills) patch.affordanceSkills = stepLearnings.affordanceSkills;
             if (Object.keys(patch).length) recordSiteLearning(agentContext.targetHost, patch);
           } catch {
             /* ignore */
@@ -540,6 +600,8 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       progressSource,
       source: plan.source || "step-classifier",
       learnings: stepLearnings,
+      preferencesSignup: executed.preferencesSignupClicked || false,
+      decisionPath: decision?.path,
     });
 
     if (stepLearnings && agentContext.targetHost) {
@@ -548,6 +610,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         if (stepLearnings.authSelectors) patch.authSelectors = stepLearnings.authSelectors;
         if (stepLearnings.modalSelector) patch.modalSelectors = [stepLearnings.modalSelector];
         if (stepLearnings.controlSkills) patch.controlSkills = stepLearnings.controlSkills;
+        if (stepLearnings.affordanceSkills && progressed && ok) {
+          patch.affordanceSkills = stepLearnings.affordanceSkills;
+        }
         if (Object.keys(patch).length) {
           recordSiteLearning(agentContext.targetHost, patch);
         }
@@ -566,8 +631,50 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       (snapAfter.fileInputCount || 0) > 0 &&
       !uploadAlreadySucceeded(history) &&
       !(fillResult.filled || []).some((f) => f.uploaded || f.file);
+
+    if (
+      plan.type === "smart_fill" &&
+      ok &&
+      hasUnfilledYesNoOrEEOC(snapAfter) &&
+      getSettings().stagehand_enabled
+    ) {
+      const sh = await attemptApplicationControlsStagehand(page, agentContext, {
+        snap: snapAfter,
+        log,
+        history,
+      });
+      if (sh.ok) {
+        snapAfter = await inspectPage(page);
+        lastSnap = snapAfter;
+        const custom = await fillCustomControls(page, agentContext, { snap: snapAfter, log });
+        if (custom.filled?.length) {
+          fillResult = {
+            ...fillResult,
+            filled: [...(fillResult.filled || []), ...custom.filled],
+          };
+          progressed = true;
+          progressReason = "application controls via stagehand fallback";
+        }
+        history.push({
+          step,
+          action: "stagehand_act",
+          applyStep: "form",
+          ok: true,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: (custom.filled?.length || 0) > 0,
+          source: "application-controls",
+        });
+        await humanPause(600, 1000);
+      }
+    }
+
+    const appControlsPending = hasUnfilledYesNoOrEEOC(snapAfter);
+    const onPlatformSignupGate =
+      looksLikeApplySignupGate(snapAfter) || looksLikeSignupForm(snapAfter) || snapAfter.signupForm;
     const readyForReview =
       !uploadsPending &&
+      !appControlsPending &&
+      !(onPlatformSignupGate && !authSucceeded) &&
       ((filledCount >= 2 && looksLikeApplyForm(snapAfter, 2)) ||
         (filledCount >= 1 && authSucceeded && looksLikeApplyForm(snapAfter, 1)) ||
         (filledCount >= 2 && progressed && ok));
@@ -606,7 +713,38 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     if (isStuck(history, snapAfter) || consecutiveNoProgress >= maxNoProgress) {
-      if (!uploadAlreadySucceeded(history) && shouldPreferUpload(snapAfter, history)) {
+      if (uploadStalled(history) && hasUnfilledApplicationFields(snapAfter, fillResult)) {
+        log.layer("agent", "stuck — upload stalled, forcing smart_fill", "warn");
+        const fillExec = await executePlan(page, {
+          type: "smart_fill",
+          reason: "upload stalled — fill application fields",
+          source: "stuck-recovery",
+        }, {
+          snap: snapAfter,
+          context: agentContext,
+          log,
+          url,
+          sessionId,
+          fillResult,
+          history,
+          classification: lastClassification,
+        });
+        if (fillExec.fillResult) fillResult = fillExec.fillResult;
+        history.push({
+          step,
+          action: "smart_fill",
+          applyStep: "form",
+          ok: fillExec.ok,
+          fingerprint: pageFingerprint(fillExec.snap || snapAfter),
+          progress: fillExec.ok,
+          source: "stuck-recovery",
+        });
+        if (fillExec.ok) {
+          consecutiveNoProgress = 0;
+          await humanPause(900, 1600);
+          continue;
+        }
+      } else if (!uploadAlreadySucceeded(history) && shouldPreferUpload(snapAfter, history, fillResult)) {
         log.layer("agent", "stuck — forcing upload recovery", "warn");
         const uploadOk = await uploadDiscoveredFile(page, log, "agent", snapAfter, sessionId);
         history.push({

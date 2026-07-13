@@ -5,11 +5,20 @@ import path from "path";
 import { describe, it } from "node:test";
 import {
   fieldHintsFromFilled,
+  learningsFromHistory,
   normalizeFieldHints,
   shouldRecordLearnings,
   synthesizeLearningsFromRun,
 } from "../src/learningRecorder.js";
-import { learningsAsSiteMappings, recordSiteLearning } from "../src/siteLearnings.js";
+import {
+  inferAffordanceIntent,
+  isVolatileSelector,
+  learningsAsSiteMappings,
+  mergeAuthSelectors,
+  recordSiteLearning,
+  stableAuthSelector,
+  AFFORDANCE_INTENTS,
+} from "../src/siteLearnings.js";
 import { initTestRuntime } from "./helpers/runtime.js";
 
 describe("learningRecorder", () => {
@@ -103,5 +112,62 @@ describe("learningRecorder", () => {
     assert.deepEqual(patch.fieldHints?.["#app-email"], { mappedTo: "email" });
     assert.deepEqual(patch.authSelectors?.email, ["#login-email"]);
     assert.deepEqual(patch.modalSelectors, ["button.wizard-next"]);
+  });
+
+  it("learningsFromHistory only keeps affordance skills from progress steps", () => {
+    const out = learningsFromHistory([
+      {
+        ok: true,
+        progress: false,
+        learnings: {
+          affordanceSkills: [{ signature: { textNorm: "bad click" }, successCount: 1 }],
+        },
+      },
+      {
+        ok: true,
+        progress: true,
+        learnings: {
+          affordanceSkills: [{ signature: { textNorm: "good click" }, intent: "entry_apply", successCount: 1 }],
+        },
+      },
+    ]);
+    assert.equal(out.affordanceSkills?.length, 1);
+    assert.equal(out.affordanceSkills[0].signature.textNorm, "good click");
+  });
+
+  it("mergeAuthSelectors drops volatile vue ids", () => {
+    const merged = mergeAuthSelectors(
+      { email: ["#v-0-8-1-0-2"] },
+      { email: ['input[type="email"]', "#v-0-6-1-0-2"] },
+    );
+    assert.deepEqual(merged.email, ['input[type="email"]']);
+  });
+
+  it("stableAuthSelector prefers testId over volatile id", () => {
+    assert.equal(
+      stableAuthSelector("#v-0-8-1-0-2", { kind: "email", testId: "login-email" }),
+      '[data-testid="login-email"]',
+    );
+    assert.equal(stableAuthSelector("#email", { kind: "email" }), "#email");
+  });
+
+  it("inferAffordanceIntent tags wizard and dismiss clicks", () => {
+    assert.equal(
+      inferAffordanceIntent(
+        { text: "I have a resume", testId: "umja-option-upload-resume", inModal: true },
+        {},
+        { step: "wizard_choice" },
+      ),
+      AFFORDANCE_INTENTS.WIZARD_CONTINUE,
+    );
+    assert.equal(
+      inferAffordanceIntent(
+        { text: "Skip and continue applying", inModal: true },
+        {},
+        { step: "overlay" },
+      ),
+      AFFORDANCE_INTENTS.UPSELL_DISMISS,
+    );
+    assert.equal(isVolatileSelector("#v-0-8-1-0-2"), true);
   });
 });

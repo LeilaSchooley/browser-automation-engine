@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Platform Engineer | JobLeads.com</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f4; }
+      body.modal-open { overflow: hidden; }
+      .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; }
+      .ui-modal {
+        position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+        background: #fff; border-radius: 16px; padding: 28px; width: 460px; z-index: 1001;
+        box-shadow: 0 20px 60px rgba(0,0,0,.2);
+      }
+      .ui-modal h2 { margin: 0 0 12px; font-size: 1.15rem; text-align: center; }
+      .ui-modal p { color: #666; line-height: 1.5; text-align: center; }
+      .card {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-top: 14px; padding: 16px 18px; border-radius: 12px;
+        background: #f7f3ee; cursor: pointer; border: 1px solid #e8dfd2;
+      }
+      .card.recommended { background: #fff8f0; }
+      .ds-button { cursor: pointer; }
+      .hidden { display: none !important; }
+      #apply-form { padding: 24px; }
+    </style>
+  </head>
+  <body class="modal-open">
+    <div id="job-card" style="padding:24px">
+      <h1>Platform Engineer &amp; Web Admin</h1>
+      <button id="apply-btn">I'm interested</button>
+    </div>
+
+    <div class="backdrop"></div>
+
+    <div class="ui-modal" role="dialog" aria-modal="true" data-testid="ui-modal-resume-score-gate">
+      <h2>Applying with a 36/100 resume score is not recommended!</h2>
+      <p>Save your free expert resume review to improve it</p>
+      <div class="card recommended ds-button" role="presentation">
+        <span>View job and get free resume review</span>
+        <span>›</span>
+      </div>
+      <div id="skip-free" class="card ds-button" role="presentation">
+        <span>Skip free expert review</span>
+        <span>›</span>
+      </div>
+    </div>
+
+    <div id="apply-form" class="hidden">
+      <h2>Application form</h2>
+      <label>First name <input id="first-name" name="firstName" type="text" /></label>
+      <label>Last name <input id="last-name" name="lastName" type="text" /></label>
+      <label>Email <input id="email" name="email" type="email" /></label>
+    </div>
+
+    <script>
+      document.getElementById("skip-free").addEventListener("click", () => {
+        document.querySelector(".ui-modal").classList.add("hidden");
+        document.querySelector(".backdrop").classList.add("hidden");
+        document.body.classList.remove("modal-open");
+        document.getElementById("apply-form").classList.remove("hidden");
+      });
+    </script>
+  </body>
+</html>

@@ -1,9 +1,10 @@
 import { DEFAULT_SETTINGS } from "./defaults.js";
-import { planNextAction as defaultPlanNextAction } from "./layers/agentPlan.js";
 import {
-  validateActionOutcome as defaultValidateAction,
-  assessAgentEndState as defaultAssessEndState,
-} from "./layers/actionValidator.js";
+  createLazyAssessEndState,
+  createLazyPlanNextAction,
+  createLazyValidateAction,
+} from "./ai/runtimeHooks.js";
+import { wrapCallLlmWithMetrics, resetLlmMetrics } from "./observability.js";
 
 /** @type {import('./index.js').EngineRuntime | null} */
 let _runtime = null;
@@ -13,16 +14,19 @@ let _runtime = null;
  */
 export function initRuntime(deps = {}) {
   const settings = { ...DEFAULT_SETTINGS, ...(deps.settings || {}) };
+  const rawCallLlm = deps.callLlm || null;
+  const callLlm = rawCallLlm ? wrapCallLlmWithMetrics(rawCallLlm) : null;
+  resetLlmMetrics();
   _runtime = {
     settings,
     loadSiteMappings: deps.loadSiteMappings || (() => ({})),
     buildFillConfig: deps.buildFillConfig || (async () => ({})),
     resolveFileUpload: deps.resolveFileUpload || (async () => ({ ok: false })),
-    callLlm: deps.callLlm || null,
-    // Defaults always wired; they no-op without agent_ai / callLlm / action_validator.
-    planNextAction: deps.planNextAction || defaultPlanNextAction,
-    validateAction: deps.validateAction || defaultValidateAction,
-    assessEndState: deps.assessEndState || defaultAssessEndState,
+    callLlm,
+    // Lazy AI defaults — no-op path when agent_ai / callLlm disabled; modules load on first use.
+    planNextAction: deps.planNextAction || createLazyPlanNextAction(),
+    validateAction: deps.validateAction || createLazyValidateAction(),
+    assessEndState: deps.assessEndState || createLazyAssessEndState(),
     answerUnfilledFields: deps.answerUnfilledFields || null,
     onStatus: deps.onStatus || null,
   };

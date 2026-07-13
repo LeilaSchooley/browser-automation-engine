@@ -15,7 +15,32 @@ import {
   uploadAlreadySucceeded,
 } from "../heuristics.js";
 import { dismissInterstitialDialog } from "./adDismiss.js";
+import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { rankEntryCandidates, entryCandidateKey } from "./pageIntent.js";
+import { resolveDialogScope } from "./dialogScope.js";
+
+function rankFileSelectors(selectors = []) {
+  const score = (sel) => {
+    const s = String(sel).toLowerCase();
+    if (/systemfield_resume|name=".*resume|id=".*resume/i.test(s)) return 100;
+    if (/resume|cv/i.test(s)) return 80;
+    if (/autofill/i.test(s)) return 20;
+    return 50;
+  };
+  return [...selectors].sort((a, b) => score(b) - score(a));
+}
+
+function shouldScopeUploadToDialog(snap) {
+  const stack = snap?.dialogStack || [];
+  return stack.some((d) => d.inApplyModal) && (snap?.modalCount || 0) > 0;
+}
+
+function uploadLocator(page, snap, sel) {
+  if (snap?.hasApplyModal && shouldScopeUploadToDialog(snap)) {
+    return resolveDialogScope(page, snap, "fill_parent").locator(sel).first();
+  }
+  return page.locator(sel).first();
+}
 
 function modalHintsForHost(hostname) {
   const maps = loadSiteMappings();
@@ -76,10 +101,8 @@ async function discoverFileSelectors(page, snap) {
   return [...new Set([...fromScan, ...fromDom, 'input[type="file"]'])];
 }
 
-async function clickInModal(page, candidate, log, layer, label, { force = false } = {}) {
-  const dialog = page
-    .locator("[role='dialog'][aria-modal='true'], [role='dialog'], .modal, [aria-modal='true'], [data-testid*='modal' i]")
-    .first();
+async function clickInModal(page, candidate, log, layer, label, { force = false, snap = null } = {}) {
+  const dialog = resolveDialogScope(page, snap, "click_wizard");
 
   const attempts = [];
 
@@ -125,7 +148,7 @@ async function clickInModal(page, candidate, log, layer, label, { force = false 
 export async function clickCandidate(page, candidate, log, layer, label, { force = false, inModal = false } = {}) {
   if (!candidate) return false;
 
-  if (inModal || candidate.inApplyModal) {
+  if (inModal || candidate.inApplyModal || candidate.inModal) {
     if (await clickInModal(page, candidate, log, layer, label, { force })) return true;
   }
 
@@ -165,6 +188,14 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
           return true;
         });
       }
+      attempts.push(async () => {
+        const loc = page.getByText(new RegExp(escaped, "i")).first();
+        if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
+        await loc.scrollIntoViewIfNeeded().catch(() => {});
+        await loc.click({ timeout: 8000, force });
+        log.layer(layer, `${label}: clicked text "${candidate.text.slice(0, 50)}"`, "info");
+        return true;
+      });
     }
   }
 
@@ -262,8 +293,23 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
   switch (action) {
     case "click": {
       if (item) {
-        const ok = await clickCandidate(page, item, log, layer, "act-click");
+        const ok = await clickCandidate(page, item, log, layer, "act-click", {
+          inModal: !!(item.inModal || item.inApplyModal),
+        });
         if (ok) return { ok: true };
+        // Design-system div buttons: text click when roles miss
+        if (item.text && item.text.length >= 2) {
+          try {
+            const loc = page.getByText(item.text.slice(0, 60), { exact: false }).first();
+            if (await loc.isVisible({ timeout: 1200 }).catch(() => false)) {
+              await loc.click({ timeout: 6000 });
+              log?.layer(layer, `act: clicked text "${item.text.slice(0, 50)}"`, "info");
+              return { ok: true };
+            }
+          } catch {
+            /* fall through */
+          }
+        }
       }
       if (targetStr) {
         return { ok: await clickTargetCandidate(page, targetStr, log, layer) };
@@ -419,6 +465,18 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
       return { ok: false };
     }
 
+    case "upload": {
+      // Prefer indexed file input; fall back to discovery.
+      if (item && (item.kind === "file" || /file/i.test(item.kind || "") || item.tag === "input")) {
+        const ok = await uploadDiscoveredFile(page, log, layer, snap, sessionId, {
+          preferredSelector: item.selector || "",
+          preferredTestId: item.testId || "",
+        });
+        return { ok };
+      }
+      return { ok: await uploadDiscoveredFile(page, log, layer, snap, sessionId) };
+    }
+
     default:
       return { ok: false };
   }
@@ -430,6 +488,8 @@ export async function clickDiscoveredCookie(page, log, layer = "page_prep", snap
     log.layer(layer, "cookie: skipped — apply modal is open", "debug");
     return false;
   }
+
+  if (await acceptFundingChoicesConsent(page, log, layer)) return true;
 
   for (const c of state.cookieCandidates || []) {
     if (/close dialog/i.test(c.aria || c.text || "")) continue;
@@ -525,7 +585,7 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
 }
 
 /** Upload file via file input (setInputFiles) — never click the overlay button. */
-export async function uploadDiscoveredFile(page, log, layer = "agent", snap = null, sessionId = null) {
+export async function uploadDiscoveredFile(page, log, layer = "agent", snap = null, sessionId = null, options = {}) {
   const state = snap || (await inspectPage(page));
   const file = await getRuntime().resolveFileUpload(sessionId, log);
   if (!file.ok) {
@@ -537,15 +597,15 @@ export async function uploadDiscoveredFile(page, log, layer = "agent", snap = nu
     log.layer(layer, `upload: auto-generated file at ${file.path}`, "info");
   }
 
+  const preferred = [options.preferredSelector, options.preferredTestId ? `[data-testid="${options.preferredTestId}"]` : ""]
+    .filter(Boolean);
   const fromScan = (state.fileInputCandidates || []).map((f) => f.selector).filter(Boolean);
   const selectors = await discoverFileSelectors(page, state);
-  const merged = [...new Set([...selectors, ...fromScan, 'input[type="file"]'])];
+  const merged = rankFileSelectors([...new Set([...preferred, ...selectors, ...fromScan, 'input[type="file"]'])]);
 
   for (const sel of merged) {
     try {
-      const loc = state.hasApplyModal
-        ? page.locator("[role='dialog'], .ui-modal, [aria-modal='true']").locator(sel).first()
-        : page.locator(sel).first();
+      const loc = uploadLocator(page, state, sel);
 
       if (!(await loc.count())) continue;
 

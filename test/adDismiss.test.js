@@ -48,4 +48,17 @@ describe("adDismiss interstitial fixtures", () => {
       assert.ok(after.fieldCount >= 2);
     });
   });
+
+  it("dismisses JobLeads resume score gate via Skip free expert review card", async () => {
+    await withFixturePage("resume-score-gate", async (page) => {
+      const before = await inspectPage(page);
+      assert.match(before.pageText || "", /36\/100 resume score/i);
+
+      const ok = await dismissInterstitialDialog(page, quietLog(), "test");
+      assert.equal(ok, true);
+      assert.equal(await page.locator("#apply-form").isVisible(), true);
+      const after = await inspectPage(page);
+      assert.ok(after.fieldCount >= 2);
+    });
+  });
 });

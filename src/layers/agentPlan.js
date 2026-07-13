@@ -8,57 +8,9 @@ import {
   resolvePreferenceFillValue,
 } from "../fillPreferences.js";
 import { isWorkflowGateModal } from "../workflowGates.js";
-
-const HIGH_LEVEL_ACTIONS = new Set([
-  "accept_cookies",
-  "dismiss_overlay",
-  "click_apply",
-  "click_modal",
-  "upload_resume",
-  "smart_fill",
-  "click_continue",
-  "click_submit",
-  "wait",
-  "done",
-  "wait_user",
-]);
-
-const GENERIC_ACTIONS = new Set(["click", "fill", "goto", "press", "scroll", "select", "check", "uncheck"]);
-
-function renderInteractives(snap) {
-  const items = (snap.interactives || []).filter((i) => {
-    const text = `${i.text || ""} ${i.aria || ""}`.toLowerCase();
-    if (i.inModal) return true;
-    if (i.kind === "combobox" || i.role === "combobox") return true;
-    if (/continue|sign up|submit|next|salary|location|desired job/i.test(text)) return true;
-    if (i.inApplyModal) return true;
-    return false;
-  });
-  const limit = items.length ? Math.min(items.length, 32) : (snap.entryCount || 0) === 0 && (snap.fieldCount || 0) === 0 ? 48 : 28;
-  const slice = (items.length ? items : (snap.interactives || [])).slice(0, limit);
-  if (!items.length) return "(no element map — use high-level actions)";
-  return slice
-    .map((i) => {
-      const flags = [i.inModal ? "modal" : "", i.inNav ? "nav" : "", i.inFooter ? "footer" : ""]
-        .filter(Boolean)
-        .join(",");
-      const href = i.href ? ` href=${i.href}` : "";
-      const testId = i.testId ? ` testid=${i.testId}` : "";
-      return `#${i.index} [${i.kind}/${i.tag}] "${i.text || i.aria || "?"}"${href}${testId}${flags ? ` (${flags})` : ""}`;
-    })
-    .join("\n");
-}
-
-function renderFields(snap) {
-  const fields = (snap.fields || []).slice(0, 12);
-  if (!fields.length) return "(none)";
-  return fields
-    .map(
-      (f) =>
-        `- ${f.type} "${f.label || f.name || "?"}"${f.required ? " (required)" : ""}${f.filled ? " [filled]" : ""}${f.selector ? ` sel=${f.selector}` : ""}`,
-    )
-    .join("\n");
-}
+import { buildAgentContext } from "./agentContext.js";
+import { buildPageState } from "./pageState.js";
+import { AgentPlanSchema, GENERIC_ACTIONS, HIGH_LEVEL_ACTIONS, parseJsonFromLlm } from "../ai/contracts.js";
 
 function objectiveLabel(context) {
   const job = context?.job || {};
@@ -72,7 +24,7 @@ function objectiveLabel(context) {
  * Default AI planner — high-level steps or generic primitives (click/fill/goto/…).
  * Uses runtime.callLlm when agent_ai is enabled.
  */
-export async function planNextAction(context, snap, history, fillResult, classification = null) {
+export async function planNextAction(context, snap, history, fillResult, classification = null, page = null) {
   const settings = getSettings();
   const { callLlm } = getRuntime();
   if (!settings.agent_ai || typeof callLlm !== "function") return null;
@@ -86,8 +38,34 @@ export async function planNextAction(context, snap, history, fillResult, classif
     (snap.fieldCount || 0) > 0;
   if (!hasAffordances && snap.pageKind === "unknown") return null;
 
-  // Preferences gate: location, desired title, salary — never skip or dismiss.
-  if (hasPreferencesGateFields(snap) && preferencesGateIncomplete(snap, fillResult)) {
+  const agentCtx = await buildAgentContext(snap, fillResult, page);
+  const pageState = agentCtx.pageState;
+
+  if (pageState.uiPhase === "option_selected_uncommitted") {
+    const confirm = pageState.confirmAffordances?.[0];
+    if (confirm?.text) {
+      return {
+        type: "act",
+        action: "click",
+        target: confirm.text,
+        reason: `commit pending selection — click ${confirm.text}`,
+        source: "ai-layout-commit",
+      };
+    }
+    return {
+      type: "act",
+      action: "click",
+      target: "Save",
+      reason: "selection made but not committed — click Save or confirm",
+      source: "ai-layout-commit",
+    };
+  }
+
+  if (
+    hasPreferencesGateFields(snap) &&
+    preferencesGateIncomplete(snap, fillResult) &&
+    pageState.uiPhase !== "picker_open"
+  ) {
     return {
       type: "smart_fill",
       target: "",
@@ -96,7 +74,6 @@ export async function planNextAction(context, snap, history, fillResult, classif
     };
   }
 
-  // Registration / identity forms: prefer smart_fill with real profile — never invent names.
   if (hasIdentityRegistrationFields(snap) || ((snap.fieldCount || 0) >= 2 && snap.pageKind === "auth")) {
     return {
       type: "smart_fill",
@@ -110,44 +87,51 @@ export async function planNextAction(context, snap, history, fillResult, classif
     .slice(-8)
     .map((h) => `${h.applyStep || h.action}${h.ok ? "" : " FAILED"}${h.progress ? "" : " (no progress)"}`)
     .join(" → ");
-  const afford = applyAffordances(snap);
+  const afford = applyAffordances(snap, pageState);
   const classInfo = classification
-    ? `Classifier suggests: ${classification.step} (confidence=${classification.confidence}) — ${classification.reason}`
+    ? `Classifier soft prior: ${classification.step} (confidence=${classification.confidence}) — ${classification.reason}`
     : "No classification available";
   const autoSubmit = settings.auto_submit === true;
 
-  const prompt = `You are a browser agent filling an application form. Goal: reach and fill the real form, following redirect chains across domains if needed.
+  const prompt = `You are a browser action brain. Goal: reach and fill the real application form. Skip upsells, paywalls, resume-score teases, and newsletter gates. Never invent credentials.
 
 Target: ${objectiveLabel(context)}
 URL: ${snap.url}
 Title: ${snap.title || "?"} | pageKind=${snap.pageKind}
 ${classInfo}
 Affordances: ${JSON.stringify(afford)}
-Form fields on page:
-${renderFields(snap)}
+${agentCtx.layoutBlock}
+${agentCtx.fieldsBlock}
 Filled so far: ${fillResult?.filled?.length || 0}
 Recent actions: ${recent || "none"}
 
-ELEMENTS (numbered — reference by elementIndex):
-${renderInteractives(snap)}
-
+ELEMENTS (numbered — prefer these by elementIndex; do NOT require CTA text to match a known list):
+${agentCtx.interactivesBlock}
+${agentCtx.softHintsBlock || ""}
 ${applicantPromptBlock(context)}
 ${preferencesPromptBlock(context)}
+${context?.ariaSnapshot || ""}
 
 Pick ONE next action. Return ONLY JSON (no markdown):
 {
-  "action": "accept_cookies" | "dismiss_overlay" | "click_apply" | "click_modal" | "upload_resume" | "smart_fill" | "click_continue" | "click_submit" | "wait" | "done" | "wait_user" | "click" | "fill" | "goto" | "press" | "scroll" | "select" | "check" | "uncheck",
+  "action": "click" | "fill" | "upload" | "select" | "check" | "uncheck" | "press" | "scroll" | "goto" | "smart_fill" | "upload_resume" | "accept_cookies" | "wait" | "done" | "wait_user" | "click_continue" | "click_submit" | "click_apply" | "click_modal" | "dismiss_overlay",
   "elementIndex": 3,
-  "target": "CSS selector, data-testid, or exact visible text (for click/fill when no elementIndex fits)",
+  "target": "optional fallback text/CSS when no elementIndex",
   "value": "text to type (fill/select) or key name (press)",
   "url": "absolute URL (goto only)",
   "reason": "one short sentence"
 }
 
 How to choose:
-- Dismiss non-form dialogs (upsell, paywall, newsletter, resume-score tease): dismiss_overlay or Skip / No thanks / Not now.
-- After upload_resume succeeded, if a polish/upsell modal appears, dismiss it — do not re-upload or restart Apply.
-- Prefer high-level actions when they fit; otherwise use ELEMENTS with generic primitives.
+- Prefer generic primitives with elementIndex from ELEMENTS over high-level dismiss_overlay / click_apply whenever a matching control is visible.
+- Upsell/paywall/resume-score modals: click the secondary/least-prominent control that declines (Skip / No thanks / Continue with basic / similar) by elementIndex — even if the label is novel.
+- Do not require CTA wording to match a known phrase list; use modal body + visual role.
+- If LAYOUT shows pendingCommits, resolve those before Continue or Sign up.
+- Combobox showing ? means unfilled even if an option was highlighted in a picker.
+- Stacked dialogs: act on the topmost dialog per LAYOUT active dialog.
+- After upload_resume succeeded, if a polish/upsell modal appears, dismiss it via click+elementIndex — do not re-upload or restart Apply.
+- Use smart_fill when multiple form fields are empty and ready.
+- Use upload / upload_resume when a file input is the next required step.
 - Cross-domain apply links are normal — follow them.
 - wait if the page is still loading; wait_user only for CAPTCHA, payment, or login you cannot pass.
 - done ONLY when application fields are filled and a human should review${autoSubmit ? "" : "/submit"}. Never done on an untouched listing page.
@@ -157,21 +141,21 @@ ${!autoSubmit ? "- Do NOT click_submit — stop with done when the form is fille
   const imageBase64 = context?.vision?.screenshotBase64 || "";
   let text = await callLlm(
     imageBase64
-      ? `${prompt}\n\nA screenshot of the current page is attached — use it to locate controls the element map may have missed.`
+      ? `${prompt}\n\nA screenshot of the current page is attached — use it with ELEMENTS to pick elementIndex. Novel CTA labels are fine.`
       : prompt,
     { imageBase64 },
   );
   if (!text) return null;
 
-  try {
-    text = String(text).trim();
-    if (text.startsWith("```")) {
-      text = text.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
-    }
-    const data = JSON.parse(text);
-    const action = String(data.action || "").toLowerCase();
+  const data = parseJsonFromLlm(text, AgentPlanSchema);
+  if (!data) return null;
 
-    if (GENERIC_ACTIONS.has(action)) {
+  try {
+    const action = String(data.action || "").toLowerCase();
+    const highLevel = new Set(HIGH_LEVEL_ACTIONS);
+    const generic = new Set(GENERIC_ACTIONS);
+
+    if (generic.has(action)) {
       const elementIndex = Number.isInteger(data.elementIndex) ? data.elementIndex : null;
       if (action === "click" && elementIndex === null && !data.target) return null;
       if (action === "fill" && !String(data.value ?? "").trim()) return null;
@@ -196,7 +180,7 @@ ${!autoSubmit ? "- Do NOT click_submit — stop with done when the form is fille
       };
     }
 
-    if (!HIGH_LEVEL_ACTIONS.has(action)) return null;
+    if (!highLevel.has(action)) return null;
 
     if (
       (action === "dismiss_overlay" || action === "click_continue") &&
@@ -266,3 +250,5 @@ ${!autoSubmit ? "- Do NOT click_submit — stop with done when the form is fille
     return null;
   }
 }
+
+export { buildPageState };

@@ -40,6 +40,27 @@ describe("buildReadyMessage", () => {
     assert.match(msg, /Clicked "I'm interested"/);
   });
 
+  it("reports aggregator trap from agent history", () => {
+    const msg = buildReadyMessage({
+      fillResult: { filled: [] },
+      snap: {
+        fieldCount: 0,
+        pageKind: "listing",
+        entryCount: 1,
+        entryCandidates: [{ text: "Apply To This Job" }],
+      },
+      prep: { actions: [] },
+      agentSteps: 4,
+      agentHistory: [
+        { action: "click_apply", progress: false },
+        { action: "wait_user", applyStep: "blocked", reason: "aggregator chain with no apply form" },
+      ],
+    });
+    assert.match(msg, /Blocked/);
+    assert.match(msg, /not a real employer apply page/);
+    assert.doesNotMatch(msg, /could not click it/);
+  });
+
   it("reports listing when agent could not click entry", () => {
     const msg = buildReadyMessage({
       fillResult: { filled: [] },

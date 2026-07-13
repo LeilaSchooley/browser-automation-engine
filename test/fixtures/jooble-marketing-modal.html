@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Junior Web Developer — Jooble</title>
+    <style>
+      body.modal-open { overflow: hidden; }
+      .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; }
+      .modal {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: #fff;
+        border-radius: 12px;
+        padding: 28px;
+        width: 420px;
+        z-index: 1001;
+        box-shadow: 0 8px 32px rgba(0,0,0,.2);
+      }
+      .modal h2 { margin: 0 0 12px; }
+      .modal .job-title { color: #2e7d32; font-weight: 600; }
+      .modal .actions { display: flex; gap: 12px; margin-top: 20px; }
+      .modal button { flex: 1; padding: 12px; border-radius: 8px; border: 0; font-size: 16px; cursor: pointer; }
+      .btn-yes { background: #1976d2; color: #fff; }
+      .btn-no { background: #e0e0e0; color: #555; }
+      .close-x { position: absolute; top: 12px; right: 16px; background: none; border: 0; font-size: 20px; cursor: pointer; }
+      #alert-form { padding: 24px; max-width: 480px; margin: 40px auto; }
+      #alert-form.hidden { display: none; }
+    </style>
+  </head>
+  <body class="modal-open">
+    <div class="backdrop" id="backdrop"></div>
+    <div class="modal" role="dialog" aria-modal="true" id="job-alert-modal">
+      <button type="button" class="close-x" aria-label="Close">×</button>
+      <h2>Time for a new Job?</h2>
+      <p class="job-title">[full remote] junior web developer, New York, NY</p>
+      <p>
+        Over <strong>769794</strong> candidates have already subscribed to Jooble's Job Alerts
+        to get new relevant jobs.
+      </p>
+      <div class="actions">
+        <button type="button" class="btn-yes" id="yes-btn">Yes</button>
+        <button type="button" class="btn-no" id="no-btn">No</button>
+      </div>
+    </div>
+
+    <main>
+      <section id="alert-form">
+        <h1>Job Alerts</h1>
+        <p>Subscribe and receive new vacancies to your email</p>
+        <label>
+          Email
+          <input type="email" name="alertEmail" placeholder="your@email.com" />
+        </label>
+        <button type="button" id="ok-btn">OK</button>
+      </section>
+    </main>
+
+    <script>
+      function closeModal() {
+        document.getElementById("job-alert-modal").style.display = "none";
+        document.getElementById("backdrop").style.display = "none";
+        document.body.classList.remove("modal-open");
+      }
+      document.getElementById("no-btn").addEventListener("click", closeModal);
+      document.querySelector(".close-x").addEventListener("click", closeModal);
+    </script>
+  </body>
+</html>

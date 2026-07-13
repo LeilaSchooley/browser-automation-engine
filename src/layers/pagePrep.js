@@ -3,6 +3,7 @@ import { loadSiteMappings } from "../siteMappings.js";
 import { hostnameFromUrl, resolveHostMapping } from "../host.js";
 import { clickDiscoveredCookie, clickDiscoveredEntry } from "./domActions.js";
 import { dismissBlockingOverlays } from "./adDismiss.js";
+import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { inspectPage, logPageSnapshot, looksLikeApplyForm } from "./formDiscovery.js";
 import { isPageUnloaded, waitForApplySurface } from "./pageReady.js";
 
@@ -62,7 +63,8 @@ export async function runPagePrepRound(page, url, log, { mode = "all" } = {}) {
   }
 
   if (mode === "all" || mode === "cookies") {
-    let hit = await clickDiscoveredCookie(page, log, "page_prep");
+    let hit = await acceptFundingChoicesConsent(page, log, "page_prep");
+    if (!hit) hit = await clickDiscoveredCookie(page, log, "page_prep");
     if (!hit && cfg.cookieAccept.length) {
       hit = await clickMappingHint(page, cfg.cookieAccept, log, "cookie");
     }

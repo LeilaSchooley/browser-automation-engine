@@ -11,6 +11,10 @@ export const LOGIN_WALL_TEXT =
 export const SIGNUP_TEXT =
   /\b(sign up with email|create (an |your )?account|register|sign up|get started|join now)\b/i;
 
+/** Job-board modal that requires creating a platform account before applying (Jobright, etc.). */
+export const APPLY_SIGNUP_GATE_TEXT =
+  /\b(sign[- ]?up to apply|sign up to continue|create (an |your )?account to apply|register to apply|sign up to use autofill)\b/i;
+
 /**
  * Stronger signals that the visible *form* is registration (not a login page
  * that merely links to Sign up / says "get started").
@@ -83,6 +87,7 @@ export const LOGIN_SUBMIT_PATTERNS = [/^login$/i, /^log in$/i, /^sign in$/i, /si
 export const SIGNUP_SUBMIT_PATTERNS = [
   /create (an )?account/i,
   /sign up with email/i,
+  /sign up to apply/i,
   /^sign up$/i,
   /^register$/i,
   /get started/i,

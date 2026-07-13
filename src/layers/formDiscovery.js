@@ -9,6 +9,8 @@ import {
   CONTINUE_TEXT,
   COOKIE_BANNER_SELECTORS,
   COOKIE_TEXT,
+  NON_COOKIE_POPUP_BODY,
+  STRUCTURAL_COOKIE_SELECTORS,
   INTERACTIVE_SEL,
   LISTING_ENTRY_TEXT,
   LOGIN_WALL_TEXT,
@@ -16,9 +18,15 @@ import {
   SIGNUP_FORM_TEXT,
   SUBMIT_PATH_RE,
   SUBMIT_TEXT,
+  CONFIRM_TEXT,
+  CONFIRM_TEXT_STRICT,
   USERNAME_FIELD_PATTERN_SOURCE,
 } from "../patterns/index.js";
 import { mergeOverlaySnap, scanBlockingOverlays } from "./adDismiss.js";
+import { isNonCookiePopup } from "../consentDetection.js";
+import { pageStateSummary } from "./pageState.js";
+import { entryHrefScoreDelta } from "./applyUrlSafety.js";
+import { browserPatternArgs } from "../primitives/browserControlPatterns.js";
 
 function emptySnap(page, error = "") {
   return {
@@ -30,6 +38,7 @@ function emptySnap(page, error = "") {
     hasForm: false,
     pageKind: "unknown",
     cookieBanner: false,
+    structuralCookieBanner: false,
     cookieCandidates: [],
     entryCount: 0,
     entryCandidates: [],
@@ -62,6 +71,11 @@ function emptySnap(page, error = "") {
     customControls: [],
     customControlCount: 0,
     controlCount: 0,
+    dialogStack: [],
+    activeDialogIndex: -1,
+    pickerOpen: false,
+    confirmCount: 0,
+    confirmCandidates: [],
     hasBlockingOverlay: false,
     bodyLocked: false,
     dismissCount: 0,
@@ -111,7 +125,8 @@ export function scoreEntryCandidate(meta) {
 
   if (/interested/i.test(blob)) score += 95;
   if (/easy apply|quick apply|1-click apply/i.test(blob)) score += 88;
-  if (/apply now|start application|submit application/i.test(blob)) score += 82;
+  if (/apply now|start application/i.test(blob)) score += 82;
+  if (/submit application/i.test(blob)) score -= 90;
   if (/\bapply\b/i.test(meta.text)) score += 55;
   if (/apply|interested/i.test(meta.testId || "")) score += 45;
 
@@ -129,14 +144,25 @@ export function scoreEntryCandidate(meta) {
 
   if (/sign in|log in|register|search jobs|save job|share/i.test(blob)) score -= 60;
 
+  if (meta.tag === "input" && !meta.href) score -= 85;
+  if (meta.tag === "input" && /apply for the job/i.test(blob)) score -= 60;
+
+  score += entryHrefScoreDelta(meta, meta.pageHost || "", {
+    hasNativeApplyButton: !!meta.hasNativeApplyButton,
+  });
+
   return score;
 }
 
-function scoreCookieCandidate(meta) {
+function scoreCookieCandidate(meta, pageBlob = "") {
   let score = 0;
   const blob = `${meta.text} ${meta.aria} ${meta.testId}`.toLowerCase();
-  if (!COOKIE_TEXT.test(blob) && !/#onetrust|cookie|consent/i.test(meta.testId || "")) return 0;
-  if (COOKIE_TEXT.test(blob)) score += 80;
+  const textOnly = (meta.text || "").trim();
+  if (NON_COOKIE_POPUP_BODY.test(pageBlob) || NON_COOKIE_POPUP_BODY.test(blob)) return 0;
+  if (!COOKIE_TEXT.test(blob) && !/#onetrust|cookie|consent|fc-consent/i.test(meta.testId || "")) {
+    if (!/^consent$/i.test(textOnly)) return 0;
+  }
+  if (COOKIE_TEXT.test(blob) || /^consent$/i.test(textOnly)) score += 80;
   if (/accept all|allow all/i.test(blob)) score += 70;
   if (meta.inCookieDialog) score += 30;
   if (meta.tag === "button") score += 15;
@@ -205,21 +231,147 @@ async function scanDom(page, { listingMode = true } = {}) {
       continuePatternSource,
       modalStepPatternSource,
       submitPatternSource,
+      confirmPatternSource,
+      confirmStrictSource,
       cookiePatternSource,
       usernameFieldPatternSource,
       cookieBannerSel,
+      structuralCookieSel,
+      nonCookiePopupPatternSource,
       submitPathPatternSource,
       interactiveSel,
       listingMode,
+      labelRules,
+      applicationLabelRules,
+      placeholderPatternSource,
+      placeholderPatternFlags,
     }) => {
       const applyPattern = new RegExp(applyPatternSource, "i");
       const listingPattern = new RegExp(listingPatternSource, "i");
       const continuePattern = new RegExp(continuePatternSource, "i");
       const modalStepPattern = new RegExp(modalStepPatternSource, "i");
       const submitPattern = new RegExp(submitPatternSource, "i");
+      const confirmPattern = new RegExp(confirmPatternSource, "i");
+      const confirmStrict = new RegExp(confirmStrictSource, "i");
       const cookiePattern = new RegExp(cookiePatternSource, "i");
+      const nonCookiePopupPattern = new RegExp(nonCookiePopupPatternSource, "i");
       const usernameFieldPattern = new RegExp(usernameFieldPatternSource, "i");
       const submitPathPattern = new RegExp(submitPathPatternSource, "i");
+      const placeholderRe = new RegExp(placeholderPatternSource, placeholderPatternFlags || "i");
+
+      function nearbyFieldLabel(el) {
+        const prev = el.previousElementSibling;
+        if (prev?.tagName === "LABEL") return (prev.textContent || "").trim();
+        const lbl = el.closest("label");
+        if (lbl) return (lbl.textContent || "").trim();
+        const id = el.id;
+        if (id) {
+          const forLbl = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (forLbl) return (forLbl.textContent || "").trim();
+        }
+        let sib = el.previousElementSibling;
+        while (sib) {
+          if (sib.tagName === "LABEL") return (sib.textContent || "").trim();
+          sib = sib.previousElementSibling;
+        }
+        return "";
+      }
+      function mapComboboxLabel(label) {
+        const blob = (label || "").toLowerCase();
+        for (const rule of labelRules || []) {
+          if (new RegExp(rule.pattern, rule.flags || "i").test(blob)) {
+            return { mappedTo: rule.mappedTo, type: rule.type };
+          }
+        }
+        return { mappedTo: "custom", type: "custom" };
+      }
+      function mapApplicationLabel(label) {
+        const blob = (label || "").toLowerCase();
+        for (const rule of applicationLabelRules || []) {
+          if (new RegExp(rule.pattern, rule.flags || "i").test(blob)) {
+            return { mappedTo: rule.mappedTo, type: rule.type };
+          }
+        }
+        return null;
+      }
+      function buttonLooksSelected(btn) {
+        if (btn.getAttribute("aria-pressed") === "true") return true;
+        if (btn.getAttribute("aria-checked") === "true") return true;
+        const cls = btn.className || "";
+        return /selected|active|pressed|checked/i.test(cls);
+      }
+      function discoverApplicationControls() {
+        const out = [];
+        const visited = new Set();
+        const roots = queryDeep(
+          '[class*="ashby-application-form-field-entry"], fieldset, [class*="yesno" i], [data-field-id]',
+        );
+        for (const root of roots) {
+          if (!isVisibleEl(root) || visited.has(root)) continue;
+          const questionEl =
+            root.querySelector('[class*="question-title"]') ||
+            root.querySelector("legend") ||
+            root.querySelector("label");
+          let label = (questionEl?.textContent || "").replace(/\s+/g, " ").trim();
+          const yesnoEl = root.matches('[class*="yesno" i]')
+            ? root
+            : root.querySelector('[class*="yesno" i]');
+          if (!label && yesnoEl) {
+            const parent = yesnoEl.closest('[class*="field-entry"], fieldset, form');
+            const parentQ = parent?.querySelector('[class*="question-title"], legend, label');
+            label = (parentQ?.textContent || "").replace(/\s+/g, " ").trim();
+          }
+          if (!label || label.length < 4) continue;
+
+          const mapping = mapApplicationLabel(label);
+          if (yesnoEl) {
+            const buttons = [...yesnoEl.querySelectorAll("button, [role='button']")].filter(isVisibleEl);
+            const texts = buttons.map((b) => (b.textContent || "").trim().toLowerCase());
+            if (texts.includes("yes") && texts.includes("no")) {
+              visited.add(root);
+              const filled = buttons.some(buttonLooksSelected);
+              const meta = elementMetaWithModal(yesnoEl, applyModals);
+              out.push({
+                label: label.slice(0, 120),
+                mappedTo: mapping?.mappedTo || "visasponsorship",
+                type: mapping?.type || "visasponsorship",
+                widgetType: "yesno",
+                text: "",
+                selector: elementSelector(yesnoEl, meta),
+                triggerSelector: elementSelector(yesnoEl, meta),
+                questionLabel: label.slice(0, 120),
+                top: meta.top,
+                left: Math.round(yesnoEl.getBoundingClientRect().left),
+                filled,
+                inModal: meta.inApplyModal || meta.inDialog,
+              });
+              continue;
+            }
+          }
+
+          const radios = [...root.querySelectorAll("input[type='radio'], [role='radio']")].filter(isVisibleEl);
+          if (radios.length >= 2 && mapping) {
+            visited.add(root);
+            const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+            const meta = elementMetaWithModal(root, applyModals);
+            out.push({
+              label: label.slice(0, 120),
+              mappedTo: mapping.mappedTo,
+              type: mapping.type,
+              widgetType: "radio",
+              text: "",
+              selector: elementSelector(root, meta),
+              triggerSelector: elementSelector(root, meta),
+              questionLabel: label.slice(0, 120),
+              top: meta.top,
+              left: Math.round(root.getBoundingClientRect().left),
+              filled,
+              inModal: meta.inApplyModal || meta.inDialog,
+            });
+          }
+        }
+        return out;
+      }
 
       function isVisibleEl(el) {
         if (!el) return false;
@@ -264,6 +416,7 @@ async function scanDom(page, { listingMode = true } = {}) {
           text: text.slice(0, 100),
           testId: testId.slice(0, 80),
           aria: aria.slice(0, 80),
+          className: String(el.className || "").slice(0, 120),
           href: (el.getAttribute("href") || "").slice(0, 120),
           id,
           idUnique,
@@ -334,12 +487,26 @@ async function scanDom(page, { listingMode = true } = {}) {
 
       function isContinueAction(meta, blob) {
         if (isJobDescriptionNoise(meta, blob)) return false;
-        if (meta.inApplyModal) return false;
         const text = (meta.text || "").trim();
+        if (meta.inApplyModal) {
+          if (/^continue$/i.test(text) || /^next$/i.test(text) || /^proceed$/i.test(text)) return true;
+          if (/sign up now|sign up for free|get started/i.test(blob)) return true;
+          return false;
+        }
         if (/^next$/i.test(text) || /^continue$/i.test(text) || /^proceed$/i.test(text)) return true;
         if (continuePattern.test(text)) return true;
         if (/continue|next-step|proceed/i.test(meta.testId || "")) return true;
         return false;
+      }
+
+      function scoreConfirmAction(meta, blob) {
+        if (!meta.inDialog && !meta.inApplyModal) return 0;
+        const text = (meta.text || "").trim();
+        if (!confirmPattern.test(blob) && !confirmPattern.test(text)) return 0;
+        if (confirmStrict.test(text)) return 90;
+        if (meta.tag === "button" || meta.role === "button") return 70;
+        if (meta.clickable) return 65;
+        return 50;
       }
 
       function scoreModalStep(meta, blob, hasFileUploadInModal) {
@@ -481,7 +648,8 @@ async function scanDom(page, { listingMode = true } = {}) {
         const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
         if (/interested/i.test(blob)) score += 95;
         if (/easy apply|quick apply|1-click apply/i.test(blob)) score += 88;
-        if (/apply now|start application|submit application/i.test(blob)) score += 82;
+        if (/apply now|start application/i.test(blob)) score += 82;
+        if (/submit application/i.test(blob)) score -= 90;
         if (/\bapply\b/i.test(meta.text)) score += 55;
         if (/apply|interested/i.test(meta.testId || "")) score += 45;
         if (meta.inMainContent) score += 25;
@@ -490,14 +658,36 @@ async function scanDom(page, { listingMode = true } = {}) {
         if (meta.inFooter) score -= 15;
         if (meta.tag === "button" || meta.role === "button") score += 18;
         if (meta.tag === "a" && /apply|interested/i.test(blob)) score += 10;
+        if (meta.tag === "input" && !meta.href) score -= 85;
+        if (meta.tag === "input" && /apply for the job/i.test(blob)) score -= 60;
         if (meta.area < 800) score -= 25;
         if (/sign in|log in|register|search jobs|save job|share/i.test(blob)) score -= 60;
+        meta.pageHost = pageHost;
+        meta.hasNativeApplyButton = hasNativeApplyButton;
+        if (/custom-button/i.test(meta.className || "")) score -= 70;
+        if (/btn-apply/i.test(meta.className || "")) score += 45;
+        if (hasNativeApplyButton && /custom-button/i.test(meta.className || "")) score -= 100;
+        if (meta.href) {
+          try {
+            const linkHost = new URL(meta.href, location.origin).hostname.replace(/^www\./, "");
+            if (linkHost && linkHost !== pageHost) {
+              score -= 40;
+              if (/thetodayupdate|victorytuitions|remotezest|liveblog365/i.test(linkHost)) score -= 80;
+              if (/liveblog365|000webhost|blogspot\.|wixsite\.com|weebly\.com|godaddysites|strikingly|tiiny\.site/i.test(linkHost)) {
+                score -= 200;
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
         return score;
       }
 
       function scoreCookie(meta) {
         let score = 0;
         const blob = `${meta.text} ${meta.aria} ${meta.testId}`.toLowerCase();
+        if (nonCookiePopupPattern.test(pageTextEarly) || nonCookiePopupPattern.test(blob)) return 0;
         if (!cookiePattern.test(blob) && !/#onetrust|cookie|consent/i.test(meta.testId || "")) return 0;
         if (cookiePattern.test(blob)) score += 80;
         if (/accept all|allow all/i.test(blob)) score += 70;
@@ -522,6 +712,11 @@ async function scanDom(page, { listingMode = true } = {}) {
           source: "dom",
         };
       }
+
+      const pageHost = (location.hostname || "").replace(/^www\./, "");
+      const hasNativeApplyButton = !!document.querySelector(
+        ".btn-apply, [class*='btn-apply-job'], a.btn-apply-job-internal-without-login, a.btn-apply-job-external",
+      );
 
       const applyModals = getApplyModalRoots();
       markApplyModalElements(applyModals);
@@ -603,21 +798,13 @@ async function scanDom(page, { listingMode = true } = {}) {
       }).length;
 
       const comboboxEls = queryDeep('[role="combobox"], [aria-haspopup="listbox"]').filter(isVisibleEl);
-      function mapComboboxLabel(label) {
-        const blob = (label || "").toLowerCase();
-        if (/salary|compensation|pay\s*expect|expected\s*pay/.test(blob)) return { mappedTo: "salary", type: "salary" };
-        if (/desired\s*job|job\s*title|target\s*role|position\s*sought/.test(blob)) return { mappedTo: "desiredtitle", type: "desiredtitle" };
-        if (/\blocation\b|where\s*are\s*you|based\s*in|city\s*region/.test(blob)) return { mappedTo: "location", type: "location" };
-        if (/\bcountry\b/.test(blob)) return { mappedTo: "country", type: "country" };
-        return { mappedTo: "custom", type: "custom" };
-      }
       const customControls = comboboxEls.slice(0, 12).map((el) => {
         const meta = elementMetaWithModal(el, applyModals);
         const ariaLabel = (el.getAttribute("aria-label") || meta.aria || "").trim();
         const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-        const label = ariaLabel || text.slice(0, 60) || "combobox";
+        const label = (ariaLabel || nearbyFieldLabel(el) || text.slice(0, 60) || "combobox").slice(0, 60);
         const mapping = mapComboboxLabel(label);
-        const placeholderLike = /^(salary expectations|select|choose)$/i.test(text);
+        const placeholderLike = placeholderRe.test(text);
         const filled = !!(text && !placeholderLike && text.length > 3);
         return {
           label,
@@ -632,8 +819,60 @@ async function scanDom(page, { listingMode = true } = {}) {
           inModal: meta.inApplyModal || meta.inDialog,
         };
       });
+      for (const ac of discoverApplicationControls()) {
+        if (!customControls.some((c) => c.mappedTo === ac.mappedTo && c.label === ac.label)) {
+          customControls.push(ac);
+        }
+      }
       const customControlCount = customControls.filter((c) => !c.filled).length;
+
+      for (const el of comboboxEls.slice(0, 8)) {
+        if (fields.some((f) => f.id && el.id && f.id === el.id)) continue;
+        const meta = elementMetaWithModal(el, applyModals);
+        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        const label = (
+          el.getAttribute("aria-label") ||
+          nearbyFieldLabel(el) ||
+          text ||
+          "combobox"
+        ).slice(0, 60);
+        const placeholderLike = placeholderRe.test(text);
+        fields.push({
+          type: "combobox",
+          widgetType: "combobox",
+          label,
+          name: el.name || "",
+          id: el.id || "",
+          selector: elementSelector(el, meta),
+          required: el.getAttribute("aria-required") === "true",
+          filled: !!(text && !placeholderLike && text.length > 1),
+        });
+      }
+      const contentEditableEls = queryDeep('[contenteditable="true"]').filter(isVisibleEl);
+      for (const el of contentEditableEls.slice(0, 6)) {
+        const meta = elementMetaWithModal(el, applyModals);
+        const label = (
+          el.getAttribute("aria-label") ||
+          nearbyFieldLabel(el) ||
+          (el.innerText || "").trim().slice(0, 60) ||
+          "contenteditable"
+        ).slice(0, 60);
+        fields.push({
+          type: "contenteditable",
+          widgetType: "contenteditable",
+          label,
+          name: "",
+          id: el.id || "",
+          selector: elementSelector(el, meta),
+          required: false,
+          filled: !!(el.innerText || "").trim(),
+        });
+      }
+      if (fields.length > 24) fields.length = 24;
+
       const controlCountVal = fieldEls.length + comboboxEls.length;
+
+      const pageTextEarly = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1400);
 
       const interactive = queryDeep(interactiveSel).filter(isVisibleEl);
       const entryRaw = [];
@@ -641,6 +880,7 @@ async function scanDom(page, { listingMode = true } = {}) {
       const continueRaw = [];
       const submitRaw = [];
       const modalRaw = [];
+      const confirmRaw = [];
       const signInRaw = [];
       const signUpRaw = [];
 
@@ -653,6 +893,8 @@ async function scanDom(page, { listingMode = true } = {}) {
           if (modalScore >= 50) modalRaw.push(toCandidate(el, modalScore, "modal", meta));
           const contScore = scoreContinueAction(meta, blob);
           if (contScore >= 40) continueRaw.push(toCandidate(el, contScore, "continue", meta));
+          const confirmScore = scoreConfirmAction(meta, blob);
+          if (confirmScore >= 50) confirmRaw.push(toCandidate(el, confirmScore, "confirm", meta));
           continue;
         }
 
@@ -662,11 +904,13 @@ async function scanDom(page, { listingMode = true } = {}) {
         const matchesApply = listingMode
           ? matchesListing
           : applyPattern.test(blob) || /apply|interested/i.test(meta.testId || "");
-        if (matchesApply && entryScore >= 20 && !applyModals.length) {
+        const onApplicationUrl = /\/application\b/i.test(location.href || "");
+        const isFinalSubmit = /^submit\s+application$/i.test((meta.text || "").trim());
+        if (matchesApply && entryScore >= 20 && !applyModals.length && !(onApplicationUrl && isFinalSubmit)) {
           entryRaw.push(toCandidate(el, entryScore, "entry", meta));
-        } else if (matchesApply && entryScore >= 20 && !meta.inNav) {
+        } else if (matchesApply && entryScore >= 20 && !meta.inNav && !(onApplicationUrl && isFinalSubmit)) {
           entryRaw.push(toCandidate(el, entryScore - 30, "entry", meta));
-        } else if (matchesApply && entryScore >= 20 && listingMode && (meta.inNav || meta.inTopBar)) {
+        } else if (matchesApply && entryScore >= 20 && listingMode && (meta.inNav || meta.inTopBar) && !(onApplicationUrl && isFinalSubmit)) {
           entryRaw.push(toCandidate(el, entryScore, "entry", meta));
         }
 
@@ -687,6 +931,9 @@ async function scanDom(page, { listingMode = true } = {}) {
             submitRaw.push(toCandidate(el, scoreEntry(meta) + 20, "submit", meta));
           }
         }
+
+        const confirmScoreOuter = scoreConfirmAction(meta, blob);
+        if (confirmScoreOuter >= 50) confirmRaw.push(toCandidate(el, confirmScoreOuter, "confirm", meta));
       }
 
       function dedupeSort(raw, minScore) {
@@ -707,6 +954,7 @@ async function scanDom(page, { listingMode = true } = {}) {
       const cookieCandidates = dedupeSort(cookieRaw, 55);
       const continueCandidates = dedupeSort(continueRaw, 40);
       const submitCandidates = dedupeSort(submitRaw, 30);
+      const confirmCandidates = dedupeSort(confirmRaw, 50);
       const signInCandidates = dedupeSort(signInRaw, 45);
       const signUpCandidates = dedupeSort(signUpRaw, 45);
 
@@ -714,14 +962,51 @@ async function scanDom(page, { listingMode = true } = {}) {
       // fields first, then controls ranked by modal/main-content relevance.
       const interactives = [];
       const seenInteractive = new Set();
+      function hintScoreForText(text) {
+        const t = String(text || "").trim();
+        if (!t) return 0;
+        if (/skip\s+free\s+expert|skip\s*(and|&)\s*continue|skip\s+to\s+(application|apply)/i.test(t)) return 10;
+        if (/^(skip|no[, ]?thanks|not now|maybe later|dismiss|close)$/i.test(t)) return 8;
+        if (/\b(apply|i'?m interested|continue|submit|upload|sign up|next)\b/i.test(t)) return 5;
+        return 0;
+      }
       function pushInteractive(el, meta, kind) {
         const sel = elementSelector(el, meta);
-        const key = sel || `${meta.tag}:${(meta.text || "").slice(0, 40)}`;
+        const key = sel || `${meta.tag}:${(meta.text || "").slice(0, 40)}:${Math.round(meta.top || 0)}`;
         if (seenInteractive.has(key)) return;
         seenInteractive.add(key);
+        let zIndex = 0;
+        let disabled = false;
+        let bbox = null;
+        try {
+          const cs = getComputedStyle(el);
+          zIndex = parseInt(cs.zIndex, 10) || 0;
+          disabled = !!(el.disabled || el.getAttribute("aria-disabled") === "true");
+          const r = el.getBoundingClientRect();
+          bbox = {
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          };
+        } catch {
+          /* ignore */
+        }
+        const inputType = (el.type || "").toLowerCase();
+        const resolvedKind =
+          kind ||
+          (inputType === "file"
+            ? "file"
+            : inputType === "checkbox" || inputType === "radio"
+              ? inputType
+              : el.tagName === "SELECT"
+                ? "select"
+                : el.tagName === "TEXTAREA"
+                  ? "textarea"
+                  : "control");
         interactives.push({
           index: interactives.length,
-          kind,
+          kind: resolvedKind,
           tag: meta.tag,
           role: meta.role || "",
           text: (meta.text || "").slice(0, 70),
@@ -732,24 +1017,34 @@ async function scanDom(page, { listingMode = true } = {}) {
           inNav: !!meta.inNav,
           inFooter: !!meta.inFooter,
           inModal: !!(meta.inApplyModal || meta.inDialog),
+          zIndex,
+          disabled,
+          bbox,
+          hintScore: hintScoreForText(meta.text || meta.aria),
         });
       }
-      for (const el of fieldEls.slice(0, 12)) {
+      for (const el of fieldEls.slice(0, 16)) {
         const meta = elementMetaWithModal(el, applyModals);
         meta.text = meta.text || el.placeholder || el.name || "";
         pushInteractive(el, meta, `field:${(el.type || el.tagName || "").toLowerCase()}`);
       }
+      for (const el of fileInputEls.slice(0, 4)) {
+        const meta = elementMetaWithModal(el, applyModals);
+        meta.text = meta.text || meta.aria || meta.testId || "file upload";
+        pushInteractive(el, meta, "file");
+      }
       const rankedInteractive = interactive
         .map((el) => ({ el, meta: elementMetaWithModal(el, applyModals) }))
-        .filter(({ meta }) => meta.text || meta.aria || meta.testId || meta.href)
+        .filter(({ meta, el }) => {
+          if (meta.text || meta.aria || meta.testId || meta.href) return true;
+          // Design-system cards often have short child text only — keep short clickables in modals
+          if (meta.inDialog || meta.inApplyModal) return (meta.area || 0) > 80;
+          const cls = String(el.className || "");
+          return /ds-button|cursor-pointer|\bbtn\b/i.test(cls);
+        })
         .sort((a, b) => {
-          const dismissLike = (m) => {
-            const t = String(m.text || "").trim();
-            if (/skip\s*(and|&)\s*continue/i.test(t)) return 8;
-            return /^(skip|no[, ]?thanks|not now|maybe later|dismiss|close)$/i.test(t) ? 6 : 0;
-          };
           const w = (m) =>
-            dismissLike(m) +
+            hintScoreForText(m.text || m.aria) +
             (m.inDialog ? 4 : 0) +
             (m.inApplyModal ? 3 : 0) +
             (m.inMainContent ? 2 : 0) -
@@ -759,15 +1054,48 @@ async function scanDom(page, { listingMode = true } = {}) {
         });
       for (const { el, meta } of rankedInteractive) {
         const dense = entryCandidates.length === 0 && fieldEls.length === 0;
-        if (interactives.length >= (dense ? 48 : 28)) break;
+        if (interactives.length >= (dense ? 64 : 48)) break;
         pushInteractive(el, meta, "control");
       }
 
+      const structuralCookieBanner = queryDeep(structuralCookieSel).some(isVisibleEl);
       const cookieBanner =
-        queryDeep(cookieBannerSel).some(isVisibleEl) || cookieCandidates.some((c) => c.score >= 60);
+        cookieCandidates.some((c) => c.score >= 60) || structuralCookieBanner;
 
       const modalCount = queryDeep("[role='dialog'], .modal, [aria-modal='true']").filter(isVisibleEl).length;
       const hasApplyModal = applyModals.length > 0 || modalCandidates.length > 0;
+
+      const allDialogs = queryDeep("[role='dialog'], [aria-modal='true']").filter(isVisibleEl);
+      const dialogStack = allDialogs
+        .map((el) => {
+          const meta = elementMetaWithModal(el, applyModals);
+          const titleEl = el.querySelector("h1, h2, h3, [id*='modal-title' i], [class*='title' i]");
+          const title = (titleEl?.innerText || el.getAttribute("aria-label") || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80);
+          let zIndex = 0;
+          try {
+            zIndex = parseInt(getComputedStyle(el).zIndex, 10) || 0;
+          } catch {
+            zIndex = 0;
+          }
+          return {
+            title,
+            selector: elementSelector(el, meta),
+            zIndex,
+            inApplyModal: applyModals.includes(el) || !!el.__inApplyModal,
+          };
+        })
+        .sort((a, b) => b.zIndex - a.zIndex);
+      const activeDialogIndex = dialogStack.length > 0 ? 0 : -1;
+      const pickerOpen = allDialogs.some((el) => {
+        const listbox = el.querySelector("[role='listbox']");
+        if (listbox && isVisibleEl(listbox)) return true;
+        return !!el.querySelector(
+          "[role='combobox'][aria-expanded='true'], [aria-haspopup='listbox'][aria-expanded='true']",
+        );
+      });
 
       const fileInputCount = fileInputEls.length;
       const bodyTextLength = (document.body?.innerText || "").replace(/\s+/g, " ").trim().length;
@@ -778,7 +1106,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         .filter(Boolean)
         .join(" | ")
         .slice(0, 400);
-      const pageText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1400);
+      const pageText = pageTextEarly;
 
       let pageKind = "unknown";
       const authForm = passwordFieldCount > 0 && (emailFieldCount > 0 || usernameFieldCount > 0);
@@ -804,6 +1132,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         url: location.href,
         title: document.title?.slice(0, 120) || "",
         hostname: location.hostname,
+        hasNativeApplyButton,
         headings,
         pageText,
         fieldCount: fieldEls.length,
@@ -815,6 +1144,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         hasForm: fieldEls.length > 0 || comboboxEls.length > 0,
         pageKind,
         cookieBanner: cookieBanner && !hasApplyModal,
+        structuralCookieBanner,
         cookieCandidates,
         entryCount: entryCandidates.length,
         entryCandidates,
@@ -829,6 +1159,11 @@ async function scanDom(page, { listingMode = true } = {}) {
         applyModalTitle,
         modalCandidates,
         modalStepCount: modalCandidates.length,
+        dialogStack,
+        activeDialogIndex,
+        pickerOpen,
+        confirmCount: confirmCandidates.length,
+        confirmCandidates,
         bodyTextLength,
         passwordFieldCount,
         emailFieldCount,
@@ -849,12 +1184,17 @@ async function scanDom(page, { listingMode = true } = {}) {
       continuePatternSource: CONTINUE_TEXT.source,
       modalStepPatternSource: MODAL_STEP_TEXT.source,
       submitPatternSource: SUBMIT_TEXT.source,
+      confirmPatternSource: CONFIRM_TEXT.source,
+      confirmStrictSource: CONFIRM_TEXT_STRICT.source,
       cookiePatternSource: COOKIE_TEXT.source,
       usernameFieldPatternSource: USERNAME_FIELD_PATTERN_SOURCE,
       cookieBannerSel: COOKIE_BANNER_SELECTORS,
+      structuralCookieSel: STRUCTURAL_COOKIE_SELECTORS,
+      nonCookiePopupPatternSource: NON_COOKIE_POPUP_BODY.source,
       submitPathPatternSource: SUBMIT_PATH_RE.source,
       interactiveSel: INTERACTIVE_SEL,
       listingMode,
+      ...browserPatternArgs(),
     },
   );
 }
@@ -999,6 +1339,8 @@ async function enrichResumeReviewUpsell(page, snap) {
       }
 
       const dismissPatterns = [
+        /^skip free expert review$/i,
+        /skip\s+free\s+expert(\s+review)?/i,
         /^skip and continue$/i,
         /^skip & continue$/i,
         /skip\s*(and|&)\s*continue/i,
@@ -1016,7 +1358,7 @@ async function enrichResumeReviewUpsell(page, snap) {
       }
 
       const upsellPattern =
-        /auto-?rejected|won'?t reach a human|ats software will filter|fix my resume|quick wins|successful candidates score|increase your chances|tailor your resume|get more replies|expert review|free expert review|resume is not ready yet|not ready yet|upgrade|paywall/i;
+        /auto-?rejected|won'?t reach a human|ats software will filter|fix my resume|quick wins|successful candidates score|increase your chances|tailor your resume|get more replies|expert review|free expert review|resume score|not recommended|resume is not ready yet|not ready yet|upgrade|paywall/i;
 
       const visibleDialogs = queryDeep("[role='dialog'], .ui-modal, [aria-modal='true']").filter(isVisibleEl);
       const bodyHasExpertReview = visibleDialogs.some((el) =>
@@ -1048,10 +1390,14 @@ async function enrichResumeReviewUpsell(page, snap) {
           );
         if (!isKnownModal && !upsellPattern.test(body)) continue;
 
-        const buttons = [...root.querySelectorAll("button, a, [role='button']")].filter(isVisibleEl);
+        const buttons = [
+          ...root.querySelectorAll(
+            "button, a, [role='button'], [class*='ds-button' i], [class*='cursor-pointer' i]",
+          ),
+        ].filter(isVisibleEl);
         let skipEl = buttons.find((el) => matchesDismiss(el.innerText || el.textContent));
         if (!skipEl) {
-          skipEl = [...root.querySelectorAll("button, a, [role='button'], span, p")]
+          skipEl = [...root.querySelectorAll("button, a, [role='button'], span, p, div")]
             .filter(isVisibleEl)
             .find((el) => matchesDismiss(el.innerText || el.textContent));
         }
@@ -1066,7 +1412,9 @@ async function enrichResumeReviewUpsell(page, snap) {
             testId: "interstitial-dismiss",
             aria: (skipEl.getAttribute("aria-label") || "").slice(0, 80),
             selector: "",
-            score: label.toLowerCase().includes("skip and continue") || label.toLowerCase().includes("skip & continue")
+            score: label.toLowerCase().includes("skip free expert")
+              ? 320
+              : label.toLowerCase().includes("skip and continue") || label.toLowerCase().includes("skip & continue")
               ? 310
               : label.toLowerCase().includes("skip to")
                 ? 300
@@ -1125,22 +1473,57 @@ async function enrichResumeReviewUpsell(page, snap) {
   }
 }
 
+/** Infer real widget types for custom controls discovered as combobox-only. */
+async function enrichCustomControlWidgetTypes(page, snap) {
+  if (!snap?.customControls?.length) return;
+  for (const ctrl of snap.customControls) {
+    if (!ctrl.selector) continue;
+    try {
+      const loc = page.locator(ctrl.selector).first();
+      if (!(await loc.count())) continue;
+      const tag = await loc.evaluate((el) => el.tagName?.toLowerCase() || "").catch(() => "");
+      const role = await loc.getAttribute("role").catch(() => "");
+      const autocomplete = await loc.getAttribute("aria-autocomplete").catch(() => "");
+      const type = await loc.getAttribute("type").catch(() => "");
+      if (tag === "select") ctrl.widgetType = "select";
+      else if (type === "date" || type === "datetime-local") ctrl.widgetType = "date";
+      else if (role === "radiogroup" || type === "radio") ctrl.widgetType = "radio";
+      else if (autocomplete || role === "combobox") ctrl.widgetType = autocomplete ? "typeahead" : "combobox";
+      else if (ctrl.mappedTo === "salary") {
+        ctrl.widgetType = "combobox";
+        ctrl.requiresConfirm = true;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 async function enrichViaPlaywright(page, snap) {
   const pwTitle = ((await page.title().catch(() => "")) || "").slice(0, 120);
   if (!snap.title?.trim() && pwTitle) snap.title = pwTitle;
   if (!snap.url) snap.url = page.url?.() || "";
 
   if (!snap.cookieBanner) {
-    snap.cookieBanner = await page
-      .locator("[role='dialog'], #onetrust-banner-sdk, [class*='cookie' i], [id*='cookie' i]")
+    snap.structuralCookieBanner = await page
+      .locator(STRUCTURAL_COOKIE_SELECTORS)
       .first()
       .isVisible({ timeout: 300 })
       .catch(() => false);
+    snap.cookieBanner = snap.structuralCookieBanner;
+  } else if (snap.structuralCookieBanner === undefined) {
+    snap.structuralCookieBanner = false;
+  }
+
+  if (isNonCookiePopup(snap)) {
+    snap.cookieBanner = false;
+    snap.structuralCookieBanner = false;
   }
 
   await enrichFileInputs(page, snap);
   await enrichModalSteps(page, snap);
   await enrichResumeReviewUpsell(page, snap);
+  await enrichCustomControlWidgetTypes(page, snap);
 
   if ((snap.entryCount || 0) === 0) {
     for (const pattern of [/interested/i, /apply now/i, /easy apply/i, /\bapply\b/i]) {
@@ -1150,11 +1533,13 @@ async function enrichViaPlaywright(page, snap) {
           if (!(await loc.isVisible({ timeout: 400 }).catch(() => false))) continue;
           const testId = ((await loc.getAttribute("data-testid").catch(() => "")) || "").trim();
           const text = ((await loc.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+          const href = ((await loc.getAttribute("href").catch(() => "")) || "").trim();
           const meta = {
             tag: role,
             text,
             testId,
             aria: "",
+            href: href.slice(0, 120),
             inNav: false,
             inJobContext: true,
             inMainContent: true,
@@ -1166,6 +1551,7 @@ async function enrichViaPlaywright(page, snap) {
               tag: role,
               text: text.slice(0, 80),
               testId,
+              href: href.slice(0, 120),
               selector: testId ? `[data-testid="${testId}"]` : "",
               score: scoreEntryCandidate(meta),
               source: "playwright-role",
@@ -1199,12 +1585,16 @@ export async function inspectPage(page) {
   } catch {
     /* overlay scan optional */
   }
+  if (isNonCookiePopup(snap)) {
+    snap.cookieBanner = false;
+    snap.structuralCookieBanner = false;
+  }
   return snap;
 }
 
 export { applyAffordances } from "./applyStep.js";
 
-export function logPageSnapshot(log, snap, layer = "inspect", classification = null) {
+export function logPageSnapshot(log, snap, layer = "inspect", classification = null, pageState = null) {
   const stepInfo = classification
     ? ` step=${classification.step} conf=${classification.confidence}`
     : "";
@@ -1213,6 +1603,15 @@ export function logPageSnapshot(log, snap, layer = "inspect", classification = n
     layer,
     `title="${snap.title}" fields=${snap.fieldCount} kind=${snap.pageKind || "?"} body=${snap.bodyTextLength || 0}ch${stepInfo}`,
   );
+  const layout = pageState || pageStateSummary(snap);
+  if (layout.uiPhase && layout.uiPhase !== "idle") {
+    log.layer(layer, `  layout phase=${layout.uiPhase} dialogs=${layout.dialogStackDepth || 0} picker=${layout.pickerOpen ? "open" : "closed"}`, "info");
+  }
+  if (layout.pendingCommits?.length) {
+    for (const p of layout.pendingCommits.slice(0, 3)) {
+      log.layer(layer, `  pending: ${p}`, "warn");
+    }
+  }
   if (snap.inspectVia) log.layer(layer, `  inspect: ${snap.inspectVia} enrichment`, "info");
   if (snap.error) log.layer(layer, `  scan error: ${snap.error}`, "warn");
   if (snap.cookieBanner) log.layer(layer, "  cookie banner visible", "info");

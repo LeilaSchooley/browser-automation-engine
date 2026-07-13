@@ -5,16 +5,29 @@ function sleepMs(minMs, maxMs) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function timingScale() {
+  const raw = Number(getSettings().human_timing_scale);
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  return Math.min(2.5, Math.max(0.5, raw));
+}
+
+function scaledRange(minMs, maxMs) {
+  const scale = timingScale();
+  return [Math.round(minMs * scale), Math.round(maxMs * scale)];
+}
+
 export async function humanPause(minMs = 300, maxMs = 1200) {
   if (getSettings().browser_human_behavior) {
-    await sleepMs(minMs, maxMs);
+    const [lo, hi] = scaledRange(minMs, maxMs);
+    await sleepMs(lo, hi);
   }
 }
 
 /** Pause in small chunks so shouldStop can interrupt without killing the browser mid-wait. */
 export async function humanPauseInterruptible(minMs = 300, maxMs = 1200, shouldStop = null, chunkMs = 200) {
+  const [lo, hi] = scaledRange(minMs, maxMs);
   const ms = getSettings().browser_human_behavior
-    ? Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
+    ? Math.floor(Math.random() * (hi - lo + 1)) + lo
     : 0;
   let elapsed = 0;
   while (elapsed < ms) {
@@ -111,7 +124,9 @@ export async function humanFocus(locator, page) {
 }
 
 async function typeChars(locator, text) {
-  const { human_type_delay_min: lo, human_type_delay_max: hi } = getSettings();
+  const scale = timingScale();
+  const lo = Math.round(getSettings().human_type_delay_min * scale);
+  const hi = Math.round(getSettings().human_type_delay_max * scale);
   for (const char of text) {
     await locator.pressSequentially(char, { delay: 0 });
     await new Promise((r) => setTimeout(r, Math.floor(Math.random() * (hi - lo + 1)) + lo));
@@ -122,7 +137,9 @@ async function typeChars(locator, text) {
 }
 
 async function typeWords(locator, text) {
-  const { human_type_delay_min: lo, human_type_delay_max: hi } = getSettings();
+  const scale = timingScale();
+  const lo = Math.round(getSettings().human_type_delay_min * scale);
+  const hi = Math.round(getSettings().human_type_delay_max * scale);
   const words = text.split(" ");
   for (let i = 0; i < words.length; i++) {
     const chunk = i === words.length - 1 ? words[i] : `${words[i]} `;

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Weird CTA Upsell</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
+      .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; }
+      .modal {
+        position: fixed; left: 50%; top: 40%; transform: translate(-50%,-50%);
+        background: #1c2430; padding: 28px; border-radius: 14px; width: 420px; z-index: 11;
+      }
+      .ds-button {
+        margin-top: 12px; padding: 14px 16px; border-radius: 10px;
+        cursor: pointer; background: #2a3544;
+      }
+      .ds-button.primary { background: #3d5a80; }
+      .hidden { display: none !important; }
+      #apply-form { padding: 24px; }
+    </style>
+  </head>
+  <body>
+    <div class="backdrop"></div>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2>Your resume score is 41/100 — not recommended</h2>
+      <p>Get a free expert resume review before applying</p>
+      <div class="ds-button primary" id="upsell-primary">
+        View job and get free resume review
+      </div>
+      <!-- Novel CTA — no Skip / No thanks wording -->
+      <div class="ds-button" id="weird-cta">
+        Continue with basic resume
+      </div>
+    </div>
+
+    <div id="apply-form" class="hidden">
+      <h2>Application</h2>
+      <label>Email <input name="email" type="email" /></label>
+      <label>Name <input name="fullName" type="text" /></label>
+    </div>
+
+    <script>
+      document.getElementById("weird-cta").addEventListener("click", () => {
+        document.querySelector(".modal").classList.add("hidden");
+        document.querySelector(".backdrop").classList.add("hidden");
+        document.getElementById("apply-form").classList.remove("hidden");
+      });
+    </script>
+  </body>
+</html>

@@ -19,14 +19,19 @@ import { attemptAuthSignup, clickSignupEntry, looksLikeSignupForm } from "./sign
 import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { controlCount } from "../controlState.js";
 import { attemptImmediateControlRecovery } from "./controlRecovery.js";
-import { clickPreferencesSignupCta } from "../fillCustomControls.js";
+import { clickPreferencesSignupCta, salaryCommittedOnPage } from "../fillCustomControls.js";
 import { attemptObstacleRecovery } from "./obstacleActions.js";
 import { dismissBlockingOverlays, dismissInterstitialDialog } from "./adDismiss.js";
+import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { attemptCaptchaSolve } from "./captchaSolve.js";
 import { recoverFromWrongNavigation, getTriedEntryKeys, clickRankedEntry } from "./navigationRecovery.js";
 import { shouldBlockAdvance } from "../gateComplete.js";
 import { shouldNeverDismiss } from "../workflowGates.js";
+import { recentPreferencesSignup, preferencesSignupSubmitted, looksLikeJobBoardIndex } from "../heuristics.js";
 import { isPageUnloaded, waitForApplySurface, waitAfterClickTransition } from "./pageReady.js";
+import { inspectPage } from "./formDiscovery.js";
+import { attemptStagehandAct, canUseStagehand } from "./stagehandAdapter.js";
+import { buildStagehandInstruction } from "./stagehandPolicy.js";
 
 function unwrapActionResult(result) {
   if (typeof result === "boolean") return { ok: result };
@@ -35,6 +40,12 @@ function unwrapActionResult(result) {
 
 function preferencesFillHasSalary(fillResult) {
   return (fillResult?.filled || []).some((f) => f.type === "salary" || f.mappedTo === "salary");
+}
+
+async function preferencesSalaryCommitted(page, _snap, fillResult) {
+  if (await salaryCommittedOnPage(page, "salary")) return true;
+  if (!preferencesFillHasSalary(fillResult)) return false;
+  return salaryCommittedOnPage(page, "salary");
 }
 
 /**
@@ -48,6 +59,7 @@ export async function executePlan(page, plan, {
   sessionId = null,
   fillResult = null,
   history = [],
+  classification = null,
 } = {}) {
   let ok = false;
   let entryKey = "";
@@ -55,6 +67,7 @@ export async function executePlan(page, plan, {
   let nextSnap = snap;
   let nextFill = fillResult;
   let learnings = undefined;
+  let preferencesSignupClicked = false;
   const prepActions = [];
 
   switch (plan.type) {
@@ -69,12 +82,21 @@ export async function executePlan(page, plan, {
         ok = true;
         break;
       }
+      if (await acceptFundingChoicesConsent(page, log, "agent")) {
+        ok = true;
+        break;
+      }
       const round = await runPagePrepRound(page, url, log, { mode: "cookies" });
       prepActions.push(...(round.actions || []));
       ok = round.actions.includes("cookies");
       break;
     }
     case "dismiss_overlay": {
+      if (preferencesSignupSubmitted(history) || recentPreferencesSignup(history)) {
+        log?.layer("agent", "dismiss_overlay blocked — post-preferences signup transition", "warn");
+        ok = false;
+        break;
+      }
       if (shouldNeverDismiss(snap)) {
         log?.layer("agent", "dismiss_overlay blocked — workflow gate modal (fill, don't close)", "warn");
         ok = false;
@@ -93,11 +115,24 @@ export async function executePlan(page, plan, {
     case "click_apply": {
       const tried = getTriedEntryKeys(history);
       const clickResult = await clickRankedEntry(page, snap, log, "agent", context, { skipKeys: tried });
+      if (clickResult.blocked) {
+        ok = false;
+        log?.layer("agent", `click_apply blocked — ${clickResult.reason || "toxic apply link"}`, "warn");
+        break;
+      }
       ok = clickResult.ok;
       if (!ok) {
         const round = await runPagePrepRound(page, url, log, { mode: "entry" });
         prepActions.push(...(round.actions || []));
         ok = round.actions.includes("entry");
+      }
+      if (!ok && canUseStagehand(context).ok) {
+        const instruction =
+          plan.instruction ||
+          buildStagehandInstruction(snap, classification || { step: "entry" }, history, context);
+        log?.layer("agent", `click_apply failed — Stagehand: ${instruction.slice(0, 90)}`, "warn");
+        const sh = await attemptStagehandAct(page, context, { instruction, log });
+        ok = sh.ok;
       }
       if (ok) await waitAfterClickTransition(page);
       entryKey = clickResult.entryKey || "";
@@ -124,14 +159,51 @@ export async function executePlan(page, plan, {
     }
     case "upload_resume":
     case "upload_file": {
-      ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId);
+      if (Number.isInteger(plan.elementIndex)) {
+        const item = (snap?.interactives || []).find((i) => i.index === plan.elementIndex);
+        ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId, {
+          preferredSelector: item?.selector || "",
+          preferredTestId: item?.testId || "",
+        });
+      } else {
+        ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId);
+      }
       if (ok) await waitAfterClickTransition(page);
+      break;
+    }
+    case "act": {
+      if (preferencesSignupSubmitted(history) || recentPreferencesSignup(history)) {
+        const item = Number.isInteger(plan.elementIndex)
+          ? (snap?.interactives || []).find((i) => i.index === plan.elementIndex)
+          : null;
+        if (item?.testId === "modal-close") {
+          log?.layer("agent", "act blocked — modal-close after preferences signup (use verify_email)", "warn");
+          ok = false;
+          break;
+        }
+      }
+      const result = await performGenericAct(page, plan, { snap, log, sessionId, context });
+      ok = result.ok;
+      if (ok && (plan.action === "click" || plan.action === "goto" || plan.action === "upload")) {
+        await waitAfterClickTransition(page);
+      }
+      if (ok && plan.action === "click" && Number.isInteger(plan.elementIndex)) {
+        const { affordanceSkillFromAct } = await import("../siteLearnings.js");
+        const skill = affordanceSkillFromAct(plan, snap, {
+          stage: plan.step || classification?.step || "any",
+          classification,
+        });
+        if (skill) learnings = { ...(learnings || {}), affordanceSkills: [skill] };
+      }
       break;
     }
     case "smart_fill": {
       const controls = controlCount(snap);
       if (controls === 0 && (snap.customControlCount || 0) === 0) {
         log?.layer("agent", "smart_fill skipped — 0 fields on page", "warn");
+        ok = false;
+      } else if (looksLikeJobBoardIndex(snap)) {
+        log?.layer("agent", "smart_fill skipped — job board index (navigation required)", "warn");
         ok = false;
       } else if (looksLikeAuthForm(snap) || looksLikeSignupForm(snap)) {
         log?.layer("agent", "smart_fill redirected — auth/signup gate", "warn");
@@ -143,10 +215,17 @@ export async function executePlan(page, plan, {
         nextFill = await runSmartFill(page, context, log, { sessionId, snap });
         ok = (nextFill.filled?.length || 0) > 0 || (nextFill.unfilled?.length || 0) > 0;
 
-        if (
-          (nextFill.filled?.length || 0) === 0 ||
-          (hasPreferencesGateFields(snap) && !preferencesFillHasSalary(nextFill))
-        ) {
+        const salaryAlreadyLive =
+          hasPreferencesGateFields(snap) && (await preferencesSalaryCommitted(page, snap, nextFill));
+
+        const salaryNeedsRecovery =
+          !salaryAlreadyLive &&
+          ((nextFill.filled?.length || 0) === 0 ||
+            (hasPreferencesGateFields(snap) &&
+              (!preferencesFillHasSalary(nextFill) ||
+                !(await preferencesSalaryCommitted(page, snap, nextFill)))));
+
+        if (salaryNeedsRecovery) {
           const recovery = await attemptImmediateControlRecovery(page, snap, context, nextFill, {
             log,
             sessionId,
@@ -156,22 +235,34 @@ export async function executePlan(page, plan, {
             ok = true;
             nextFill = recovery.fillResult || nextFill;
             if (recovery.action) {
-              learnings = { controlSkills: [{ stagehandAction: recovery.action, source: "stagehand", mappedTo: "salary", label: "salary expectations", successCount: 1 }] };
+              learnings = { controlSkills: [{ stagehandAction: recovery.action, source: "stagehand", mappedTo: "salary", label: "salary expectations", successCount: 2, requiresConfirm: true, confirmPattern: "Save" }] };
             }
           }
         }
 
-        if (
-          hasPreferencesGateFields(snap) &&
-          preferencesFillHasSalary(nextFill) &&
-          (await clickPreferencesSignupCta(page, log, "agent"))
-        ) {
-          await waitAfterClickTransition(page);
+        if (hasPreferencesGateFields(snap)) {
+          const freshSnap = await inspectPage(page);
+          nextSnap = freshSnap;
+          const salaryOk = salaryAlreadyLive || (await preferencesSalaryCommitted(page, freshSnap, nextFill));
+          if (salaryOk && (await clickPreferencesSignupCta(page, log, "agent"))) {
+            await waitAfterClickTransition(page);
+            preferencesSignupClicked = true;
+            ok = true;
+          } else if (preferencesFillHasSalary(nextFill) && !salaryOk) {
+            log?.layer("agent", "signup CTA deferred — salary not committed on page", "warn");
+          }
         }
 
         if (!ok || (nextFill.filled?.length || 0) === 0) {
-          const obstacle = await attemptObstacleRecovery(page, snap, log);
-          if (obstacle.ok) ok = true;
+          const salaryBlocked =
+            hasPreferencesGateFields(snap) &&
+            !(await preferencesSalaryCommitted(page, nextSnap || snap, nextFill));
+          if (!salaryBlocked) {
+            const obstacle = await attemptObstacleRecovery(page, snap, log);
+            if (obstacle.ok && (nextFill.filled?.length || 0) > 0) ok = true;
+          } else {
+            log?.layer("agent", "obstacle recovery skipped — salary not committed", "warn");
+          }
         }
       }
       break;
@@ -235,7 +326,7 @@ export async function executePlan(page, plan, {
       break;
     }
     case "verify_email": {
-      ok = await attemptEmailVerify(page, snap, log);
+      ok = await attemptEmailVerify(page, snap, log, { sessionId });
       if (ok) await waitAfterClickTransition(page);
       break;
     }
@@ -245,11 +336,27 @@ export async function executePlan(page, plan, {
       if (recovery.recovered) nextSnap = recovery.snap || snap;
       break;
     }
-    case "act": {
-      const result = await performGenericAct(page, plan, { snap, log, sessionId, context });
-      ok = result.ok;
-      if (ok && (plan.action === "click" || plan.action === "goto")) {
-        await waitAfterClickTransition(page);
+    case "stagehand_act": {
+      const instruction = plan.instruction || plan.target || "";
+      const sh = await attemptStagehandAct(page, context, {
+        instruction,
+        log,
+        variables: plan.variables,
+      });
+      ok = sh.ok;
+      if (ok) await waitAfterClickTransition(page);
+      if (ok && sh.action) {
+        learnings = {
+          controlSkills: [
+            {
+              stagehandAction: sh.action,
+              source: "stagehand",
+              label: plan.reason || "navigate",
+              mappedTo: plan.mappedTo || "navigate",
+              successCount: 2,
+            },
+          ],
+        };
       }
       break;
     }
@@ -271,5 +378,14 @@ export async function executePlan(page, plan, {
       break;
   }
 
-  return { ok, snap: nextSnap, entryKey, entryCandidate, fillResult: nextFill, prepActions, learnings };
+  return {
+    ok,
+    snap: nextSnap,
+    entryKey,
+    entryCandidate,
+    fillResult: nextFill,
+    prepActions,
+    learnings,
+    preferencesSignupClicked,
+  };
 }

@@ -13,10 +13,12 @@ import { getAuthCredentials, LOGIN_WALL_TEXT, looksLikeAuthFailure, looksLikeAut
 import {
   SIGNUP_TEXT,
   SIGNUP_FORM_TEXT,
+  APPLY_SIGNUP_GATE_TEXT,
   OAUTH_PROVIDER_TEXT,
   SIGNUP_SUBMIT_PATTERNS,
   REGISTRATION_CONTINUE_PATTERNS,
 } from "../patterns/index.js";
+import { looksLikeApplySignupGate } from "../heuristics.js";
 import { clickRoleMatching, clickSubmitByPatterns } from "./fillPrimitives.js";
 import { fillSignupFormFromDom } from "./signupFieldFill.js";
 import { authSelectorsFromSignupFields } from "../learningRecorder.js";
@@ -76,6 +78,7 @@ export async function clickRegistrationContinue(page, log, layer = "signup") {
 
 export function looksLikeSignupForm(snap) {
   if (!snap) return false;
+  if (looksLikeApplySignupGate(snap)) return true;
   if (snap.signupForm) return true;
   if (hasIdentityRegistrationFields(snap)) return true;
 
@@ -91,6 +94,7 @@ export function looksLikeSignupForm(snap) {
   if (usernames > 0 && passwords >= 2) return true;
 
   if (SIGNUP_FORM_TEXT.test(blob)) return true;
+  if (APPLY_SIGNUP_GATE_TEXT.test(blob)) return true;
   if (LOGIN_WALL_TEXT.test(blob) && SIGNUP_FORM_TEXT.test(blob)) return true;
   if (usernames > 0 && passwords >= 1 && SIGNUP_FORM_TEXT.test(blob)) return true;
 

@@ -4,10 +4,11 @@
  */
 export async function tryAdoptFormIframe(page, snap, log) {
   const weakMain =
-    (snap?.fieldCount || 0) === 0 &&
-    (snap?.fileInputCount || 0) === 0 &&
-    (snap?.entryCount || 0) === 0 &&
-    !(snap?.hasApplyModal);
+    ((snap?.fieldCount || 0) === 0 &&
+      (snap?.fileInputCount || 0) === 0 &&
+      (snap?.entryCount || 0) === 0 &&
+      !(snap?.hasApplyModal)) ||
+    ((snap?.fieldCount || 0) <= 1 && (snap?.customControlCount || 0) === 0 && !(snap?.hasApplyModal));
   if (!weakMain) return { page, adopted: false };
 
   let info = null;

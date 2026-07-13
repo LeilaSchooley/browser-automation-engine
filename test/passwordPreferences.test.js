@@ -41,6 +41,18 @@ Minimum of 8 characters`;
     const fixed = generatePasswordWithPolicy(DEFAULT_PASSWORD_RULES);
     assert.ok(/\d/.test(fixed));
   });
+
+  it("parses numbers-and-letters policy (Jobright-style)", () => {
+    const rules = parsePasswordRequirementsFromText(
+      "Your password should contain both numbers and letters with 8 minimum length",
+    );
+    assert.equal(rules.digit, true);
+    assert.equal(rules.lowercase, true);
+    assert.equal(rules.special, false);
+    assert.equal(rules.minLength, 8);
+    const pwd = generatePasswordWithPolicy(rules, 10);
+    assert.ok(passwordMeetsRules(pwd, rules), pwd);
+  });
 });
 
 describe("fillPreferences", () => {
@@ -53,6 +65,23 @@ describe("fillPreferences", () => {
     assert.equal(prefs.location, "Berlin, Germany");
     assert.equal(prefs.desiredTitle, "Platform Engineer");
     assert.equal(prefs.salary, "$120k");
+  });
+
+  it("does not treat Ashby board filters as preferences gate", () => {
+    const snap = {
+      passwordFieldCount: 0,
+      fieldCount: 4,
+      fileInputCount: 0,
+      url: "https://jobs.ashbyhq.com/ditto",
+      pageText: "Open Positions Department Employment Location",
+      fields: [
+        { name: "departmentId", label: "Department", type: "select-one" },
+        { name: "employmentType", label: "Employment Type", type: "select-one" },
+        { name: "locationId", label: "Location", type: "select-one" },
+        { name: "workplaceType", label: "Location Type", type: "select-one" },
+      ],
+    };
+    assert.equal(hasPreferencesGateFields(snap), false);
   });
 
   it("detects tell-us-about-yourself preferences gate", () => {

@@ -1,4 +1,5 @@
 import { resolveSalaryExpectation } from "./salaryExpectation.js";
+import { looksLikeJobBoardIndex } from "./heuristics.js";
 
 export function getPreferencesFromContext(context = {}) {
   const p = context.preferences || {};
@@ -62,6 +63,9 @@ const PREF_FIELD_RE =
 export function hasPreferencesGateFields(snap) {
   if (!snap || (snap.passwordFieldCount || 0) > 0) return false;
 
+  // Ashby/Greenhouse board filters look like location/title fields but are not preferences gates.
+  if (looksLikeJobBoardIndex(snap)) return false;
+
   const blob = `${snap.applyModalTitle || ""} ${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
   const tellUs = /tell us about yourself|your preferences|job preferences|before you continue/i.test(blob);
 
@@ -96,7 +100,7 @@ function fieldMatchesPrefKind(label) {
   return null;
 }
 
-/** True when a preferences gate still has empty required-looking fields. */
+/** True when a preferences gate still has empty required-looking fields (snapshot/fillResult only). */
 export function preferencesGateIncomplete(snap, fillResult = null) {
   if (!hasPreferencesGateFields(snap)) return false;
 
@@ -118,4 +122,23 @@ export function preferencesGateIncomplete(snap, fillResult = null) {
   }
 
   return false;
+}
+
+/** Live DOM check for preferences gate (use when page is available). */
+export async function preferencesGateIncompleteLive(page, snap, fillResult = null) {
+  if (!hasPreferencesGateFields(snap)) return false;
+  if (preferencesGateIncomplete(snap, fillResult)) {
+    const { readLiveControlValue } = await import("./fillCustomControls.js");
+    const { readSalaryFromPage } = await import("./primitives/comboboxWidget.js");
+    const salaryLive = (await readSalaryFromPage(page)) || (await readLiveControlValue(page, "salary"));
+    const locationLive = await readLiveControlValue(page, "location");
+    const titleLive = await readLiveControlValue(page, "desiredtitle");
+    if (salaryLive && locationLive && titleLive) return false;
+    if (!salaryLive) return true;
+    const needsLocation = (snap.fields || []).some((f) => /\blocation\b/i.test(`${f.label || ""}`));
+    const needsTitle = (snap.fields || []).some((f) => /job title|desired/i.test(`${f.label || ""}`));
+    if (needsLocation && !locationLive) return true;
+    if (needsTitle && !titleLive) return true;
+  }
+  return preferencesGateIncomplete(snap, fillResult);
 }

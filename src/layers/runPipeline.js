@@ -7,6 +7,9 @@ import { preparePageForApply } from "./pagePrep.js";
 import { inspectPage, logPageSnapshot } from "./formDiscovery.js";
 import { waitForApplySurface } from "./pageReady.js";
 import { enrichContextWithLearnings } from "./navigationRecovery.js";
+import { closeStagehand } from "./stagehandAdapter.js";
+import { initEventLog, recordEngineEvent, resetLlmMetrics } from "../observability.js";
+import { resetPagePerception } from "./pagePerception.js";
 
 /** Prefer a concrete submit path over a bare homepage when provided. */
 export function resolveStartUrl(url, submitUrl) {
@@ -25,9 +28,19 @@ export function resolveStartUrl(url, submitUrl) {
   return url;
 }
 
-function buildReadyMessage({ fillResult, snap, prep, agentSteps, entryLabel = "Apply" }) {
+function buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory = [], entryLabel = "Apply" }) {
   const filledCount = fillResult.filled?.length || 0;
   const fieldCount = snap.fieldCount || 0;
+  const blocked = [...(agentHistory || [])]
+    .reverse()
+    .find((h) => h.applyStep === "blocked" || h.action === "wait_user" && h.reason);
+
+  if (blocked?.reason) {
+    if (/aggregator|mirror|unreachable|suspicious|dead/i.test(blocked.reason)) {
+      return `Blocked — ${blocked.reason}. This listing is not a real employer apply page.`;
+    }
+    return `Stopped — ${blocked.reason}. Complete manually only if this is a real apply site.`;
+  }
 
   if (filledCount > 0) {
     return `Filled ${filledCount} field(s) after ${agentSteps || "?"} agent steps — review and submit in the browser.`;
@@ -57,6 +70,11 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, entryLabel = "A
 export async function runPipeline(page, { url, submitUrl, context = {}, log, sessionId = null, shouldStop = null, entryLabel = "Apply" } = {}) {
   if (!url) throw new Error("runPipeline requires url");
 
+  try {
+  resetPagePerception();
+  resetLlmMetrics();
+  if (sessionId) initEventLog(sessionId);
+  recordEngineEvent("pipeline_start", { url, sessionId });
   const startUrl = resolveStartUrl(url, submitUrl || context?.submitUrl);
   if (startUrl !== url) {
     log.layer("navigate", `using submit URL ${startUrl}`, "info");
@@ -140,7 +158,14 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     log.layer("agent", `trail: ${trail}`, "debug");
   }
 
-  const readyMessage = buildReadyMessage({ fillResult, snap, prep, agentSteps, entryLabel });
+  const readyMessage = buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory: history, entryLabel });
+
+  recordEngineEvent("pipeline_end", {
+    sessionId,
+    agentSteps,
+    filled: fillResult.filled?.length || 0,
+    pageKind: snap.pageKind,
+  });
 
   return {
     prep,
@@ -152,6 +177,9 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     agentHistory: history,
     page: activePage,
   };
+  } finally {
+    await closeStagehand();
+  }
 }
 
 export { buildReadyMessage };

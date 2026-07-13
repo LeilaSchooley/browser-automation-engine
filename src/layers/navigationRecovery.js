@@ -12,6 +12,7 @@ import {
   rankEntryCandidates,
   targetHostFromContext,
 } from "./pageIntent.js";
+import { filterSafeEntryCandidates, shouldBlockApplyNavigation } from "./applyUrlSafety.js";
 
 export function getTriedEntryKeys(history = []) {
   return new Set(
@@ -68,7 +69,14 @@ export async function probeSubmitPaths(page, targetHost, log, context = {}) {
 }
 
 export async function clickRankedEntry(page, snap, log, layer, context = {}, { skipKeys = new Set() } = {}) {
-  const ranked = rankEntryCandidates(snap.entryCandidates, context).filter(
+  const pageUrl = snap?.url || "";
+  const safeEntries = filterSafeEntryCandidates(snap.entryCandidates, pageUrl);
+  if ((snap.entryCandidates || []).length && !safeEntries.length) {
+    const blocked = shouldBlockApplyNavigation(snap.entryCandidates[0]?.href || "", pageUrl);
+    log.layer(layer, `entry: all candidates blocked — ${blocked.reason || "toxic apply href"}`, "warn");
+    return { ok: false, blocked: true, reason: blocked.reason || "toxic apply href" };
+  }
+  const ranked = rankEntryCandidates(safeEntries, context).filter(
     (c) => !skipKeys.has(c.entryKey || entryCandidateKey(c)),
   );
 

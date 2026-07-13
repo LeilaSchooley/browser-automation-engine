@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stacked dialogs</title>
+  <style>
+    .modal { position: fixed; inset: 20% 25%; background: #fff; border: 1px solid #ccc; padding: 1rem; z-index: 10; }
+    .picker { position: fixed; inset: 30% 30%; background: #fff; border: 2px solid #333; padding: 1rem; z-index: 100; }
+    .save-btn { padding: 0.5rem 1rem; background: salmon; color: #fff; border: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Tell us about yourself" style="z-index:10">
+    <h2>Preferences</h2>
+    <div id="salary-trigger" role="combobox">?</div>
+  </div>
+  <div class="picker" role="dialog" aria-modal="true" aria-label="Salary" style="z-index:100">
+    <div role="listbox">
+      <div role="option" class="selected">USD 50,000 - 60,000</div>
+    </div>
+    <button type="button" class="save-btn">Save</button>
+  </div>
+  <script>
+    document.querySelector('.save-btn').addEventListener('click', () => {
+      document.getElementById('salary-trigger').textContent = 'USD 50,000 - 60,000';
+      document.querySelector('.picker').style.display = 'none';
+    });
+  </script>
+</body>
+</html>

@@ -3,12 +3,20 @@
  */
 import { normalizeHost } from "./host.js";
 import {
+  isJobAlertInterstitial,
+  looksLikeClosedJobListing,
+  looksLikeJobAlertSignupForm,
+  looksLikeMarketingYesNoModal,
+} from "./heuristics.js";
+import {
   recordSiteLearning,
   mergeAuthSelectors,
   mergeFieldHints,
   mergeModalSelectors,
   mergeControlSkills,
+  mergeAffordanceSkills,
   normalizeFieldHints,
+  stableAuthSelector,
 } from "./siteLearnings.js";
 
 /** smart_fill internal type → buildFillConfig key */
@@ -70,6 +78,7 @@ export { normalizeFieldHints, mergeFieldHints, mergeAuthSelectors, mergeModalSel
 export function learningsFromHistory(history = []) {
   const authSelectors = {};
   const modalSelectors = [];
+  const affordanceSkills = [];
 
   for (const step of history) {
     const L = step?.learnings;
@@ -79,11 +88,16 @@ export function learningsFromHistory(history = []) {
     }
     if (L.modalSelector) modalSelectors.push(L.modalSelector);
     if (Array.isArray(L.modalSelectors)) modalSelectors.push(...L.modalSelectors);
+    // Outcome-weighted: only remember clicks that advanced the flow.
+    if (Array.isArray(L.affordanceSkills) && step.ok && step.progress) {
+      affordanceSkills.push(...L.affordanceSkills);
+    }
   }
 
   return {
     authSelectors: Object.keys(authSelectors).length ? authSelectors : undefined,
     modalSelectors: modalSelectors.length ? mergeModalSelectors([], modalSelectors) : undefined,
+    affordanceSkills: affordanceSkills.length ? affordanceSkills : undefined,
   };
 }
 
@@ -92,9 +106,66 @@ export function authSelectorsFromSignupFields(fields = []) {
   for (const field of fields) {
     const kind = SIGNUP_KIND_TO_AUTH[field?.kind];
     if (!kind || !field?.selector) continue;
-    authSelectors[kind] = [...new Set([...(authSelectors[kind] || []), field.selector])].slice(0, 8);
+    const stable = stableAuthSelector(field.selector, field);
+    if (!stable) continue;
+    authSelectors[kind] = [...new Set([...(authSelectors[kind] || []), stable])].slice(0, 8);
   }
   return authSelectors;
+}
+
+function isJobAlertSurface(snap) {
+  if (!snap) return false;
+  return (
+    looksLikeJobAlertSignupForm(snap) ||
+    looksLikeMarketingYesNoModal(snap) ||
+    isJobAlertInterstitial(snap)
+  );
+}
+
+/**
+ * Negative learning: smart_fill typed into a job-alert upsell instead of dismissing.
+ */
+export function detectAlertFillMistake({ history = [], fillResult = {}, snap = {}, outcome = "" } = {}) {
+  const alertSurface = isJobAlertSurface(snap);
+  if (!alertSurface) return null;
+
+  const filledEmail = (fillResult.filled || []).some(
+    (f) => f.type === "email" || /email/i.test(`${f.label || ""} ${f.type || ""}`),
+  );
+  const smartFillOnAlert = history.some((h) => h.action === "smart_fill" && h.ok);
+  const dismissed = history.some(
+    (h) =>
+      ["dismiss_overlay", "interstitial_dismiss", "dismiss", "clear_obstacle"].includes(h.action) &&
+      h.ok &&
+      h.progress,
+  );
+
+  if ((filledEmail || smartFillOnAlert) && !dismissed) {
+    return { dismissFirst: true, avoidFillWhenAlert: true };
+  }
+  if (!dismissed && (outcome === "failed" || outcome === "review")) {
+    return { dismissFirst: true, avoidFillWhenAlert: true };
+  }
+  return null;
+}
+
+/** Negative learning: closed aggregator listing — skip similar URLs on this host. */
+export function detectClosedAggregatorLearning({ snap = {}, history = [], outcome = "" } = {}) {
+  const closed = looksLikeClosedJobListing(snap);
+  if (closed.closed) {
+    return { skipAggregatorApply: true, closedAggregator: true };
+  }
+
+  const blockedReason = (history || [])
+    .map((h) => String(h.reason || h.message || ""))
+    .find((r) => /unavailable|closed.*job|similar jobs only|aggregator mirror|requires local presence/i.test(r));
+  if (blockedReason || outcome === "failed") {
+    const host = normalizeHost(snap?.hostname || snap?.url || "");
+    if (host && /jooble|devitjobs|whatjobs|neuvoo|talent\.com|simplyhired/i.test(host)) {
+      return { skipAggregatorApply: true, closedAggregator: true };
+    }
+  }
+  return null;
 }
 
 /**
@@ -109,6 +180,7 @@ export function shouldRecordLearnings({ history = [], fillResult = {}, snap = {}
   const modalOk = history.some((h) => h.action === "click_modal" && h.ok);
   const fillOk = history.some((h) => h.action === "smart_fill" && h.ok);
   const navOk = history.some((h) => h.action === "nav_recovery" && h.ok);
+  const actOk = history.some((h) => h.action === "act" && h.ok && h.progress);
   const fieldCount = snap?.fieldCount || 0;
 
   return (
@@ -117,7 +189,8 @@ export function shouldRecordLearnings({ history = [], fillResult = {}, snap = {}
     modalOk ||
     fillOk ||
     navOk ||
-    progressSteps >= 2 ||
+    (actOk && (filledCount >= 1 || progressSteps >= 3)) ||
+    progressSteps >= 3 ||
     bestScore >= 2 ||
     fieldCount >= 2
   );
@@ -175,6 +248,19 @@ export function synthesizeLearningsFromRun({
   const fromHistory = learningsFromHistory(history);
   if (fromHistory.authSelectors) patch.authSelectors = fromHistory.authSelectors;
   if (fromHistory.modalSelectors?.length) patch.modalSelectors = fromHistory.modalSelectors;
+  if (fromHistory.affordanceSkills?.length) {
+    patch.affordanceSkills = mergeAffordanceSkills([], fromHistory.affordanceSkills);
+  }
+
+  const alertMistake = detectAlertFillMistake({ history, fillResult, snap, outcome });
+  if (alertMistake) {
+    Object.assign(patch, alertMistake);
+  }
+
+  const aggregatorLearning = detectClosedAggregatorLearning({ snap, history, outcome });
+  if (aggregatorLearning) {
+    Object.assign(patch, aggregatorLearning);
+  }
 
   return { host, patch };
 }

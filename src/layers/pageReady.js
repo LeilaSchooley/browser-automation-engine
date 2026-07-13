@@ -1,5 +1,7 @@
 import { humanPause } from "../human.js";
 import { inspectPage } from "./formDiscovery.js";
+import { normalizeHost } from "../host.js";
+import { isBrowserUnreachablePage, isSuspiciousApplyHost } from "./applyUrlSafety.js";
 
 export function isPageUnloaded(snap) {
   if (!snap) return true;
@@ -40,7 +42,18 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
     } catch {
       continue;
     }
-    if (!/^https?:/i.test(url)) continue;
+    if (!/^https?:/i.test(url)) {
+      if (isBrowserUnreachablePage({ url, title: await candidate.title().catch(() => "") })) {
+        log?.layer(layer, `closing unreachable tab ${url.slice(0, 90)}`, "warn");
+        await candidate.close().catch(() => {});
+      }
+      continue;
+    }
+    if (isSuspiciousApplyHost(normalizeHost(url))) {
+      log?.layer(layer, `closing suspicious apply tab ${url.slice(0, 90)}`, "warn");
+      await candidate.close().catch(() => {});
+      continue;
+    }
     if (AD_POPUP_HOST_RE.test(url)) {
       log?.layer(layer, `closing ad popup ${url.slice(0, 90)}`, "debug");
       await candidate.close().catch(() => {});
