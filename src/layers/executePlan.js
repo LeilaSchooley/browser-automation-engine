@@ -14,7 +14,7 @@ import {
   performGenericAct,
   uploadDiscoveredFile,
 } from "./domActions.js";
-import { attemptAuthLogin, looksLikeAuthForm } from "./authActions.js";
+import { attemptAuthLogin, clickSignInEntry, looksLikeAuthForm } from "./authActions.js";
 import { attemptAuthSignup, clickSignupEntry, looksLikeSignupForm } from "./signupActions.js";
 import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { controlCount } from "../controlState.js";
@@ -27,7 +27,8 @@ import { attemptCaptchaSolve } from "./captchaSolve.js";
 import { recoverFromWrongNavigation, getTriedEntryKeys, clickRankedEntry } from "./navigationRecovery.js";
 import { shouldBlockAdvance } from "../gateComplete.js";
 import { shouldNeverDismiss } from "../workflowGates.js";
-import { recentPreferencesSignup, preferencesSignupSubmitted, looksLikeJobBoardIndex } from "../heuristics.js";
+import { recentPreferencesSignup, preferencesSignupSubmitted, looksLikeJobBoardIndex, isResumeReviewUpsell, isExpertReviewGate } from "../heuristics.js";
+import { looksLikePlatformOnboarding, tickOnboardingDefaults, looksLikeJobBoardWelcomeConfirm, clickWelcomeConfirm, looksLikeDidYouApplyPrompt, clickDidYouApplyDecline } from "../platformOnboarding.js";
 import { isPageUnloaded, waitForApplySurface, waitAfterClickTransition } from "./pageReady.js";
 import { inspectPage } from "./formDiscovery.js";
 import { attemptStagehandAct, canUseStagehand } from "./stagehandAdapter.js";
@@ -211,6 +212,9 @@ export async function executePlan(page, plan, {
         ok = authResult.ok || authResult.filled === true;
         learnings = authResult.learnings;
         if (ok) await waitAfterClickTransition(page);
+      } else if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) {
+        log?.layer("agent", "smart_fill skipped — resume boost/upsell (dismiss instead)", "warn");
+        ok = await dismissBlockingOverlays(page, log, "agent", snap);
       } else {
         nextFill = await runSmartFill(page, context, log, { sessionId, snap });
         ok = (nextFill.filled?.length || 0) > 0 || (nextFill.unfilled?.length || 0) > 0;
@@ -268,11 +272,36 @@ export async function executePlan(page, plan, {
       break;
     }
     case "click_continue": {
-      const block = await shouldBlockAdvance(snap, fillResult, page);
+      const skipGate = looksLikeDidYouApplyPrompt(snap) || looksLikeJobBoardWelcomeConfirm(snap);
+      const block = skipGate ? { block: false } : await shouldBlockAdvance(snap, fillResult, page);
       if (block.block) {
         log?.layer("agent", `click_continue blocked — ${block.reason}`, "warn");
         ok = false;
         break;
+      }
+      if (looksLikeJobBoardWelcomeConfirm(snap)) {
+        ok = await clickWelcomeConfirm(page, snap, log);
+        if (ok) {
+          await waitAfterClickTransition(page);
+          break;
+        }
+      }
+      {
+        const liveDidYouApply = await page
+          .getByText(/did you apply\??/i)
+          .first()
+          .isVisible({ timeout: 500 })
+          .catch(() => false);
+        if (liveDidYouApply || looksLikeDidYouApplyPrompt(snap) || /did-you-apply/i.test(plan?.reason || "")) {
+          ok = await clickDidYouApplyDecline(page, snap, log);
+          if (ok) {
+            await waitAfterClickTransition(page);
+            break;
+          }
+        }
+      }
+      if (looksLikePlatformOnboarding(snap)) {
+        await tickOnboardingDefaults(page, log);
       }
       ok = await clickDiscoveredContinue(page, log, "agent", snap);
       if (!ok && plan.target) {
@@ -338,6 +367,8 @@ export async function executePlan(page, plan, {
     }
     case "stagehand_act": {
       const instruction = plan.instruction || plan.target || "";
+      const urlBefore = String(snap?.url || "");
+      const boardBefore = looksLikeJobBoardIndex(snap);
       const sh = await attemptStagehandAct(page, context, {
         instruction,
         log,
@@ -345,6 +376,14 @@ export async function executePlan(page, plan, {
       });
       ok = sh.ok;
       if (ok) await waitAfterClickTransition(page);
+      nextSnap = await inspectPage(page).catch(() => snap);
+      const urlAfter = String(nextSnap?.url || "");
+      const leftBoard = boardBefore && !looksLikeJobBoardIndex(nextSnap);
+      const urlChanged = urlAfter && urlAfter !== urlBefore;
+      if (ok && boardBefore && !leftBoard && !urlChanged) {
+        log?.layer("stagehand", "board act made no navigation progress", "warn");
+        ok = false;
+      }
       if (ok && sh.action) {
         learnings = {
           controlSkills: [
@@ -352,11 +391,31 @@ export async function executePlan(page, plan, {
               stagehandAction: sh.action,
               source: "stagehand",
               label: plan.reason || "navigate",
-              mappedTo: plan.mappedTo || "navigate",
+              mappedTo: plan.mappedTo || (boardBefore ? "board_nav" : "navigate"),
+              intent: boardBefore || plan.mappedTo === "board_nav" ? "board_nav" : undefined,
               successCount: 2,
             },
           ],
         };
+        if (boardBefore || plan.mappedTo === "board_nav") {
+          learnings.affordanceSkills = [
+            {
+              stage: "entry",
+              action: "click",
+              intent: "board_nav",
+              signature: {
+                role: "link",
+                textNorm: String(context?.job?.title || plan.reason || "job listing")
+                  .toLowerCase()
+                  .slice(0, 80),
+                inModal: false,
+                testId: "",
+                kind: "board_nav",
+              },
+              successCount: 1,
+            },
+          ];
+        }
       }
       break;
     }
@@ -371,6 +430,14 @@ export async function executePlan(page, plan, {
       if (ok) {
         await waitAfterClickTransition(page);
         await humanPause(1000, 1800);
+      }
+      break;
+    }
+    case "click_signin": {
+      ok = await clickSignInEntry(page, snap, log);
+      if (ok) {
+        await waitAfterClickTransition(page);
+        await humanPause(800, 1400);
       }
       break;
     }

@@ -24,6 +24,7 @@ import { hasEmptyRequiredControls } from "../controlState.js";
 import { pageStateSummary } from "./pageState.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
 import { buildStagehandPlan } from "./stagehandPolicy.js";
+import { looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 
 const RECOVERY_ACTIONS = new Set([
   "dismiss_overlay",
@@ -135,6 +136,32 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
       source: "semantic-recovery",
     };
   }
+
+  const earlyReason = String(verdict?.reason || "").toLowerCase();
+  if (
+    looksLikeDidYouApplyPrompt(snap) ||
+    /did you apply\??/i.test(earlyReason) ||
+    (raw === "dismiss_overlay" && /did you apply\??/i.test(earlyReason))
+  ) {
+    return {
+      type: "click_continue",
+      reason: `did-you-apply tracker — choose Not yet (${verdict?.reason || "detected"})`,
+      source: "semantic-recovery",
+    };
+  }
+  if (
+    /google.?vignette|adsbygoogle|vignette|choose your job type|intercepts pointer|advertisement.*intercept/i.test(
+      earlyReason,
+    ) ||
+    /#google_vignette/i.test(String(snap?.url || ""))
+  ) {
+    return {
+      type: "dismiss_overlay",
+      reason: verdict?.reason || "google vignette / ad overlay blocking clicks",
+      source: "semantic-recovery",
+    };
+  }
+
   if (raw && raw !== "null" && raw !== "ai_replan" && RECOVERY_ACTIONS.has(raw)) {
     return {
       type: raw,
@@ -143,7 +170,7 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
     };
   }
 
-  const reason = String(verdict?.reason || "").toLowerCase();
+  const reason = earlyReason;
   if (/password policy|one number|one lowercase|one uppercase|one special|minimum of \d+ character/i.test(reason)) {
     return {
       type: "auth_signup",

@@ -84,6 +84,20 @@ describe("fillPreferences", () => {
     assert.equal(hasPreferencesGateFields(snap), false);
   });
 
+  it("does not treat Location+Department selects alone as preferences gate", () => {
+    const snap = {
+      passwordFieldCount: 0,
+      fieldCount: 2,
+      fileInputCount: 0,
+      pageText: "Filter jobs",
+      fields: [
+        { label: "Location", type: "select-one", filled: false },
+        { label: "Department", type: "select-one", filled: false },
+      ],
+    };
+    assert.equal(hasPreferencesGateFields(snap), false);
+  });
+
   it("detects tell-us-about-yourself preferences gate", () => {
     const snap = {
       passwordFieldCount: 0,

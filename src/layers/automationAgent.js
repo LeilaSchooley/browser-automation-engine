@@ -10,6 +10,7 @@ import {
   progressScore,
 } from "./formDiscovery.js";
 import { adoptOpenedPage, isPageUnloaded, waitForApplySurface } from "./pageReady.js";
+import { pruneExtraPages } from "./tabHygiene.js";
 import { allowsHostHop, normalizeHost } from "../host.js";
 import {
   isAggregatorHost,
@@ -19,7 +20,8 @@ import {
 } from "./applyUrlSafety.js";
 import { gotoWithCloudflareRetry } from "../cloudflare.js";
 import { isStuck, shouldPreferUpload, uploadAlreadySucceeded, uploadStalled, hasUnfilledApplicationFields, looksLikeApplySignupGate } from "../heuristics.js";
-import { hasUnfilledYesNoOrEEOC } from "../fillApplicationAnswers.js";
+import { looksLikePlatformOnboarding } from "../platformOnboarding.js";
+import { hasUnfilledApplicationControls } from "../fillApplicationAnswers.js";
 import { attemptApplicationControlsStagehand } from "./stagehandPolicy.js";
 import { fillCustomControls } from "../fillCustomControls.js";
 import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
@@ -350,7 +352,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     // Apply links with target=_blank open the next hop in a new tab — follow it.
     // Only adopt when the current page stayed put; if it navigated, the flow
     // continued here and any stray popup is likely an ad.
-    if (["click_apply", "click_modal", "click_continue", "click_signup", "act"].includes(plan.type)) {
+    if (["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "stagehand_act"].includes(plan.type)) {
       let stayedPut = true;
       try {
         stayedPut = page.url() === (snap.url || page.url());
@@ -367,13 +369,17 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
       try {
         knownPages = new Set(page.context().pages());
+        // Periodic hygiene — AdsPower leaves blanks/ads around after target=_blank clicks.
+        if (step % 3 === 0 || plan.type === "stagehand_act") {
+          await pruneExtraPages(page.context(), page, { log, maxPages: 2 }).catch(() => {});
+        }
       } catch {
         /* ignore */
       }
     }
 
     let snapAfter = await refreshSnapIfNeeded(page, snap, inspectPage, {
-      force: ["click_apply", "click_modal", "click_continue", "click_signup", "act", "smart_fill", "upload_resume"].includes(plan.type),
+      force: ["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "smart_fill", "upload_resume"].includes(plan.type),
     });
     lastSnap = snapAfter;
     let progressed = pageFingerprint(snapAfter) !== fpBefore || progressScore(snapAfter, fillResult) > score;
@@ -635,7 +641,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     if (
       plan.type === "smart_fill" &&
       ok &&
-      hasUnfilledYesNoOrEEOC(snapAfter) &&
+      hasUnfilledApplicationControls(snapAfter) &&
       getSettings().stagehand_enabled
     ) {
       const sh = await attemptApplicationControlsStagehand(page, agentContext, {
@@ -668,12 +674,14 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
-    const appControlsPending = hasUnfilledYesNoOrEEOC(snapAfter);
+    const appControlsPending = hasUnfilledApplicationControls(snapAfter);
     const onPlatformSignupGate =
       looksLikeApplySignupGate(snapAfter) || looksLikeSignupForm(snapAfter) || snapAfter.signupForm;
+    const onPlatformOnboarding = looksLikePlatformOnboarding(snapAfter);
     const readyForReview =
       !uploadsPending &&
       !appControlsPending &&
+      !onPlatformOnboarding &&
       !(onPlatformSignupGate && !authSucceeded) &&
       ((filledCount >= 2 && looksLikeApplyForm(snapAfter, 2)) ||
         (filledCount >= 1 && authSucceeded && looksLikeApplyForm(snapAfter, 1)) ||

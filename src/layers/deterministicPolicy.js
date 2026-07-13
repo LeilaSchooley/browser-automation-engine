@@ -48,6 +48,9 @@ export function isDeterministicState(classification, snap, pageState = null, his
   }
   if (step === "entry" && confidence === "high" && (snap?.entryCount || 0) === 1) return true;
   if (step === "continue" && confidence === "high") return true;
+  if (step === "signup" && confidence === "high") return true;
+  if (step === "signin_entry" && confidence === "high") return true;
+  if (step === "auth" && confidence === "high") return true;
   if (step === "wizard_choice" && confidence !== "low") return true;
 
   if (pageState?.uiPhase === "option_selected_uncommitted") return true;
@@ -125,6 +128,7 @@ export function buildDeterministicPlan(classification, snap, pageState = null) {
     auth: "auth_login",
     signup: "auth_signup",
     signup_entry: "click_signup",
+    signin_entry: "click_signin",
     obstacle: "clear_obstacle",
     verify_email: "verify_email",
     nav_recovery: "nav_recovery",

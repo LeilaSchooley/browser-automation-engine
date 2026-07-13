@@ -46,17 +46,25 @@ export const JOB_ALERT_FIELD_RE =
 export const APPLICATION_FIELD_RE =
   /resume|cv|cover.?letter|portfolio|linkedin|phone|mobile|salary expectation|work authorization|visa sponsorship|clearance|references|start date|notice period/i;
 
-/** Ashby/Greenhouse-style job-board filter fields — not applicant preferences. */
+/** Ashby/Greenhouse/Lever-style job-board filter fields — not applicant preferences. */
 export const JOB_BOARD_FILTER_FIELD_RE =
-  /departmentid|employmenttype|locationid|workplacetype|jobcategory|teamid|officeid|departmentfilter|teamfilter/i;
+  /departmentid|employmenttype|locationid|workplacetype|jobcategory|teamid|officeid|departmentfilter|teamfilter|\bdepartment\b|\boffice\b|\bcommitment\b|\bteam\b|\bfilter\b|location.?type|workplace.?type|employment.?type/i;
 
 /** Copy on company job-board index pages (not apply forms). */
 export const JOB_BOARD_PAGE_BODY =
-  /\bopen positions\b|\ball jobs\b|\bbrowse jobs\b|\bfilter jobs\b|\bjob openings\b|\bview all jobs\b|\bcurrent openings\b/i;
+  /\bopen positions\b|\ball jobs\b|\bbrowse jobs\b|\bfilter jobs\b|\bjob openings\b|\bview all jobs\b|\bcurrent openings\b|\bcareers?\b.*\b(at|with)\b|\bjoin (our|the) team\b/i;
+
+/** ATS / company board hosts whose root paths are listings, not applications. */
+export const JOB_BOARD_HOST_RE =
+  /(^|\.)jobs\.ashbyhq\.com$|(^|\.)boards\.greenhouse\.io$|(^|\.)job-boards\.greenhouse\.io$|(^|\.)jobs\.lever\.co$|(^|\.)jobs\.workable\.com$|(^|\.)apply\.workable\.com$/i;
+
+/** Deep job/application paths — not the board index. */
+export const JOB_BOARD_JOB_PATH_RE =
+  /\/[a-f0-9-]{36}(?:\/|$)|\/jobs\/[^/?#]+|\/job\/[^/?#]+|\/application(?:s)?(?:\/|$)|\/apply(?:\/|$)|\/positions\/[^/?#]+/i;
 
 /** Aggregator listing where the original role is gone — similar-jobs redirect only. */
 export const CLOSED_JOB_BODY =
-  /requires local presence|view similar jobs(?:\s+below)?|similar jobs that could be interesting|this (job|position|role|vacancy) (is )?(no longer|not) (available|accepting applications)|no longer available|no longer accepting applications|job (has )?expired|position (has )?been filled|listing (is )?closed|closed job|posting (has )?closed|we.?re no longer accepting/i;
+  /requires local presence|view similar jobs(?:\s+below)?|similar jobs that could be interesting|this (job|position|role|vacancy) (is )?(no longer|not) (available|accepting applications)|this job has closed|job has closed|this (job|position|role) has closed|no longer available|no longer accepting applications|job (has )?expired|position (has )?been filled|listing (is )?closed|closed job|posting (has )?closed|we.?re no longer accepting/i;
 
 export const CLOSED_JOB_URL_RE = /[?&]closedJob=True\b|[?&]closedjob=true\b/i;
 

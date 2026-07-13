@@ -63,6 +63,7 @@ import {
   classifyApplyUrlHealth,
   looksLikeScrapedMirrorUrl,
   probeApplyUrlReachability,
+  probeClosedJobListing,
 } from "./layers/applyUrlHealth.js";
 import {
   parseSalaryFromText,
@@ -77,6 +78,15 @@ import { mapLabelToMapped } from "./primitives/controlPatterns.js";
 import { readControlValue, verifyCommitted, interactWidget } from "./primitives/interactWidget.js";
 import { refreshSnapIfNeeded } from "./layers/pagePerception.js";
 import { loadAiLayers } from "./ai/runtimeHooks.js";
+import { prepareWorkingPage, pruneExtraPages, isBlankOrNewTabUrl } from "./layers/tabHygiene.js";
+import {
+  attachNetworkSkillCapture,
+  findApiSkill,
+  loadApiSkills,
+  saveApiSkill,
+  tryDirectoryApiFastPath,
+  tryUnbrowseHole,
+} from "./networkSkills.js";
 
 /**
  * @typedef {Object} EngineOptions
@@ -235,6 +245,7 @@ export {
   looksLikeScrapedMirrorUrl,
   probeApplyUrlReachability,
   classifyApplyUrlHealth,
+  probeClosedJobListing,
   buildDeterministicPlan,
   shouldInvokeLlm,
   isDeterministicState,
@@ -249,6 +260,15 @@ export {
   interactWidget,
   refreshSnapIfNeeded,
   loadAiLayers,
+  prepareWorkingPage,
+  pruneExtraPages,
+  isBlankOrNewTabUrl,
+  attachNetworkSkillCapture,
+  findApiSkill,
+  loadApiSkills,
+  saveApiSkill,
+  tryDirectoryApiFastPath,
+  tryUnbrowseHole,
 };
 
 export {

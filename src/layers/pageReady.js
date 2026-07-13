@@ -2,6 +2,7 @@ import { humanPause } from "../human.js";
 import { inspectPage } from "./formDiscovery.js";
 import { normalizeHost } from "../host.js";
 import { isBrowserUnreachablePage, isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import { isBlankOrNewTabUrl, pruneExtraPages } from "./tabHygiene.js";
 
 export function isPageUnloaded(snap) {
   if (!snap) return true;
@@ -34,6 +35,7 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
   const fresh = pages.filter((p) => p !== page && !knownPages.has(p) && !p.isClosed());
   if (!fresh.length) return null;
 
+  let adopted = null;
   for (const candidate of fresh.reverse()) {
     let url = "";
     try {
@@ -43,7 +45,7 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
       continue;
     }
     if (!/^https?:/i.test(url)) {
-      if (isBrowserUnreachablePage({ url, title: await candidate.title().catch(() => "") })) {
+      if (isBlankOrNewTabUrl(url) || isBrowserUnreachablePage({ url, title: await candidate.title().catch(() => "") })) {
         log?.layer(layer, `closing unreachable tab ${url.slice(0, 90)}`, "warn");
         await candidate.close().catch(() => {});
       }
@@ -59,15 +61,31 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
       await candidate.close().catch(() => {});
       continue;
     }
-    try {
-      await candidate.bringToFront();
-    } catch {
-      /* ignore */
+    if (!adopted) {
+      try {
+        await candidate.bringToFront();
+      } catch {
+        /* ignore */
+      }
+      log?.layer(layer, `following new tab → ${url.slice(0, 120)}`, "info");
+      adopted = candidate;
+    } else {
+      // Extra apply-ish tabs after the one we adopted — close to keep AdsPower tidy.
+      log?.layer(layer, `closing extra tab ${url.slice(0, 90)}`, "debug");
+      await candidate.close().catch(() => {});
     }
-    log?.layer(layer, `following new tab → ${url.slice(0, 120)}`, "info");
-    return candidate;
   }
-  return null;
+
+  if (adopted) {
+    await pruneExtraPages(page.context(), adopted, {
+      log,
+      closePrevious: page,
+      maxPages: 2,
+      layer,
+    });
+  }
+
+  return adopted;
 }
 
 /** Wait for dialog/form to appear after a click action. */

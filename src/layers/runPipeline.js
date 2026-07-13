@@ -10,6 +10,8 @@ import { enrichContextWithLearnings } from "./navigationRecovery.js";
 import { closeStagehand } from "./stagehandAdapter.js";
 import { initEventLog, recordEngineEvent, resetLlmMetrics } from "../observability.js";
 import { resetPagePerception } from "./pagePerception.js";
+import { attachNetworkSkillCapture, tryDirectoryApiFastPath } from "../networkSkills.js";
+import { normalizeHost } from "../host.js";
 
 /** Prefer a concrete submit path over a bare homepage when provided. */
 export function resolveStartUrl(url, submitUrl) {
@@ -36,6 +38,9 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory = 
     .find((h) => h.applyStep === "blocked" || h.action === "wait_user" && h.reason);
 
   if (blocked?.reason) {
+    if (/closed|unavailable|similar jobs only|recommended substitutes/i.test(blocked.reason)) {
+      return `Skipped — ${blocked.reason}. Not applying to substitute listings.`;
+    }
     if (/aggregator|mirror|unreachable|suspicious|dead/i.test(blocked.reason)) {
       return `Blocked — ${blocked.reason}. This listing is not a real employer apply page.`;
     }
@@ -70,6 +75,7 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory = 
 export async function runPipeline(page, { url, submitUrl, context = {}, log, sessionId = null, shouldStop = null, entryLabel = "Apply" } = {}) {
   if (!url) throw new Error("runPipeline requires url");
 
+  let networkCapture = null;
   try {
   resetPagePerception();
   resetLlmMetrics();
@@ -78,6 +84,22 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
   const startUrl = resolveStartUrl(url, submitUrl || context?.submitUrl);
   if (startUrl !== url) {
     log.layer("navigate", `using submit URL ${startUrl}`, "info");
+  }
+
+  const settings = getSettings();
+  if (settings.network_skills_enabled || settings.listing_mode || process.env.NETWORK_SKILLS_ENABLED === "1") {
+    try {
+      networkCapture = attachNetworkSkillCapture(page, {
+        hostname: normalizeHost(startUrl),
+        log,
+      });
+    } catch {
+      networkCapture = null;
+    }
+    await tryDirectoryApiFastPath(
+      { url: startUrl, targetHost: normalizeHost(startUrl) },
+      { intent: settings.listing_mode ? "submit_listing" : "submit_application", log },
+    ).catch(() => {});
   }
 
   log.step("navigate", `Loading ${startUrl}`);
@@ -178,6 +200,11 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     page: activePage,
   };
   } finally {
+    try {
+      networkCapture?.stop?.();
+    } catch {
+      /* ignore */
+    }
     await closeStagehand();
   }
 }

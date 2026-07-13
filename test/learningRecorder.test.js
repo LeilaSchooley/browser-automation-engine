@@ -114,7 +114,7 @@ describe("learningRecorder", () => {
     assert.deepEqual(patch.modalSelectors, ["button.wizard-next"]);
   });
 
-  it("learningsFromHistory only keeps affordance skills from progress steps", () => {
+  it("learningsFromHistory keeps progress skills and soft dismiss/board_nav", () => {
     const out = learningsFromHistory([
       {
         ok: true,
@@ -130,9 +130,17 @@ describe("learningRecorder", () => {
           affordanceSkills: [{ signature: { textNorm: "good click" }, intent: "entry_apply", successCount: 1 }],
         },
       },
+      {
+        ok: true,
+        progress: false,
+        learnings: {
+          affordanceSkills: [{ signature: { textNorm: "skip thank you" }, intent: "upsell_dismiss", successCount: 1 }],
+        },
+      },
     ]);
-    assert.equal(out.affordanceSkills?.length, 1);
+    assert.equal(out.affordanceSkills?.length, 2);
     assert.equal(out.affordanceSkills[0].signature.textNorm, "good click");
+    assert.equal(out.affordanceSkills[1].intent, "upsell_dismiss");
   });
 
   it("mergeAuthSelectors drops volatile vue ids", () => {
@@ -169,5 +177,26 @@ describe("learningRecorder", () => {
       AFFORDANCE_INTENTS.UPSELL_DISMISS,
     );
     assert.equal(isVolatileSelector("#v-0-8-1-0-2"), true);
+  });
+
+  it("inferAffordanceIntent tags board listing clicks as board_nav", () => {
+    const boardSnap = {
+      url: "https://jobs.ashbyhq.com/ditto",
+      pageText: "Open Positions",
+      passwordFieldCount: 0,
+      fileInputCount: 0,
+      fields: [
+        { name: "departmentId", label: "Department", type: "select-one" },
+        { name: "locationId", label: "Location", type: "select-one" },
+      ],
+    };
+    assert.equal(
+      inferAffordanceIntent(
+        { text: "Senior Software Engineer, Portal", role: "link" },
+        boardSnap,
+        { step: "entry" },
+      ),
+      AFFORDANCE_INTENTS.BOARD_NAV,
+    );
   });
 });

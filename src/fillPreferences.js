@@ -59,11 +59,13 @@ export function resolvePreferenceFillValue(targetHint, proposedValue, context) {
 const PREF_FIELD_RE =
   /desired\s*job|job\s*title|salary|compensation|pay\s*expect|\blocation\b|where\s*are\s*you|based\s*in/i;
 
-/** Modal / step asking for job-search preferences (not identity signup). */
+const PREF_CUSTOM_MAPPED = new Set(["salary", "location", "desiredtitle", "country"]);
+
+/** Modal / step asking for job-search preferences (not identity signup or board filters). */
 export function hasPreferencesGateFields(snap) {
   if (!snap || (snap.passwordFieldCount || 0) > 0) return false;
 
-  // Ashby/Greenhouse board filters look like location/title fields but are not preferences gates.
+  // Ashby/Greenhouse/Lever board filters look like location/title fields but are not preferences gates.
   if (looksLikeJobBoardIndex(snap)) return false;
 
   const blob = `${snap.applyModalTitle || ""} ${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
@@ -81,9 +83,16 @@ export function hasPreferencesGateFields(snap) {
   const prefFields = (fieldLabels.match(new RegExp(PREF_FIELD_RE.source, "gi")) || []).length;
   const hasSalary = /salary|compensation|pay\s*expect/i.test(fieldLabels) || /salary expectation/i.test(blob);
   const hasLocation = /\blocation\b|where are you/i.test(fieldLabels);
-  const hasTitle = /desired job|job title/i.test(fieldLabels);
+  const hasTitle = /desired job|job title|target role|position sought/i.test(fieldLabels);
+  const selectOnly =
+    (snap.fields || []).length >= 2 &&
+    (snap.fields || []).every((f) => /select/i.test(String(f.type || ""))) &&
+    (snap.fileInputCount || 0) === 0;
 
-  return tellUs || (prefFields >= 2) || (hasLocation && (hasSalary || hasTitle));
+  // Filter-only Location + Department/Title selects without salary or tell-us copy ≠ prefs gate.
+  if (selectOnly && !hasSalary && !tellUs) return false;
+
+  return tellUs || (prefFields >= 2 && hasSalary) || (hasLocation && hasSalary) || (hasTitle && hasSalary);
 }
 
 function fieldLooksEmpty(f) {
@@ -112,13 +121,13 @@ export function preferencesGateIncomplete(snap, fillResult = null) {
   for (const f of snap.fields || []) {
     const kind = fieldMatchesPrefKind(`${f.label || ""} ${f.name || ""}`);
     if (kind && fieldLooksEmpty(f)) return true;
-    if (fieldLooksEmpty(f) && (f.type === "select" || f.type === "SELECT")) return true;
-    const label = String(f.label || "").trim();
-    if (fieldLooksEmpty(f) && (!label || label === "?")) return true;
   }
 
+  // Only prefs-mapped custom widgets block the gate — not visa/EEOC leftovers.
   for (const c of snap.customControls || []) {
-    if (!c.filled) return true;
+    if (c.filled) continue;
+    const mapped = String(c.mappedTo || c.type || "").toLowerCase();
+    if (PREF_CUSTOM_MAPPED.has(mapped)) return true;
   }
 
   return false;

@@ -9,6 +9,8 @@ import {
   INTERSTITIAL_UPSELL_BODY,
   SKIP_AND_CONTINUE_PATTERN,
   SKIP_FREE_EXPERT_REVIEW_PATTERN,
+  isResumeReviewUpsell,
+  looksLikeGoogleVignetteAd,
 } from "../heuristics.js";
 
 /** Known close controls — tried before DOM scan candidates. */
@@ -136,6 +138,19 @@ export async function scanBlockingOverlays(page) {
       const stickyContainers = queryDeep(".bb-sticky-container, .bb-sticky-box").filter(isVisibleEl);
       if (stickyContainers.length) overlayHints.push(`sticky-ad:${stickyContainers.length}`);
 
+      // Google vignette (#google_vignette / adsbygoogle with data-vignette-loaded)
+      const vignetteHash = /#google_vignette\b/i.test(location.href || "");
+      const vignetteIns = queryDeep(
+        "ins.adsbygoogle[data-vignette-loaded='true'], ins.adsbygoogle[data-ad-status='filled'], iframe[id^='aswift_'][aria-label='Advertisement'], iframe[title='Advertisement']",
+      ).filter(isVisibleEl);
+      const vignetteLarge = vignetteIns.some((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width >= window.innerWidth * 0.4 && r.height >= window.innerHeight * 0.35;
+      });
+      if (vignetteHash || vignetteLarge) {
+        overlayHints.push(vignetteHash ? "google-vignette:hash" : "google-vignette:iframe");
+      }
+
       const interactiveSel =
         "button, a[href], [role='button'], [role='link'], input[type='button'], input[type='submit'], [class*='close' i]";
 
@@ -158,6 +173,9 @@ export async function scanBlockingOverlays(page) {
         if (/close/i.test(meta.className) && meta.area < 12000) score += 50;
         if (meta.fixed && score > 0) score += 25;
         if (meta.zIndex >= 1000 && score > 0) score += 20;
+        // Vignette Close sits above the ad chrome
+        if ((vignetteHash || vignetteLarge) && /^close$/i.test(meta.text.trim())) score += 160;
+        if ((vignetteHash || vignetteLarge) && /^[×✕x]$/i.test(meta.text.trim())) score += 140;
 
         const parentDialog = el.closest(
           "[role='dialog'], [aria-modal='true'], .modal, [class*='ui-modal' i], [class*='interstitial' i], .bb-sticky-box, .phlexPopup, .jdJbeAlertPopUp",
@@ -219,6 +237,8 @@ export async function scanBlockingOverlays(page) {
         bodyLocked ||
         stickyContainers.length > 0 ||
         phlexOverlays.length > 0 ||
+        vignetteHash ||
+        vignetteLarge ||
         (fullscreenFixed.length > 0 && dismissCandidates.length > 0) ||
         dismissCandidates.some((c) => c.score >= 100) ||
         dismissCandidates.some((c) => c.source === "interstitial-dismiss");
@@ -522,6 +542,33 @@ export async function dismissInterstitialDialog(page, log, layer = "page_prep") 
       const clickedFake = await clickDismissByTextInDialog(dialog, log, layer);
       if (clickedFake) return true;
 
+      // 3) Corner close (Jobright "Boost Your Resume" etc.)
+      for (const sel of [
+        'button[aria-label="Close" i]',
+        '[aria-label="Close" i]',
+        'button[aria-label="Dismiss" i]',
+        '[class*="Modal"][class*="close" i]',
+        '[class*="modal"][class*="close" i]',
+        '[class*="dialog"][class*="close" i]',
+        'button[class*="close" i]',
+        '[class*="close" i][role="button"]',
+        '[class*="CloseButton" i]',
+        '[data-testid*="close" i]',
+        'button:has-text("×")',
+        'button:has-text("✕")',
+      ]) {
+        const closeBtn = dialog.locator(sel).first();
+        if (!(await closeBtn.isVisible({ timeout: 250 }).catch(() => false))) continue;
+        await closeBtn.click({ timeout: 6000 });
+        await humanPause(700, 1400);
+        log?.layer(layer, `dismiss: interstitial — close control \`${sel}\``, "info");
+        return true;
+      }
+
+      // 4) Icon-only close: top-right clickable in dialog (no accessible name)
+      const iconClose = await clickIconCloseInDialog(dialog, log, layer);
+      if (iconClose) return true;
+
       unmatchedDialogs.push(bodyRaw.slice(0, 100));
     }
 
@@ -531,9 +578,73 @@ export async function dismissInterstitialDialog(page, log, layer = "page_prep") 
         `dismiss: interstitial — ${unmatchedDialogs.length} upsell dialog(s), no dismiss button matched: ${unmatchedDialogs.map((t) => `"${t}"`).join("; ")}`,
         "info",
       );
+      // Escape often closes Jobright boost / LinkedIn-paste modals with only an icon X.
+      try {
+        await page.keyboard.press("Escape");
+        await humanPause(500, 900);
+        const still = await page
+          .locator('[role="dialog"], [aria-modal="true"]')
+          .filter({ hasText: /boost your resume|paste any linkedin|linkedin profile url/i })
+          .first()
+          .isVisible({ timeout: 600 })
+          .catch(() => false);
+        if (!still) {
+          log?.layer(layer, "dismiss: interstitial — Escape cleared upsell dialog", "info");
+          return true;
+        }
+      } catch {
+        /* ignore */
+      }
     }
   } catch (exc) {
     log?.layer(layer, `dismiss: interstitial failed (${exc.message})`, "info");
+  }
+  return false;
+}
+
+/** Click a nameless top-right icon close inside an upsell dialog. */
+async function clickIconCloseInDialog(dialog, log, layer) {
+  try {
+    const hit = await dialog.evaluate((root) => {
+      const box = root.getBoundingClientRect();
+      if (box.width < 80 || box.height < 80) return null;
+      const nodes = root.querySelectorAll("button, a, [role='button'], svg, span, div");
+      let best = null;
+      let bestScore = -1;
+      for (const el of nodes) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 10 || r.height < 10 || r.width > 56 || r.height > 56) continue;
+        // Prefer top-right quadrant of the dialog
+        const nearRight = r.right > box.right - 72;
+        const nearTop = r.top < box.top + 72;
+        if (!nearRight || !nearTop) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue;
+        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        if (text.length > 2 && !/^[×✕xX]$/.test(text)) continue;
+        const score = (nearRight ? 40 : 0) + (nearTop ? 40 : 0) + (el.tagName === "BUTTON" || el.getAttribute("role") === "button" ? 20 : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          best = el;
+        }
+      }
+      if (!best) return null;
+      // Prefer clickable ancestor button if svg/span was chosen
+      let target = best;
+      if (best.tagName === "SVG" || best.tagName === "SPAN" || best.tagName === "DIV") {
+        const btn = best.closest("button, a, [role='button']");
+        if (btn && root.contains(btn)) target = btn;
+      }
+      target.click();
+      return { tag: target.tagName, cls: (target.className || "").toString().slice(0, 80) };
+    });
+    if (hit) {
+      await humanPause(700, 1400);
+      log?.layer(layer, `dismiss: interstitial — icon close <${hit.tag}> ${hit.cls}`, "info");
+      return true;
+    }
+  } catch {
+    /* ignore */
   }
   return false;
 }
@@ -545,9 +656,12 @@ async function clickDismissByTextInDialog(dialog, log, layer) {
     SKIP_AND_CONTINUE_PATTERN,
     /skip\s+to\s+(application|apply)/i,
     /^skip$/i,
+    /^skip for now$/i,
     /^no[, ]?thanks$/i,
     /^not now$/i,
     /^maybe later$/i,
+    /^close$/i,
+    /^do it later$/i,
   ];
 
   for (const pattern of patterns) {
@@ -596,8 +710,80 @@ export async function dismissResumeReviewUpsell(page, log, layer = "page_prep") 
   return dismissInterstitialDialog(page, log, layer);
 }
 
+/**
+ * Google vignette ads (#google_vignette / adsbygoogle) block clicks with cross-origin iframes.
+ * Prefer Close / Escape; fall back to removing vignette nodes so Apply can proceed.
+ */
+export async function dismissGoogleVignette(page, log, layer = "page_prep") {
+  try {
+    const url = page.url?.() || "";
+    const hasHash = /#google_vignette\b/i.test(url);
+    const hasIns = await page
+      .locator("ins.adsbygoogle[data-vignette-loaded='true'], iframe[id^='aswift_'][aria-label='Advertisement']")
+      .first()
+      .isVisible({ timeout: 400 })
+      .catch(() => false);
+    if (!hasHash && !hasIns) return false;
+
+    // 1) Visible Close above the ad (parent page control)
+    for (const pattern of [/^Close$/i, /^[×✕]$/]) {
+      const btn = page.getByRole("button", { name: pattern }).first();
+      if (await btn.isVisible({ timeout: 350 }).catch(() => false)) {
+        await btn.click({ timeout: 4000, force: true }).catch(() => null);
+        await humanPause(500, 900);
+        log?.layer(layer, `dismiss: google vignette — clicked Close (${pattern})`, "info");
+        if (!/#google_vignette\b/i.test(page.url())) return true;
+      }
+      const link = page.getByRole("link", { name: pattern }).first();
+      if (await link.isVisible({ timeout: 250 }).catch(() => false)) {
+        await link.click({ timeout: 4000, force: true }).catch(() => null);
+        await humanPause(500, 900);
+        log?.layer(layer, "dismiss: google vignette — clicked Close link", "info");
+        if (!/#google_vignette\b/i.test(page.url())) return true;
+      }
+    }
+
+    // 2) Escape
+    await page.keyboard.press("Escape");
+    await humanPause(400, 700);
+
+    // 3) Strip vignette hash + remove ad nodes (SEO mirrors only path that unblocks reliably)
+    const removed = await page.evaluate(() => {
+      let n = 0;
+      if (/#google_vignette\b/i.test(location.hash || "")) {
+        history.replaceState(null, "", location.pathname + location.search);
+        n += 1;
+      }
+      document
+        .querySelectorAll(
+          "ins.adsbygoogle[data-vignette-loaded='true'], ins.adsbygoogle.adsbygoogle-noablate, iframe[id^='aswift_'][aria-label='Advertisement']",
+        )
+        .forEach((el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width < 80 && r.height < 80) return;
+          el.remove();
+          n += 1;
+        });
+      document.body?.style && (document.body.style.overflow = "");
+      document.documentElement?.style && (document.documentElement.style.overflow = "");
+      return n;
+    });
+
+    if (removed > 0) {
+      log?.layer(layer, `dismiss: google vignette — cleared overlay (${removed} change(s))`, "info");
+      await humanPause(500, 900);
+      return true;
+    }
+  } catch (exc) {
+    log?.layer(layer, `dismiss: google vignette failed (${exc.message})`, "debug");
+  }
+  return false;
+}
+
 /** Dismiss blocking ad overlays. Returns true if any dismiss action succeeded. */
 export async function dismissBlockingOverlays(page, log, layer = "page_prep", snap = null) {
+  if (await dismissGoogleVignette(page, log, layer)) return true;
+  if (snap && looksLikeGoogleVignetteAd(snap) && (await dismissGoogleVignette(page, log, layer))) return true;
   if (await dismissPhlexPopup(page, log, layer)) return true;
 
   // Chained upsells (e.g. Skip → Skip to application) — dismiss until none left.
@@ -619,7 +805,19 @@ export async function dismissBlockingOverlays(page, log, layer = "page_prep", sn
       : await scanBlockingOverlays(page);
 
   if (!overlay.hasBlockingOverlay && !(overlay.dismissCandidates || []).length) {
-    return clickStructuralDismiss(page, log, layer);
+    if (await clickStructuralDismiss(page, log, layer)) return true;
+    // Resume boost modals often lack Skip text + hasBlockingOverlay — still try Escape.
+    if (snap && (isResumeReviewUpsell(snap) || INTERSTITIAL_UPSELL_BODY.test(String(snap.applyModalTitle || snap.pageText || "")))) {
+      try {
+        await page.keyboard.press("Escape");
+        await humanPause(400, 800);
+        log?.layer(layer, "dismiss: Escape after unmatched resume upsell", "info");
+        return true;
+      } catch {
+        /* ignore */
+      }
+    }
+    return false;
   }
 
   if (overlay.overlayHints?.length) {

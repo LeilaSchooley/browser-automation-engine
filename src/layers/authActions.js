@@ -260,13 +260,64 @@ export async function attemptAuthLogin(page, snap, context, log) {
 
 export function scoreSignInCandidate(meta) {
   const blob = `${meta.text} ${meta.testId} ${meta.aria}`.toLowerCase();
-  if (!SIGN_IN_TEXT.test(blob) && !/\bsign in\b|\blog in\b|^login$/i.test(blob)) return 0;
+  if (
+    !SIGN_IN_TEXT.test(blob) &&
+    !/\bsign in\b|\blog in\b|^login$|already a member|sign in now/i.test(blob)
+  ) {
+    return 0;
+  }
   if (OAUTH_PROVIDER_TEXT.test(blob) && !/email/.test(blob)) return 0;
   let score = 50;
   if (/sign in with email|log in with email/.test(blob)) score += 80;
-  if (meta.tag === "button" || meta.role === "button" || meta.tag === "input") score += 20;
+  if (/sign in now|already a member/.test(blob)) score += 55;
+  if (meta.tag === "button" || meta.role === "button" || meta.tag === "input" || meta.tag === "a") {
+    score += 20;
+  }
   if (/magic link/.test(blob)) score -= 30;
   return score;
+}
+
+const SIGNIN_ENTRY_PATTERNS = [
+  /already a member/i,
+  /sign in now/i,
+  /^sign in$/i,
+  /^log in$/i,
+  /sign in with email/i,
+];
+
+/** Switch Sign up → Sign in when we already have a verified site account. */
+export async function clickSignInEntry(page, snap, log) {
+  const candidate = snap?.signInCandidates?.[0];
+  log?.layer("auth", `opening sign in: ${candidate?.text || "Sign in"}`, "info");
+
+  if (await clickRoleMatching(page, SIGNIN_ENTRY_PATTERNS, { log, layer: "auth", roles: ["button", "link"] })) {
+    return true;
+  }
+
+  if (candidate?.selector) {
+    try {
+      const loc = page.locator(candidate.selector).first();
+      if (await loc.isVisible({ timeout: 1000 })) {
+        await loc.click({ timeout: 8000 });
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  try {
+    const byText = page.getByText(/already a member\??\s*sign in|sign in now/i).first();
+    if (await byText.isVisible({ timeout: 800 }).catch(() => false)) {
+      await byText.click({ timeout: 8000 });
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  log?.layer("auth", "no sign-in entry candidate", "warn");
+  return false;
 }
 
 export { LOGIN_WALL_TEXT, SIGN_IN_TEXT };

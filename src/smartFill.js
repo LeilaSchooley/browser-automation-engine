@@ -11,7 +11,7 @@ import { hasPreferencesGateFields, getPreferencesFromContext } from "./fillPrefe
 import { hasUnfilledYesNoOrEEOC } from "./fillApplicationAnswers.js";
 import { sortByVisualOrder } from "./fillOrder.js";
 import { SMART_FILL_SALARY_HELPER } from "./primitives/browserControlPatterns.js";
-import { looksLikeJobAlertSignupForm, looksLikeMarketingYesNoModal, looksLikeApplySignupGate } from "./heuristics.js";
+import { looksLikeJobAlertSignupForm, looksLikeMarketingYesNoModal, looksLikeApplySignupGate, looksLikeGoogleVignetteAd } from "./heuristics.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMART_FILL_JS = fs.readFileSync(path.join(__dirname, "smart_fill.js"), "utf8");
@@ -217,17 +217,24 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     snap &&
     (looksLikeJobAlertSignupForm(snap) ||
       looksLikeMarketingYesNoModal(snap) ||
-      looksLikeApplySignupGate(snap))
+      looksLikeApplySignupGate(snap) ||
+      looksLikeGoogleVignetteAd(snap))
   ) {
     const reason = looksLikeApplySignupGate(snap)
       ? "apply signup gate — use auth_signup flow"
-      : "job-alert/marketing signup — dismiss overlay first";
+      : looksLikeGoogleVignetteAd(snap)
+        ? "google vignette ad — dismiss overlay first"
+        : "job-alert/marketing signup — dismiss overlay first";
     log?.layer("smart_fill", `skipped: ${reason}`, "info");
     return {
       filled: [],
       unfilled: [],
       unfilled_count: 0,
-      skipped: looksLikeApplySignupGate(snap) ? "apply_signup_gate" : "job_alert_signup",
+      skipped: looksLikeApplySignupGate(snap)
+        ? "apply_signup_gate"
+        : looksLikeGoogleVignetteAd(snap)
+          ? "google_vignette"
+          : "job_alert_signup",
       hostname: snap.hostname || "",
     };
   }

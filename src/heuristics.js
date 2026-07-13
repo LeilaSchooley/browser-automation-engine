@@ -7,6 +7,8 @@ import {
   JOB_ALERT_FIELD_RE,
   JOB_ALERT_SIGNUP_BODY,
   JOB_BOARD_FILTER_FIELD_RE,
+  JOB_BOARD_HOST_RE,
+  JOB_BOARD_JOB_PATH_RE,
   JOB_BOARD_PAGE_BODY,
   CLOSED_JOB_BODY,
   CLOSED_JOB_URL_RE,
@@ -30,7 +32,7 @@ export const SKIP_FREE_EXPERT_REVIEW_PATTERN = /skip\s+free\s+expert(\s+review)?
 
 /** Secondary actions that dismiss an interstitial / upsell (any site). */
 export const INTERSTITIAL_DISMISS_TEXT =
-  /^(skip|skip to (application|apply)|skip and continue|skip & continue|skip free expert( review)?|no[, ]?thanks|not now|maybe later|continue without( documents)?|dismiss|close|no,? pass|i'?ll pass|skip (for )?now|continue to (apply|job)|no,? i'?m good)$/i;
+  /^(skip|skip to (application|apply)|skip and continue|skip & continue|skip free expert( review)?|no[, ]?thanks|not now|maybe later|continue without( documents)?|dismiss|close|exit|no,? pass|i'?ll pass|skip (for )?now|continue to (apply|job)|no,? i'?m good)$/i;
 
 /** Playwright getByRole patterns — tried in order (most specific first). */
 export const INTERSTITIAL_DISMISS_PATTERNS = [
@@ -42,19 +44,24 @@ export const INTERSTITIAL_DISMISS_PATTERNS = [
   /^Skip to application$/i,
   /^Skip to apply$/i,
   /^Skip$/i,
+  /^EXIT$/i,
+  /^Exit$/i,
   /^Continue without documents$/i,
   /^Continue without$/i,
   /^No[, ]?thanks$/i,
   /^Not now$/i,
   /^Maybe later$/i,
   /^Dismiss$/i,
+  /^Close$/i,
   /^Continue to (apply|job)$/i,
   /skip to (application|apply)/i,
+  /^skip for now$/i,
+  /^do it later$/i,
 ];
 
 /** Copy that means "this dialog is an upsell/paywall, not the application". */
 export const INTERSTITIAL_UPSELL_BODY =
-  /\b(auto-?rejected|won[\u2019']?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score|increase your chances|tailor your resume|get more replies|expert review|free expert review|free expert resume review|resume score|resume is not recommended|not recommended|\/\d+\/100|resume is not ready yet|not ready yet|upgrade (now|your)|go premium|subscribe|newsletter signup|paywall)\b/i;
+  /\b(auto-?rejected|won[\u2019']?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score|increase your chances|tailor your resume|boost your resume|boost your resume here|customize your resume|customizing your resume|stand out among applicants|paste any linkedin|linkedin profile url|get more replies|expert review|free expert review|free expert resume review|resume score|resume is not recommended|not recommended|\/\d+\/100|resume is not ready yet|not ready yet|upgrade (now|your)|go premium|subscribe|newsletter signup|paywall|orion)\b/i;
 
 /** @deprecated use INTERSTITIAL_UPSELL_BODY */
 export const RESUME_REVIEW_UPSELL_TEXT = INTERSTITIAL_UPSELL_BODY;
@@ -84,6 +91,7 @@ export const APPLY_WIZARD_SIGNALS =
 export function findBestDismissCandidate(snap) {
   const pool = [];
   const marketingAlert = isJobAlertInterstitial(snap) && !hasApplicationSurfaceFields(snap);
+  const resumeUpsell = isResumeReviewUpsell(snap) || isExpertReviewGate(snap);
 
   for (const c of snap?.dismissCandidates || []) {
     pool.push({ ...c, _text: c.text || c.aria || "" });
@@ -92,25 +100,26 @@ export function findBestDismissCandidate(snap) {
     if (textMatchesInterstitialDismiss(i.text || i.aria)) {
       pool.push({ ...i, _text: i.text || i.aria || "", source: i.source || "interactive" });
     }
-    if (marketingAlert) {
+    if (marketingAlert || resumeUpsell) {
       const t = String(i.text || i.aria || "").trim();
       if (/^no$/i.test(t) || /^no[, ]?thanks$/i.test(t) || /^(close|×|✕|x|decline)$/i.test(t)) {
-        pool.push({ ...i, _text: t, source: i.source || "marketing-modal" });
+        pool.push({ ...i, _text: t, source: i.source || (resumeUpsell ? "resume-upsell" : "marketing-modal") });
       }
     }
   }
   if (!pool.length) return null;
   const rank = (c) => {
     const t = String(c._text || "").toLowerCase();
-    if (marketingAlert) {
-      if (/^no$/i.test(t.trim()) || /^no[, ]?thanks$/i.test(t)) return 92;
-      if (/^(close|×|✕|x|decline)$/i.test(t.trim())) return 92;
+    if (marketingAlert || resumeUpsell) {
+      // Explicit No declines the offer; × may only hide UI without unsubscribing Intent.
+      if (/^no$/i.test(t.trim()) || /^no[, ]?thanks$/i.test(t)) return 98;
+      if (/^(close|×|✕|x|decline)$/i.test(t.trim())) return resumeUpsell ? 95 : 80;
     }
     if (SKIP_FREE_EXPERT_REVIEW_PATTERN.test(t)) return 105;
     if (SKIP_AND_CONTINUE_PATTERN.test(t)) return 100;
     if (/skip to application|skip to apply/i.test(t)) return 90;
     if (/^skip$/i.test(t.trim())) return 80;
-    if (/no[, ]?thanks|not now|maybe later/i.test(t)) return 70;
+    if (/no[, ]?thanks|not now|maybe later|skip for now|do it later/i.test(t)) return 70;
     if (/continue without/i.test(t)) return 15;
     return 50;
   };
@@ -176,11 +185,67 @@ export function isBlockingInterstitial(snap) {
 }
 
 export function isResumeReviewUpsell(snap) {
-  return isBlockingInterstitial(snap);
+  if (isBlockingInterstitial(snap)) return true;
+  const title = String(snap?.applyModalTitle || "").toLowerCase();
+  if (/boost your resume|improve your resume|tailor your resume|customize your resume|stand out among applicants|^orion$/i.test(title)) {
+    return true;
+  }
+  const blob = `${snap?.pageText || ""} ${title}`.toLowerCase();
+  // Jobright Orion / Boost pane — may not set hasApplyModal.
+  if (
+    /boost your resume here|boost your resume|customizing your resume just got easier|access the tailoring tool|stand out among applicants/i.test(
+      blob,
+    ) &&
+    ((snap?.modalCount || 0) > 0 ||
+      snap?.hasBlockingOverlay ||
+      snap?.hasApplyModal ||
+      (snap?.dismissCandidates || []).length > 0)
+  ) {
+    return true;
+  }
+  if (
+    /boost your resume|paste any linkedin profile|customize your resume in \d+|customizing your resume|stand out among applicants/i.test(blob) &&
+    snap?.hasApplyModal
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export const MARKETING_JOB_ALERT_BODY =
   /receive the latest jobs|be the first to know|setemail alert|job alert|time for a new job|candidates have already subscribed|get new relevant jobs|subscribe and receive new vacancies|new vacancies|jdJbeAlertPopUp|phlexPopup/i;
+
+/** Google vignette / survey interstitial (often #google_vignette + AdChoices). */
+export const GOOGLE_VIGNETTE_BODY =
+  /\b(choose your job type|tap to see results|continue to see results|adchoices|full-time.*part-time|part-time.*full-time)\b/i;
+
+/**
+ * Google Ads vignette blocking the page (#google_vignette, adsbygoogle vignette iframe).
+ * Not an apply form — must dismiss / Escape before any fill or Apply click.
+ */
+export function looksLikeGoogleVignetteAd(snap) {
+  if (!snap) return false;
+  const url = String(snap.url || "");
+  if (/#google_vignette\b/i.test(url) || /[?&]google_vignette=/i.test(url)) return true;
+  const hints = snap.overlayHints || [];
+  if (hints.some((h) => /google-vignette|vignette-ad|adsbygoogle-vignette/i.test(h))) return true;
+  const blob = [
+    snap.pageText,
+    snap.applyModalTitle,
+    snap.headings,
+    ...(snap.interactives || []).map((i) => `${i.text || ""} ${i.aria || ""}`),
+    ...(snap.dismissCandidates || []).map((c) => c.text),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (!GOOGLE_VIGNETTE_BODY.test(blob)) return false;
+  // Survey + Close/AdChoices typical of vignette — not a real job preferences gate
+  return (
+    snap.hasBlockingOverlay ||
+    (snap.modalCount || 0) > 0 ||
+    /close|adchoices/i.test(blob)
+  );
+}
 
 /** @deprecated alias */
 const JOB_ALERT_POPUP_BODY = MARKETING_JOB_ALERT_BODY;
@@ -348,6 +413,7 @@ export function looksLikeJobAlertSignupForm(snap) {
 /**
  * Aggregator mirror where the original posting is closed/unavailable.
  * Jooble: orange "requires local presence" + similar jobs, or SearchResult?closedJob=True.
+ * Jobright: "This job has closed." banner (don't pivot to Recommended).
  */
 export function looksLikeClosedJobListing(snap) {
   if (!snap) return { closed: false, reason: "" };
@@ -363,10 +429,22 @@ export function looksLikeClosedJobListing(snap) {
   const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
   if (!CLOSED_JOB_BODY.test(blob)) return { closed: false, reason: "" };
 
+  const hostBlob = `${snap.hostname || ""} ${url}`;
   const onAggregator =
-    /jooble\.org|indeed\.com|ziprecruiter|talent\.com|simplyhired/i.test(
-      `${snap.hostname || ""} ${url}`,
+    /jooble\.org|indeed\.com|ziprecruiter|talent\.com|simplyhired|jobright\.ai|whatjobs\.|neuvoo|devitjobs/i.test(
+      hostBlob,
     );
+
+  // Explicit closed banner — stop even if Recommended jobs remain.
+  if (/this job has closed|job has closed|this (job|position|role) has closed/i.test(blob)) {
+    return {
+      closed: true,
+      reason: onAggregator
+        ? "original job closed on aggregator — do not apply to recommended substitutes"
+        : "original job has closed — skip apply",
+    };
+  }
+
   const similarJobsRail =
     /similar jobs that could be interesting|view similar jobs below|based on the .+ vacancy/i.test(blob);
 
@@ -443,7 +521,8 @@ export function looksLikeFakeJobListing(snap, history = []) {
 }
 
 /**
- * Company job-board index (Ashby filters, "Open Positions") — pick a role, not fill preferences.
+ * Company job-board index (Ashby / Greenhouse / Lever filters, "Open Positions") —
+ * pick a role, do not fill filters as applicant preferences.
  */
 export function looksLikeJobBoardIndex(snap) {
   if (!snap) return false;
@@ -453,14 +532,30 @@ export function looksLikeJobBoardIndex(snap) {
     .map((f) => `${f.name || ""} ${f.label || ""} ${f.placeholder || ""}`)
     .join(" ");
 
-  const pageBlob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""} ${snap.url || ""}`.toLowerCase();
+  const url = String(snap.url || "");
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    host = String(snap.hostname || "").toLowerCase();
+  }
+  const pathAndQuery = (() => {
+    try {
+      const u = new URL(url);
+      return `${u.pathname}${u.search}`;
+    } catch {
+      return url;
+    }
+  })();
+
+  const pageBlob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""} ${url}`.toLowerCase();
 
   const selectFields = fields.filter((f) => /select/i.test(String(f.type || "")));
   const allSelects = fields.length >= 2 && selectFields.length === fields.length;
-  const ashbyFilters = JOB_BOARD_FILTER_FIELD_RE.test(fieldBlob);
+  const filterFields = JOB_BOARD_FILTER_FIELD_RE.test(fieldBlob);
   const openPositions = JOB_BOARD_PAGE_BODY.test(pageBlob);
-  const ashbyBoard =
-    /jobs\.ashbyhq\.com/i.test(snap.url || "") && !/\/[a-f0-9-]{36}/i.test(String(snap.url || ""));
+  const atsBoardHost = JOB_BOARD_HOST_RE.test(host);
+  const deepJobPath = JOB_BOARD_JOB_PATH_RE.test(pathAndQuery);
 
   const hasApplyFields =
     fields.some((f) => {
@@ -472,10 +567,18 @@ export function looksLikeJobBoardIndex(snap) {
   const noPassword = (snap.passwordFieldCount || 0) === 0;
 
   if (hasApplyFields || !noPassword) return false;
+  if ((snap.fileInputCount || 0) > 0) return false;
 
-  if (ashbyBoard && (allSelects || ashbyFilters)) return true;
-  if (ashbyFilters && fields.length >= 2 && noFileInput) return true;
+  // Known ATS board hosts at company root (no deep job/application path).
+  if (atsBoardHost && !deepJobPath && noFileInput) {
+    if (allSelects || filterFields || openPositions || fields.length === 0) return true;
+    // Greenhouse/Lever boards often expose 2–4 filter selects with Location/Department labels.
+    if (selectFields.length >= 2 && fields.length <= 8) return true;
+  }
+
+  if (filterFields && fields.length >= 2 && noFileInput) return true;
   if (openPositions && allSelects && fields.length >= 2 && noFileInput) return true;
+  if (openPositions && selectFields.length >= 2 && noFileInput && !hasApplyFields) return true;
 
   return false;
 }

@@ -124,7 +124,12 @@ export function scoreEntryCandidate(meta) {
   const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
 
   if (/interested/i.test(blob)) score += 95;
-  if (/easy apply|quick apply|1-click apply/i.test(blob)) score += 88;
+  if (/apply with autofill|autofill/i.test(blob)) {
+    // Jobright Autofill depends on their Chrome extension — usually a dead end over CDP.
+    score += 35;
+  } else if (/easy apply|quick apply|1-click apply/i.test(blob)) {
+    score += 98;
+  }
   if (/apply now|start application/i.test(blob)) score += 82;
   if (/submit application/i.test(blob)) score -= 90;
   if (/\bapply\b/i.test(meta.text)) score += 55;
@@ -304,7 +309,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         const out = [];
         const visited = new Set();
         const roots = queryDeep(
-          '[class*="ashby-application-form-field-entry"], fieldset, [class*="yesno" i], [data-field-id]',
+          '[class*="ashby-application-form-field-entry"], fieldset, [class*="yesno" i], [data-field-id], [class*="application-form"] label, form',
         );
         for (const root of roots) {
           if (!isVisibleEl(root) || visited.has(root)) continue;
@@ -368,7 +373,69 @@ async function scanDom(page, { listingMode = true } = {}) {
               filled,
               inModal: meta.inApplyModal || meta.inDialog,
             });
+            continue;
           }
+
+          // Greenhouse-style EEOC / compliance <select>s.
+          const selects = [...root.querySelectorAll("select")].filter(isVisibleEl);
+          for (const sel of selects) {
+            if (visited.has(sel)) continue;
+            const selLabel =
+              label ||
+              (sel.getAttribute("aria-label") || "").trim() ||
+              nearbyFieldLabel(sel) ||
+              "";
+            const selMap = mapApplicationLabel(selLabel);
+            if (!selMap) continue;
+            const opts = [...sel.options].map((o) => (o.textContent || "").trim().toLowerCase());
+            const looksCompliance =
+              opts.some((o) => /decline|prefer not|do not wish|i do not want|n\/a|male|female|veteran|disabilit/.test(o)) ||
+              ["eeocgender", "eeocrace", "eeocveteran", "eeocdisability"].includes(selMap.mappedTo);
+            if (!looksCompliance && !["visasponsorship", "workauthorization"].includes(selMap.mappedTo)) continue;
+            visited.add(sel);
+            const meta = elementMetaWithModal(sel, applyModals);
+            out.push({
+              label: selLabel.slice(0, 120),
+              mappedTo: selMap.mappedTo,
+              type: selMap.type,
+              widgetType: "select",
+              text: "",
+              selector: elementSelector(sel, meta),
+              triggerSelector: elementSelector(sel, meta),
+              questionLabel: selLabel.slice(0, 120),
+              top: meta.top,
+              left: Math.round(sel.getBoundingClientRect().left),
+              filled: Boolean(sel.value && sel.value !== "" && sel.selectedIndex > 0),
+              inModal: meta.inApplyModal || meta.inDialog,
+            });
+          }
+        }
+
+        // Also scan top-level selects with EEOC-ish options (Greenhouse bare forms).
+        for (const sel of queryDeep("select")) {
+          if (!isVisibleEl(sel) || visited.has(sel)) continue;
+          const selLabel =
+            (sel.getAttribute("aria-label") || "").trim() ||
+            nearbyFieldLabel(sel) ||
+            "";
+          const selMap = mapApplicationLabel(selLabel);
+          if (!selMap) continue;
+          visited.add(sel);
+          const meta = elementMetaWithModal(sel, applyModals);
+          out.push({
+            label: selLabel.slice(0, 120),
+            mappedTo: selMap.mappedTo,
+            type: selMap.type,
+            widgetType: "select",
+            text: "",
+            selector: elementSelector(sel, meta),
+            triggerSelector: elementSelector(sel, meta),
+            questionLabel: selLabel.slice(0, 120),
+            top: meta.top,
+            left: Math.round(sel.getBoundingClientRect().left),
+            filled: Boolean(sel.value && sel.value !== "" && sel.selectedIndex > 0),
+            inModal: meta.inApplyModal || meta.inDialog,
+          });
         }
         return out;
       }
@@ -488,6 +555,7 @@ async function scanDom(page, { listingMode = true } = {}) {
       function isContinueAction(meta, blob) {
         if (isJobDescriptionNoise(meta, blob)) return false;
         const text = (meta.text || "").trim();
+        if (/confirm\s*&\s*see jobs|confirm and see jobs/i.test(text)) return true;
         if (meta.inApplyModal) {
           if (/^continue$/i.test(text) || /^next$/i.test(text) || /^proceed$/i.test(text)) return true;
           if (/sign up now|sign up for free|get started/i.test(blob)) return true;
@@ -497,6 +565,18 @@ async function scanDom(page, { listingMode = true } = {}) {
         if (continuePattern.test(text)) return true;
         if (/continue|next-step|proceed/i.test(meta.testId || "")) return true;
         return false;
+      }
+
+      function scoreContinueAction(meta, blob) {
+        if (!isContinueAction(meta, blob)) return 0;
+        let score = 40;
+        if (/confirm\s*&\s*see jobs|confirm and see jobs/i.test((meta.text || "").trim())) score += 80;
+        if (/^continue$/i.test((meta.text || "").trim())) score += 50;
+        if (/^next$/i.test((meta.text || "").trim())) score += 45;
+        if (/sign up with email|continue with email/i.test(blob)) score += 60;
+        if (meta.tag === "button" || meta.role === "button") score += 15;
+        if (meta.inApplyModal || meta.inDialog) score += 40;
+        return score;
       }
 
       function scoreConfirmAction(meta, blob) {
@@ -530,21 +610,12 @@ async function scanDom(page, { listingMode = true } = {}) {
         return score;
       }
 
-      function scoreContinueAction(meta, blob) {
-        if (!isContinueAction(meta, blob)) return 0;
-        let score = 40;
-        if (/^continue$/i.test((meta.text || "").trim())) score += 50;
-        if (/^next$/i.test((meta.text || "").trim())) score += 45;
-        if (/sign up with email|continue with email/i.test(blob)) score += 60;
-        if (meta.tag === "button" || meta.role === "button") score += 15;
-        if (meta.inApplyModal) score += 40;
-        return score;
-      }
-
       function scoreSignInButton(meta) {
         const blob = `${meta.text} ${meta.testId} ${meta.aria}`.toLowerCase();
         if (
-          !/\b(sign in with email|log in with email|sign in|log in|login|submit startup)\b/i.test(blob) &&
+          !/\b(sign in with email|log in with email|sign in|log in|login|submit startup|already a member)\b/i.test(
+            blob,
+          ) &&
           !/\bsign in\b|\blog in\b/.test(blob)
         ) {
           return 0;
@@ -552,7 +623,8 @@ async function scanDom(page, { listingMode = true } = {}) {
         if (/\bsign in with (x|twitter|google|github)\b/.test(blob)) return 0;
         let score = 50;
         if (/sign in with email|log in with email/.test(blob)) score += 80;
-        if (meta.tag === "button" || meta.role === "button") score += 20;
+        if (/sign in now|already a member/.test(blob)) score += 55;
+        if (meta.tag === "button" || meta.role === "button" || meta.tag === "a") score += 20;
         if (/magic link/.test(blob)) score -= 30;
         return score;
       }
@@ -647,7 +719,12 @@ async function scanDom(page, { listingMode = true } = {}) {
         let score = 0;
         const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
         if (/interested/i.test(blob)) score += 95;
-        if (/easy apply|quick apply|1-click apply/i.test(blob)) score += 88;
+        if (/apply with autofill|autofill/i.test(blob)) {
+          // Jobright Autofill depends on their Chrome extension — usually a dead end over CDP.
+          score += 35;
+        } else if (/easy apply|quick apply|1-click apply/i.test(blob)) {
+          score += 98;
+        }
         if (/apply now|start application/i.test(blob)) score += 82;
         if (/submit application/i.test(blob)) score -= 90;
         if (/\bapply\b/i.test(meta.text)) score += 55;
@@ -721,9 +798,13 @@ async function scanDom(page, { listingMode = true } = {}) {
       const applyModals = getApplyModalRoots();
       markApplyModalElements(applyModals);
       const applyModalTitle =
-        applyModals[0]?.querySelector("h1, h2, h3, [id*='modal-title' i], [class*='title' i]")?.innerText?.trim()?.slice(0, 80) ||
+        applyModals[0]?.querySelector("h1, h2, h3, [id*='modal-title' i], [class*='title' i], [class*='Title' i]")?.innerText?.trim()?.slice(0, 80) ||
         applyModals[0]?.getAttribute("aria-label")?.slice(0, 80) ||
-        "";
+        (() => {
+          const blob = (applyModals[0]?.innerText || "").replace(/\s+/g, " ").trim();
+          const m = blob.match(/did you apply\??/i);
+          return m ? m[0] : "";
+        })();
 
       const fileInputEls = queryDeep('input[type="file"]').filter((el) => !el.disabled);
       const hasFileUploadInModal =

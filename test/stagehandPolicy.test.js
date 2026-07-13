@@ -50,6 +50,31 @@ describe("stagehandPolicy", () => {
     assert.match(instruction, /filter dropdowns/i);
   });
 
+  it("does not force Stagehand on generic ambiguous pages", () => {
+    initTestRuntime({ settings: { stagehand_enabled: true, agent_ai: true } });
+    const ambiguousSnap = {
+      url: "https://example.com/portal",
+      pageText: "Welcome",
+      passwordFieldCount: 0,
+      fileInputCount: 0,
+      entryCount: 0,
+      fieldCount: 3,
+      fields: [
+        { name: "q1", label: "Question", type: "text" },
+        { name: "q2", label: "Other", type: "text" },
+        { name: "q3", label: "Notes", type: "text" },
+      ],
+    };
+    const context = { browserProvider: "adspower", browserCdpUrl: "ws://127.0.0.1:9222/x" };
+    assert.equal(shouldPreferStagehand(ambiguousSnap, { step: "ambiguous" }, [], context), false);
+  });
+
+  it("prefers Stagehand on ambiguous when page is board-ish", () => {
+    initTestRuntime({ settings: { stagehand_enabled: true, agent_ai: true } });
+    const context = { browserProvider: "adspower", browserCdpUrl: "ws://127.0.0.1:9222/x" };
+    assert.equal(shouldPreferStagehand(ashbySnap, { step: "ambiguous" }, [], context), true);
+  });
+
   it("buildStagehandPlan returns stagehand_act", () => {
     const plan = buildStagehandPlan(ashbySnap, { step: "entry", reason: "job board" }, [], {
       job: { title: "Engineer" },

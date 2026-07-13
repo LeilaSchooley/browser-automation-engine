@@ -1,5 +1,7 @@
 import { normalizeHost } from "../host.js";
 import { isAggregatorHost, isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import { CLOSED_JOB_URL_RE } from "../patterns/listing.js";
+import { looksLikeClosedJobListing } from "../heuristics.js";
 
 /** Google for Jobs mirror / aggregator funnel query params. */
 export const GOOGLE_JOBS_MIRROR_PARAM_RE =
@@ -78,6 +80,78 @@ export async function probeApplyUrlReachability(url = "", { timeoutMs = 8000, fe
     return { reachable: true, reason: "", status: res.status };
   } catch (err) {
     return { reachable: false, reason: unreachableReason(err), status: 0 };
+  }
+}
+
+function stripHtmlToText(html = "") {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Precheck whether an apply URL looks closed without a full browser apply.
+ * Catches closedJob=True URLs and SSR/HTML copy like "This job has closed."
+ */
+export async function probeClosedJobListing(url = "", { timeoutMs = 10000, fetchImpl = fetch } = {}) {
+  const trimmed = String(url || "").trim();
+  if (!trimmed) return { closed: false, reason: "", source: "empty" };
+
+  if (CLOSED_JOB_URL_RE.test(trimmed)) {
+    return {
+      closed: true,
+      reason: "job listing closed — redirected to similar jobs search",
+      source: "url",
+    };
+  }
+
+  let hostname = "";
+  try {
+    hostname = normalizeHost(new URL(trimmed).hostname);
+  } catch {
+    return { closed: false, reason: "", source: "parse" };
+  }
+
+  const signal = AbortSignal.timeout(timeoutMs);
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+  };
+
+  try {
+    const res = await fetchImpl(trimmed, { method: "GET", redirect: "follow", signal, headers });
+    const finalUrl = String(res.url || trimmed);
+    if (CLOSED_JOB_URL_RE.test(finalUrl)) {
+      return {
+        closed: true,
+        reason: "job listing closed — redirected to similar jobs search",
+        source: "redirect-url",
+        status: res.status,
+      };
+    }
+
+    const html = await res.text().catch(() => "");
+    const pageText = stripHtmlToText(html).slice(0, 20000);
+    const snap = {
+      url: finalUrl,
+      hostname,
+      title: "",
+      pageText: pageText || html.slice(0, 20000),
+      headings: "",
+    };
+    const hit = looksLikeClosedJobListing(snap);
+    if (hit.closed) {
+      return { closed: true, reason: hit.reason, source: "page-text", status: res.status };
+    }
+    return { closed: false, reason: "", source: "probe-ok", status: res.status };
+  } catch (err) {
+    return { closed: false, reason: unreachableReason(err), source: "probe-error" };
   }
 }
 

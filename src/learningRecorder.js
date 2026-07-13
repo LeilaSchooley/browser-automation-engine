@@ -55,7 +55,16 @@ export function fieldHintsFromFilled(filled = []) {
       const mappedTo = FILL_TYPE_TO_CONFIG_KEY[type] || type;
       hints[selector] = { mappedTo };
     }
-    if (entry.source === "custom_controls" || entry.widgetType === "combobox") {
+    const isAppControl =
+      entry.source === "custom_controls" ||
+      entry.widgetType === "combobox" ||
+      entry.widgetType === "yesno" ||
+      entry.widgetType === "radio" ||
+      entry.widgetType === "select" ||
+      ["visasponsorship", "workauthorization", "eeocgender", "eeocrace", "eeocveteran", "eeocdisability"].includes(
+        String(entry.mappedTo || type).toLowerCase(),
+      );
+    if (isAppControl) {
       controlSkills.push({
         label: entry.label || type,
         mappedTo: entry.mappedTo || type,
@@ -88,9 +97,14 @@ export function learningsFromHistory(history = []) {
     }
     if (L.modalSelector) modalSelectors.push(L.modalSelector);
     if (Array.isArray(L.modalSelectors)) modalSelectors.push(...L.modalSelectors);
-    // Outcome-weighted: only remember clicks that advanced the flow.
-    if (Array.isArray(L.affordanceSkills) && step.ok && step.progress) {
-      affordanceSkills.push(...L.affordanceSkills);
+    // Remember clicks that advanced the flow, or dismiss/board_nav that cleared a blocker.
+    if (Array.isArray(L.affordanceSkills) && step.ok) {
+      const softIntent = L.affordanceSkills.some((s) =>
+        ["upsell_dismiss", "board_nav"].includes(String(s.intent || "")),
+      );
+      if (step.progress || softIntent) {
+        affordanceSkills.push(...L.affordanceSkills);
+      }
     }
   }
 

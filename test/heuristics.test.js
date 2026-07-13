@@ -44,6 +44,51 @@ describe("heuristics", () => {
     assert.equal(looksLikeJobBoardIndex(snap), true);
   });
 
+  it("detects Greenhouse and Lever board indices", () => {
+    assert.equal(
+      looksLikeJobBoardIndex({
+        url: "https://boards.greenhouse.io/acme",
+        pageText: "Open Positions",
+        passwordFieldCount: 0,
+        fileInputCount: 0,
+        fieldCount: 2,
+        fields: [
+          { name: "department", label: "Department", type: "select-one" },
+          { name: "office", label: "Office", type: "select-one" },
+        ],
+      }),
+      true,
+    );
+    assert.equal(
+      looksLikeJobBoardIndex({
+        url: "https://jobs.lever.co/acme",
+        pageText: "Current openings",
+        passwordFieldCount: 0,
+        fileInputCount: 0,
+        fieldCount: 0,
+        fields: [],
+      }),
+      true,
+    );
+  });
+
+  it("does not treat Greenhouse apply form as board index", () => {
+    assert.equal(
+      looksLikeJobBoardIndex({
+        url: "https://boards.greenhouse.io/acme/jobs/12345",
+        passwordFieldCount: 0,
+        fileInputCount: 1,
+        fieldCount: 3,
+        fields: [
+          { name: "email", label: "Email", type: "email" },
+          { name: "name", label: "Full name", type: "text" },
+          { name: "resume", label: "Resume", type: "file" },
+        ],
+      }),
+      false,
+    );
+  });
+
   it("does not treat real apply form as job board index", () => {
     const snap = {
       url: "https://jobs.ashbyhq.com/ditto/apply",

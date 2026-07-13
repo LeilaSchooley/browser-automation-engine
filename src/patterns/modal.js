@@ -11,7 +11,7 @@ export {
 
 /** Strict — avoid matching "Next.js" in job descriptions via bare \bnext\b */
 export const CONTINUE_TEXT =
-  /\b(continue|proceed|save and continue|sign up with email|continue with email|next step)\b/i;
+  /\b(continue|proceed|save and continue|sign up with email|continue with email|next step|confirm\s*&\s*see jobs|confirm and see jobs)\b/i;
 
 export const MODAL_STEP_TEXT =
   /\b(I have a resume|I need a resume|upload resume|use my resume|select file|choose file|sign up with email|continue with email|get started)\b/i;

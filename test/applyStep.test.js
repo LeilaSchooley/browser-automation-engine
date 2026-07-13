@@ -621,6 +621,59 @@ describe("applyStep", () => {
     assert.notEqual(stepToPlan(c, snap, [])?.type, "smart_fill");
   });
 
+  it("prefers sign-in when a verified site account already exists", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { initTestRuntime } = await import("./helpers/runtime.js");
+    const { saveAccountForHost } = await import("../src/accountStore.js");
+
+    const accountsFile = path.join(os.tmpdir(), `ql-verified-acc-${process.pid}.json`);
+    initTestRuntime({
+      settings: {
+        site_accounts_path: accountsFile,
+        auto_signup_enabled: true,
+        account_email_base: "test@example.com",
+      },
+    });
+    saveAccountForHost("jobright.ai", {
+      email: "test+jobright@example.com",
+      username: "jobrightuser",
+      password: "Passw0rd!",
+      pending: false,
+      verified: true,
+    });
+
+    const snap = {
+      url: "https://jobright.ai/jobs/info/abc",
+      hostname: "jobright.ai",
+      pageKind: "modal",
+      fieldCount: 1,
+      emailFieldCount: 1,
+      hasApplyModal: true,
+      applyModalTitle: "Apply to Role",
+      pageText: "Sign Up to Apply Already a member? Sign in now",
+      fields: [{ id: "sign-up_email", label: "Email", type: "text" }],
+      signInCount: 1,
+      signInCandidates: [{ text: "Sign in now", score: 90 }],
+      submitCandidates: [{ text: "SIGN UP TO APPLY" }],
+    };
+
+    const c = classifyApplyStep(
+      snap,
+      { filled: [] },
+      [{ action: "click_apply", ok: true }],
+      { applicant: { email: "test@example.com", fullName: "Test User" } },
+    );
+    assert.equal(c.step, "signin_entry");
+    assert.equal(stepToPlan(c, snap, [])?.type, "click_signin");
+    try {
+      fs.unlinkSync(accountsFile);
+    } catch {
+      /* ignore */
+    }
+  });
+
   it("blocks Jooble jdp when original job requires local presence", () => {
     const snap = {
       url: "https://jooble.org/jdp/9177318897283547463",
@@ -655,5 +708,28 @@ describe("applyStep", () => {
     const c = classifyApplyStep(snap, { filled: [] }, [{ action: "click_apply", ok: true }]);
     assert.equal(c.step, "blocked");
     assert.match(c.reason, /closed/i);
+  });
+
+  it("classifies Jobright Boost Your Resume upsell as overlay dismiss, not smart_fill", () => {
+    const snap = {
+      url: "https://jobright.ai/jobs/recommend",
+      hostname: "jobright.ai",
+      pageKind: "modal",
+      fieldCount: 1,
+      fileInputCount: 0,
+      entryCount: 0,
+      hasApplyModal: true,
+      hasBlockingOverlay: false,
+      modalCount: 1,
+      applyModalTitle: "Boost Your Resume Here!",
+      pageText: "Boost Your Resume Here! Paste any LinkedIn profile URL to improve your resume",
+      fields: [{ name: "linkedin", placeholder: "Paste LinkedIn profile URL", type: "text" }],
+      dismissCandidates: [{ text: "Close", aria: "Close", score: 80 }],
+      interactives: [{ text: "Close", aria: "Close" }],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, []);
+    assert.equal(c.step, "overlay");
+    assert.match(c.reason, /resume upsell|boost/i);
+    assert.equal(stepToPlan(c, snap, []).type, "dismiss_overlay");
   });
 });

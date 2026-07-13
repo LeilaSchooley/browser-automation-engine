@@ -13,12 +13,22 @@ import {
   applyEntrySucceeded,
   countRecentAction,
   hasUnfilledApplicationFields,
+  isExpertReviewGate,
+  isResumeReviewUpsell,
+  looksLikeGoogleVignetteAd,
   looksLikeInlineApplicationForm,
   looksLikeJobBoardIndex,
   shouldPreferUpload,
   uploadAlreadySucceeded,
   uploadStalled,
 } from "../heuristics.js";
+import { looksLikePlatformOnboarding } from "../platformOnboarding.js";
+import {
+  looksLikeJobBoardWelcomeConfirm,
+  welcomeConfirmCta,
+  looksLikeDidYouApplyPrompt,
+  didYouApplyDeclineCta,
+} from "../platformOnboarding.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
 
@@ -71,6 +81,28 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     }
   }
 
+  if (
+    !shouldNeverDismiss(snap) &&
+    (classification?.step === "overlay" ||
+      isResumeReviewUpsell(snap) ||
+      isExpertReviewGate(snap) ||
+      looksLikeGoogleVignetteAd(snap))
+  ) {
+    const top = classification?.target || snap.dismissCandidates?.[0];
+    actions.push({
+      id: "dismiss_resume_upsell",
+      type: "dismiss_overlay",
+      score: 96,
+      reason: looksLikeGoogleVignetteAd(snap)
+        ? "dismiss google vignette ad"
+        : top
+          ? `dismiss resume upsell — ${top.text || top._text || top.aria || "close"}`
+          : "dismiss resume boost / review upsell",
+      targetCandidate: top || null,
+      step: "overlay",
+    });
+  }
+
   if (looksLikeJobBoardIndex(snap)) {
     actions.push({
       id: "stagehand_job_board",
@@ -112,6 +144,61 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   if (looksLikeSignupEntry(snap)) {
     actions.push({ id: "click_signup", type: "click_signup", score: 72, reason: "signup entry CTA", step: "signup_entry" });
   }
+  if (classification?.step === "signin_entry" || ((snap.signInCount || 0) > 0 && classification?.step === "auth")) {
+    actions.push({
+      id: "click_signin",
+      type: "click_signin",
+      score: classification?.step === "signin_entry" ? 95 : 74,
+      reason: "open sign in for saved site account",
+      targetCandidate: snap.signInCandidates?.[0] || null,
+      step: "signin_entry",
+    });
+  }
+
+  if (looksLikeJobBoardWelcomeConfirm(snap)) {
+    const top = welcomeConfirmCta(snap) || snap.continueCandidates?.[0];
+    actions.push({
+      id: "click_welcome_confirm",
+      type: "click_continue",
+      score: 98,
+      reason: `welcome confirm — ${top?.text || "Confirm & See Jobs"}`,
+      targetCandidate: top || null,
+      step: "continue",
+    });
+  }
+
+  if (looksLikeDidYouApplyPrompt(snap)) {
+    const top = didYouApplyDeclineCta(snap);
+    actions.push({
+      id: "click_did_you_apply_no",
+      type: "click_continue",
+      score: 97,
+      reason: `did-you-apply — ${top?.text || top?.aria || "Not yet"}`,
+      targetCandidate: top || null,
+      step: "continue",
+    });
+  }
+
+  if (looksLikePlatformOnboarding(snap)) {
+    actions.push({
+      id: "smart_fill_onboarding",
+      type: "smart_fill",
+      score: 92,
+      reason: "platform onboarding — fill job function",
+      step: "form",
+    });
+    const next = snap.continueCandidates?.[0];
+    if (next) {
+      actions.push({
+        id: "click_onboarding_next",
+        type: "click_continue",
+        score: filled >= 1 ? 94 : 70,
+        reason: `onboarding — ${next.text || "Next"}`,
+        targetCandidate: next,
+        step: "continue",
+      });
+    }
+  }
 
   if (hasPreferencesGateFields(snap) && preferencesGateIncomplete(snap, fillResult)) {
     actions.push({
@@ -129,18 +216,20 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   const uploadFailed = uploadStalled(history);
 
   if (unfilledFields || unfilledYesNo || (snap.fieldCount || 0) >= 2) {
-    let fillScore = 72;
-    if (inlineForm) fillScore += 20;
-    if (uploadFailed) fillScore += 25;
-    if (unfilledYesNo) fillScore += 15;
-    if (filled === 0) fillScore += 10;
-    actions.push({
-      id: "smart_fill",
-      type: "smart_fill",
-      score: fillScore,
-      reason: inlineForm ? "fill inline application fields" : "fill visible form fields",
-      step: "form",
-    });
+    if (!(isResumeReviewUpsell(snap) || isExpertReviewGate(snap) || classification?.step === "overlay")) {
+      let fillScore = 72;
+      if (inlineForm) fillScore += 20;
+      if (uploadFailed) fillScore += 25;
+      if (unfilledYesNo) fillScore += 15;
+      if (filled === 0) fillScore += 10;
+      actions.push({
+        id: "smart_fill",
+        type: "smart_fill",
+        score: fillScore,
+        reason: inlineForm ? "fill inline application fields" : "fill visible form fields",
+        step: "form",
+      });
+    }
   }
 
   if ((snap.fileInputCount || 0) > 0 && !uploadAlreadySucceeded(history)) {

@@ -52,6 +52,14 @@ export const DEFAULT_SETTINGS = {
   deterministic_first: true,
   /** When true, action catalog ranks next moves before step-type deterministic policy. */
   action_catalog_first: true,
+  /**
+   * Capture mutating XHR/fetch as API skill candidates (directory / repeat hosts).
+   * Also enables optional Unbrowse CLI when unbrowse_enabled is true.
+   */
+  network_skills_enabled: false,
+  api_skills_path: "",
+  /** Optional: shell out to `unbrowse` CLI if installed (directory fast path only). */
+  unbrowse_enabled: false,
   /** CDP accessibility-tree perception with stable refs and page diff. */
   page_perception_enabled: false,
   /** Directory for JSONL event logs and debug screenshots. */

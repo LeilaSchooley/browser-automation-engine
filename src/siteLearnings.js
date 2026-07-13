@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { normalizeHost } from "./host.js";
 import { getSettings } from "./runtime.js";
+import { looksLikeJobBoardIndex } from "./heuristics.js";
 
 /** smart_fill internal type → buildFillConfig key */
 const FILL_TYPE_TO_CONFIG_KEY = {
@@ -125,6 +126,7 @@ export const AFFORDANCE_INTENTS = {
   WIZARD_CONTINUE: "wizard_continue",
   UPSELL_DISMISS: "upsell_dismiss",
   AUTH_SUBMIT: "auth_submit",
+  BOARD_NAV: "board_nav",
   UNKNOWN: "unknown",
 };
 
@@ -140,6 +142,13 @@ export function inferAffordanceIntent(item, snap = null, classification = null) 
   if (isDismissAffordanceSignature(sig)) return AFFORDANCE_INTENTS.UPSELL_DISMISS;
   if (/\b(skip|continue without|continue applying|no thanks|maybe later|not now|dismiss)\b/.test(text)) {
     return AFFORDANCE_INTENTS.UPSELL_DISMISS;
+  }
+
+  // Job-board listing row / title click (not Apply CTA).
+  if (looksLikeJobBoardIndex(snap) && stage === "entry") {
+    if (!/\b(apply|interested|easy apply)\b/i.test(text)) {
+      return AFFORDANCE_INTENTS.BOARD_NAV;
+    }
   }
 
   if (FILL_STAGES.has(stage) || snapHasFillableSurface(snap, classification)) {
@@ -175,7 +184,10 @@ export function inferAffordanceIntent(item, snap = null, classification = null) 
 function intentForStep(stage, snap, classification = null) {
   if (FILL_STAGES.has(stage)) return null;
   if (stage === "wizard_choice") return AFFORDANCE_INTENTS.WIZARD_CONTINUE;
-  if (stage === "entry") return AFFORDANCE_INTENTS.ENTRY_APPLY;
+  if (stage === "entry") {
+    if (looksLikeJobBoardIndex(snap)) return AFFORDANCE_INTENTS.BOARD_NAV;
+    return AFFORDANCE_INTENTS.ENTRY_APPLY;
+  }
   if (stage === "overlay") {
     if ((snap?.passwordFieldCount || 0) > 0 || (snap?.fieldCount || 0) > 2) return null;
     return AFFORDANCE_INTENTS.UPSELL_DISMISS;
@@ -187,7 +199,15 @@ function intentMatchesStage(skill, stage, snap, classification) {
   const expected = intentForStep(stage, snap, classification);
   if (!expected) return false;
   if (!skill.intent || skill.intent === AFFORDANCE_INTENTS.UNKNOWN) return true;
-  return skill.intent === expected;
+  if (skill.intent === expected) return true;
+  if (
+    stage === "entry" &&
+    (skill.intent === AFFORDANCE_INTENTS.BOARD_NAV || skill.intent === AFFORDANCE_INTENTS.ENTRY_APPLY) &&
+    (expected === AFFORDANCE_INTENTS.BOARD_NAV || expected === AFFORDANCE_INTENTS.ENTRY_APPLY)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Stable signature for an interactive affordance (no brittle CSS). */

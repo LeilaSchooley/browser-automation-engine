@@ -20,6 +20,22 @@ describe("application yes/no controls", () => {
     assert.equal(getApplicationAnswers({ preferences: { needsVisaSponsorship: true } }).visaAnswer, "Yes");
   });
 
+  it("treats legally authorized as work auth Yes, not sponsorship No", () => {
+    const ctx = { preferences: { needsVisaSponsorship: false, eeocDecline: true } };
+    assert.equal(
+      resolveApplicationAnswer("workauthorization", "Are you legally authorized to work in the US?", ctx),
+      "Yes",
+    );
+    assert.equal(
+      resolveApplicationAnswer("", "Are you legally authorized to work in the United States?", ctx),
+      "Yes",
+    );
+    assert.equal(
+      resolveApplicationAnswer("visasponsorship", "Will you require sponsorship?", ctx),
+      "No",
+    );
+  });
+
   it("buildApplicationControlsStagehandInstruction uses profile answers", () => {
     const instruction = buildApplicationControlsStagehandInstruction({
       preferences: { needsVisaSponsorship: false, eeocDecline: true },

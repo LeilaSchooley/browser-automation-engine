@@ -9,11 +9,17 @@ import {
   hasUnfilledApplicationFields,
   uploadStalled,
   pageFingerprintFromSnap,
+  looksLikeApplySignupGate,
+  isResumeReviewUpsell,
+  isExpertReviewGate,
+  looksLikeGoogleVignetteAd,
 } from "../heuristics.js";
+import { JOB_BOARD_HOST_RE, JOB_BOARD_PAGE_BODY } from "../patterns/listing.js";
 import { hasPreferencesGateFields, getPreferencesFromContext } from "../fillPreferences.js";
+import { looksLikePlatformOnboarding, looksLikeJobBoardWelcomeConfirm, looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 import {
   buildApplicationControlsStagehandInstruction,
-  hasUnfilledYesNoOrEEOC,
+  hasUnfilledApplicationControls,
 } from "../fillApplicationAnswers.js";
 import { canUseStagehand, attemptStagehandAct } from "./stagehandAdapter.js";
 import { smartFillStalledOnStep } from "./deterministicPolicy.js";
@@ -28,6 +34,26 @@ function jobContext(context = {}) {
   };
 }
 
+function urlHost(snap) {
+  try {
+    return new URL(String(snap?.url || "")).hostname.toLowerCase();
+  } catch {
+    return String(snap?.hostname || "").toLowerCase();
+  }
+}
+
+/** Soft board signal for instruction routing when classification is ambiguous. */
+export function looksBoardIsh(snap) {
+  if (!snap) return false;
+  if (looksLikeJobBoardIndex(snap)) return true;
+  const pageBlob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
+  if (JOB_BOARD_PAGE_BODY.test(pageBlob) && (snap.fileInputCount || 0) === 0) return true;
+  if (JOB_BOARD_HOST_RE.test(urlHost(snap)) && (snap.fileInputCount || 0) === 0 && (snap.passwordFieldCount || 0) === 0) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * @param {object} snap
  * @param {object} classification
@@ -39,9 +65,19 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
   if (!gate.ok) return false;
   if (SAFETY_STEPS.has(classification?.step)) return false;
 
+  if (classification?.step === "signup" || classification?.step === "signup_entry" || classification?.step === "signin_entry") {
+    return false;
+  }
+  if (looksLikeApplySignupGate(snap)) return false;
+  if (looksLikePlatformOnboarding(snap)) return false;
+  if (looksLikeJobBoardWelcomeConfirm(snap)) return false;
+  if (looksLikeDidYouApplyPrompt(snap)) return false;
+  if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) return false;
+  if (looksLikeGoogleVignetteAd(snap)) return false;
+
   const fp = classification?.fingerprint || pageFingerprintFromSnap(snap);
 
-  if (looksLikeJobBoardIndex(snap)) return true;
+  if (looksLikeJobBoardIndex(snap) || looksBoardIsh(snap)) return true;
 
   if (uploadStalled(history) && (snap?.fileInputCount || 0) > 0) return true;
 
@@ -58,7 +94,14 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
     if (countRecentAction(history, "click_apply", 4) >= 2 && !applyEntrySucceeded(history, fp)) return true;
   }
 
-  if (classification?.step === "ambiguous") return true;
+  // Ambiguous alone is not enough — only when board-ish or stuck with no entry candidates.
+  if (classification?.step === "ambiguous") {
+    if (looksBoardIsh(snap)) return true;
+    if ((snap?.entryCount || 0) === 0 && (snap?.fileInputCount || 0) === 0 && (snap?.fieldCount || 0) < 2) {
+      return true;
+    }
+    return false;
+  }
 
   if (smartFillStalledOnStep(history, classification) && looksLikeJobBoardIndex(snap)) return true;
 
@@ -87,7 +130,7 @@ export function buildStagehandInstruction(snap, classification, history = [], co
   const jobRef = title ? `"${title}"` : "the target job";
   const companyRef = company ? ` at ${company}` : "";
 
-  if (looksLikeJobBoardIndex(snap)) {
+  if (looksLikeJobBoardIndex(snap) || looksBoardIsh(snap)) {
     if (title) {
       return `On this job board, click the job listing that best matches ${jobRef}${companyRef}. Do not change filter dropdowns unless necessary.`;
     }
@@ -123,7 +166,7 @@ export function buildStagehandInstruction(snap, classification, history = [], co
     }
   }
 
-  return `Complete the next step to apply for ${jobRef}${companyRef}.`;
+  return `Complete the next step to apply for ${jobRef}${companyRef}. Prefer filling unlabeled required fields over clicking Submit.`;
 }
 
 /**
@@ -140,6 +183,7 @@ export function buildStagehandPlan(snap, classification, history = [], context =
     reason: classification?.reason || instruction.slice(0, 100),
     source: "stagehand-policy",
     step: classification?.step,
+    mappedTo: looksBoardIsh(snap) ? "board_nav" : undefined,
   };
 }
 
@@ -154,7 +198,7 @@ export async function attemptApplicationControlsStagehand(page, context, opts = 
   const log = opts.log || null;
   const history = opts.history || [];
 
-  if (!hasUnfilledYesNoOrEEOC(snap)) {
+  if (!hasUnfilledApplicationControls(snap)) {
     return { ok: false, reason: "none_unfilled" };
   }
   const gate = canUseStagehand(context);

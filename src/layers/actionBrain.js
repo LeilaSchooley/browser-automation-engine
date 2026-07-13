@@ -201,6 +201,7 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
   // Action catalog (Option B) — primary decision layer after safety/replay
   const catalogEnabled = settings.action_catalog_first !== false;
   const catalog = buildActionCatalog(snap, fillResult, history, context, classification);
+  let deferredCatalogPlan = null;
   if (catalogEnabled) {
     const catalogPlan = pickBestAction(catalog, {
       classification,
@@ -210,12 +211,24 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
       context,
     });
     if (catalogPlan) {
-      return withDecision(
-        preferIndexedAct(catalogPlan, snap),
-        classification,
-        "action-catalog",
-        catalogPlan.reason,
-      );
+      // Primary brain: let the LLM pick novel dismiss CTAs (e.g. "Continue with basic resume")
+      // instead of always string-matching dismiss_overlay.
+      const deferOverlayToLlm =
+        mode === "primary" &&
+        catalogPlan.type === "dismiss_overlay" &&
+        (classification?.step === "overlay" || classification?.step === "ambiguous") &&
+        settings.agent_ai &&
+        Boolean(planNextAction);
+      if (deferOverlayToLlm) {
+        deferredCatalogPlan = catalogPlan;
+      } else {
+        return withDecision(
+          preferIndexedAct(catalogPlan, snap),
+          classification,
+          "action-catalog",
+          catalogPlan.reason,
+        );
+      }
     }
   }
 
@@ -283,7 +296,7 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
   }
 
   // mode === "primary" — catalog + deterministic tried; LLM for ambiguity or stall
-  if (!isPageUnloaded(snap) && (stalled || shouldInvokeLlm(classification, snap, pageState, history))) {
+  if (!isPageUnloaded(snap) && (stalled || shouldInvokeLlm(classification, snap, pageState, history) || deferredCatalogPlan)) {
     const enriched = await enrichContextWithVision(page, context, snap, history, classification);
     enriched.actionCatalog = topCatalogActions(catalog, 6);
     const aiPlan = await planNextAction(enriched, snap, history, fillResult, classification, page);
@@ -292,6 +305,12 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
       decisionPath = "llm-primary";
       decisionReason = aiPlan.reason || "LLM planner";
     }
+  }
+
+  if (!plan && deferredCatalogPlan) {
+    plan = preferIndexedAct(deferredCatalogPlan, snap);
+    decisionPath = "action-catalog";
+    decisionReason = deferredCatalogPlan.reason || "deferred overlay dismiss";
   }
 
   if (!plan) {

@@ -9,12 +9,18 @@ export const LABEL_TO_MAPPED = [
   { re: /\bcountry\b/i, mappedTo: "country", type: "country" },
 ];
 
-/** Visa / EEOC application questions (Ashby-style yes/no and fieldset radios). */
+/** Visa / EEOC / work-auth application questions (Ashby-style yes/no, radios, selects). */
 export const APPLICATION_LABEL_TO_MAPPED = [
   {
-    re: /visa|work\s*authorization|require.*sponsor|sponsorship|legally\s*authorized/i,
+    // Sponsorship first — "require sponsorship" must not fall into work auth.
+    re: /visa|require.*sponsor|sponsorship|need.*sponsor|will you.*sponsor/i,
     mappedTo: "visasponsorship",
     type: "visasponsorship",
+  },
+  {
+    re: /legally\s*authorized|authorized\s*to\s*work|work\s*authorization|eligible\s*to\s*work|right\s*to\s*work/i,
+    mappedTo: "workauthorization",
+    type: "workauthorization",
   },
   { re: /gender\s*identity|\bgender\b/i, mappedTo: "eeocgender", type: "eeocgender" },
   { re: /race|ethnic/i, mappedTo: "eeocrace", type: "eeocrace" },

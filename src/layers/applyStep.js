@@ -53,7 +53,9 @@ import {
   looksLikeMarketingYesNoModal,
   looksLikeJobAlertSignupForm,
   looksLikeApplySignupGate,
+  looksLikeGoogleVignetteAd,
 } from "../heuristics.js";
+import { looksLikePlatformOnboarding, platformOnboardingIncomplete, looksLikeJobBoardWelcomeConfirm, welcomeConfirmCta, looksLikeDidYouApplyPrompt, didYouApplyDeclineCta } from "../platformOnboarding.js";
 import { BLOCKED_TEXT } from "../patterns/index.js";
 
 /** Maps step type → default agent action. */
@@ -68,6 +70,7 @@ export const STEP_ACTIONS = {
   auth: "auth_login",
   signup: "auth_signup",
   signup_entry: "click_signup",
+  signin_entry: "click_signin",
   obstacle: "clear_obstacle",
   verify_email: "verify_email",
   nav_recovery: "nav_recovery",
@@ -266,6 +269,38 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (looksLikeApplySignupGate(snap)) {
+    const hostname = snap.hostname || "";
+    const stored = resolveAccountForHost(context, hostname, { provision: false });
+    const hasVerified =
+      stored &&
+      stored.verified === true &&
+      !shouldPreferSignupForAccount(stored) &&
+      (stored.email || stored.username) &&
+      stored.password;
+
+    if (hasVerified) {
+      ensureAccount(context, hostname);
+      // Signup modal with "Already a member? Sign in now" — open login first.
+      if ((snap.signInCount || 0) > 0) {
+        return {
+          step: "signin_entry",
+          confidence: "high",
+          reason: "verified site account — switch to sign in",
+          target: snap.signInCandidates?.[0] || null,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+      return {
+        step: "auth",
+        confidence: "high",
+        reason: "verified site account — log in to apply",
+        target: snap.signInCandidates?.[0] || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+
     if (canProvisionAccounts(context)) {
       ensureAccount(context, snap.hostname || "");
       return {
@@ -367,6 +402,58 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
     }
   }
 
+  if (looksLikeGoogleVignetteAd(snap)) {
+    const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
+    return {
+      step: "overlay",
+      confidence: "high",
+      reason: top
+        ? `google vignette ad — dismiss "${top.text || top.aria || "Close"}"`
+        : "google vignette ad (#google_vignette) — dismiss before apply",
+      target: top || null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  if (looksLikeJobBoardWelcomeConfirm(snap)) {
+    const top = welcomeConfirmCta(snap) || snap.continueCandidates?.[0] || snap.confirmCandidates?.[0];
+    return {
+      step: "continue",
+      confidence: "high",
+      reason: `job board welcome — ${top?.text || "Confirm & See Jobs"}`,
+      target: top || null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  if (looksLikeDidYouApplyPrompt(snap)) {
+    const top = didYouApplyDeclineCta(snap) || snap.dismissCandidates?.[0];
+    return {
+      step: "continue",
+      confidence: "high",
+      reason: `did-you-apply tracker — choose "${top?.text || top?.aria || "Not yet"}"`,
+      target: top || null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) {
+    const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
+    return {
+      step: "overlay",
+      confidence: "high",
+      reason: top
+        ? `resume upsell — skip "${top.text || top._text || "Skip"}"`
+        : "resume boost / review upsell — dismiss to continue apply",
+      target: top || null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
   if (looksLikeJobBoardIndex(snap)) {
     const title = String(context?.job?.title || context?.listingTitle || "").trim();
     const company = String(context?.job?.company || context?.company || "").trim();
@@ -377,6 +464,39 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
       confidence: "high",
       reason: `job board index — pick listing for ${label}${at}`,
       target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  if (looksLikePlatformOnboarding(snap)) {
+    if (platformOnboardingIncomplete(snap, fillResult)) {
+      const top = snap.continueCandidates?.[0];
+      if (filled >= 1 && top) {
+        return {
+          step: "continue",
+          confidence: "high",
+          reason: `platform onboarding — ${top.text || "Next"}`,
+          target: top,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+      return {
+        step: "form",
+        confidence: "high",
+        reason: "platform onboarding — fill job function and preferences",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    const top = snap.continueCandidates?.[0];
+    return {
+      step: "continue",
+      confidence: "high",
+      reason: `platform onboarding — ${top?.text || "Next"}`,
+      target: top || null,
       affordances,
       fingerprint: fp,
     };
