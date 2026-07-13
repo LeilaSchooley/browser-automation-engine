@@ -11,6 +11,7 @@ import { humanPause, humanType } from "./human.js";
 import { loadSiteLearnings } from "./siteLearnings.js";
 import { normalizeHost } from "./host.js";
 import { resolveDialogScope, resolvePopoverScope } from "./layers/dialogScope.js";
+import { normalizeRoleName, safeRoleLocator } from "./primitives/safeLocator.js";
 import {
   LABEL_TO_MAPPED,
   APPLICATION_LABEL_TO_MAPPED,
@@ -163,8 +164,9 @@ export async function commitPendingSelection(page, log, { confirmPattern, snap =
           return true;
         }
       }
-      const textRe = new RegExp(String(cand.text || "").slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      const btn = dialog.getByRole("button", { name: textRe });
+      const textRe = normalizeRoleName(String(cand.text || "").slice(0, 40));
+      if (!textRe) continue;
+      const btn = safeRoleLocator(dialog, "button", textRe);
       if ((await btn.count()) > 0 && (await visible(btn.first()))) {
         await btn.first().click({ timeout: 4000 });
         log?.layer("custom_controls", `confirmed via scored button ${cand.text}`, "info");
@@ -178,7 +180,7 @@ export async function commitPendingSelection(page, log, { confirmPattern, snap =
 
   for (const pattern of patterns) {
     try {
-      const inDialog = dialog.getByRole("button", { name: pattern });
+      const inDialog = safeRoleLocator(dialog, "button", pattern);
       if ((await inDialog.count()) > 0 && (await visible(inDialog.first()))) {
         await inDialog.first().click({ timeout: 4000, force: true });
         log?.layer("custom_controls", `confirmed picker via button ${pattern}`, "info");
@@ -186,7 +188,8 @@ export async function commitPendingSelection(page, log, { confirmPattern, snap =
         await findSalaryPickerDialog(page).waitFor({ state: "hidden", timeout: 2500 }).catch(() => {});
         return true;
       }
-      const divBtn = dialog.locator(BEHAVIORAL_BUTTON_SEL).filter({ hasText: pattern });
+      const safePat = normalizeRoleName(pattern);
+      const divBtn = dialog.locator(BEHAVIORAL_BUTTON_SEL).filter({ hasText: safePat || pattern });
       if ((await divBtn.count()) > 0 && (await visible(divBtn.first()))) {
         await divBtn.first().click({ timeout: 4000, force: true });
         log?.layer("custom_controls", `confirmed picker via div-button ${pattern}`, "info");
@@ -200,7 +203,7 @@ export async function commitPendingSelection(page, log, { confirmPattern, snap =
         for (let i = stackCount - 1; i >= 0; i -= 1) {
           const layer = stacked.nth(i);
           if (!(await visible(layer))) continue;
-          const saveInLayer = layer.getByRole("button", { name: pattern });
+          const saveInLayer = safeRoleLocator(layer, "button", pattern);
           if ((await saveInLayer.count()) > 0 && (await visible(saveInLayer.first()))) {
             await saveInLayer.first().click({ timeout: 4000, force: true });
             log?.layer("custom_controls", `confirmed picker via stacked dialog button ${pattern}`, "info");
@@ -209,7 +212,7 @@ export async function commitPendingSelection(page, log, { confirmPattern, snap =
             return true;
           }
         }
-        const pageBtn = page.getByRole("button", { name: pattern });
+        const pageBtn = safeRoleLocator(page, "button", pattern);
         if ((await pageBtn.count()) > 0 && (await visible(pageBtn.first()))) {
           await pageBtn.first().click({ timeout: 4000, force: true });
           log?.layer("custom_controls", `confirmed picker via page button ${pattern}`, "info");
@@ -804,7 +807,7 @@ export async function replayInteractionRecipe(page, recipe, log, snap = null) {
         if (step.selector) {
           await scope.locator(step.selector).first().click({ timeout: 5000 });
         } else if (step.text) {
-          await scope.getByRole("button", { name: new RegExp(step.text, "i") }).first().click({ timeout: 5000 });
+          await safeRoleLocator(scope, "button", step.text).first().click({ timeout: 5000 });
         }
         await humanPause(200, 400);
       } else if (step.action === "fill" && step.selector && step.value) {
@@ -993,7 +996,7 @@ export async function clickPreferencesSignupCta(page, log, layer = "custom_contr
 
   for (const pattern of SIGNUP_CTA_PATTERNS) {
     try {
-      const btn = page.getByRole("button", { name: pattern });
+      const btn = safeRoleLocator(page, "button", pattern);
       if ((await btn.count()) > 0 && (await visible(btn.first()))) {
         await btn.first().click({ timeout: 8000 });
         log?.layer(layer, `clicked CTA matching ${pattern}`, "info");

@@ -1,6 +1,7 @@
 /**
  * Shared Playwright fill/click helpers used by auth + signup layers.
  */
+import { normalizeRoleName, safeRoleLocator } from "../primitives/safeLocator.js";
 
 /**
  * @param {import('playwright').Page} page
@@ -43,12 +44,14 @@ export async function fillFirstVisibleTracked(page, selectors, value, opts = {})
 export async function clickRoleMatching(page, patterns, opts = {}) {
   const { log, layer = "fill", roles = ["button", "link"] } = opts;
   for (const pattern of patterns) {
+    const safeName = normalizeRoleName(pattern);
+    if (!safeName) continue;
     for (const role of roles) {
       try {
-        const loc = page.getByRole(role, { name: pattern }).first();
+        const loc = safeRoleLocator(page, role, safeName).first();
         if (await loc.isVisible({ timeout: 800 })) {
           await loc.click({ timeout: 8000 });
-          log?.layer(layer, `clicked ${role} matching ${pattern}`, "info");
+          log?.layer(layer, `clicked ${role} matching ${safeName}`, "info");
           return true;
         }
       } catch {

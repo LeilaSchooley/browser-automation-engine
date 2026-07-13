@@ -19,6 +19,14 @@ import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { rankEntryCandidates, entryCandidateKey } from "./pageIntent.js";
 import { resolveDialogScope } from "./dialogScope.js";
 import { isSocialSsoCta } from "./applyUrlSafety.js";
+import {
+  normalizeRoleName,
+  roleNameMatcher,
+  safeLabelLocator,
+  safeRoleLocator,
+  safeTextLocator,
+  shouldExactMatchName,
+} from "../primitives/safeLocator.js";
 
 function rankFileSelectors(selectors = []) {
   const score = (sel) => {
@@ -29,17 +37,6 @@ function rankFileSelectors(selectors = []) {
     return 50;
   };
   return [...selectors].sort((a, b) => score(b) - score(a));
-}
-
-/** Role/name match — exact for short CTAs so "Continue" does not hit "Continue with Apple". */
-function roleNameMatcher(text = "") {
-  const t = String(text || "").trim();
-  const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 40);
-  if (!escaped) return null;
-  if (/^(continue|next|proceed|sign in|log in|sign up|submit|ok|yes|no|not yet)$/i.test(t)) {
-    return new RegExp(`^${escaped}$`, "i");
-  }
-  return new RegExp(escaped, "i");
 }
 
 function shouldScopeUploadToDialog(snap) {
@@ -137,7 +134,7 @@ async function clickInModal(page, candidate, log, layer, label, { force = false,
     const nameRe = roleNameMatcher(candidate.text);
     if (nameRe) {
       attempts.push(async () => {
-        const loc = dialog.getByText(nameRe).first();
+        const loc = safeTextLocator(dialog, candidate.text).first();
         if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) return false;
         await loc.click({ timeout: 8000, force });
         log.layer(layer, `${label}: modal click text "${candidate.text.slice(0, 50)}"`, "info");
@@ -145,7 +142,7 @@ async function clickInModal(page, candidate, log, layer, label, { force = false,
       });
       for (const role of ["button", "link"]) {
         attempts.push(async () => {
-          const loc = dialog.getByRole(role, { name: nameRe }).first();
+          const loc = safeRoleLocator(dialog, role, candidate.text).first();
           if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
           await loc.click({ timeout: 8000, force });
           log.layer(layer, `${label}: modal click role=${role} "${candidate.text.slice(0, 50)}"`, "info");
@@ -203,7 +200,7 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
     if (nameRe) {
       for (const role of ["button", "link"]) {
         attempts.push(async () => {
-          const loc = page.getByRole(role, { name: nameRe }).first();
+          const loc = safeRoleLocator(page, role, candidate.text).first();
           if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
           await loc.scrollIntoViewIfNeeded().catch(() => {});
           await loc.click({ timeout: 8000, force });
@@ -212,7 +209,7 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
         });
       }
       attempts.push(async () => {
-        const loc = page.getByText(nameRe).first();
+        const loc = safeTextLocator(page, candidate.text).first();
         if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
         await loc.scrollIntoViewIfNeeded().catch(() => {});
         await loc.click({ timeout: 8000, force });
@@ -224,7 +221,7 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
 
   if (candidate.aria && !/close dialog/i.test(candidate.aria)) {
     attempts.push(async () => {
-      const loc = page.getByLabel(candidate.aria).first();
+      const loc = safeLabelLocator(page, candidate.aria).first();
       if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
       await loc.click({ timeout: 8000, force });
       log.layer(layer, `${label}: clicked aria-label "${candidate.aria}"`, "info");
@@ -278,11 +275,11 @@ export async function clickTargetCandidate(page, target, log, layer = "agent") {
     /* fall through */
   }
 
-  const nameRe = roleNameMatcher(t);
+  const nameRe = normalizeRoleName(t);
   if (nameRe) {
     for (const role of ["button", "link"]) {
       try {
-        const loc = page.getByRole(role, { name: nameRe }).first();
+        const loc = safeRoleLocator(page, role, t).first();
         if (await loc.isVisible({ timeout: 1200 }).catch(() => false)) {
           await loc.click({ timeout: 8000 });
           log.layer(layer, `target: clicked role=${role} "${t.slice(0, 50)}"`, "info");
@@ -325,7 +322,7 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         // Design-system div buttons: text click when roles miss
         if (item.text && item.text.length >= 2) {
           try {
-            const loc = page.getByText(item.text.slice(0, 60), { exact: false }).first();
+            const loc = safeTextLocator(page, item.text.slice(0, 60)).first();
             if (await loc.isVisible({ timeout: 1200 }).catch(() => false)) {
               await loc.click({ timeout: 6000 });
               log?.layer(layer, `act: clicked text "${item.text.slice(0, 50)}"`, "info");
@@ -355,8 +352,8 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         if (looksLikeCssSelector(targetStr)) {
           locators.push(() => page.locator(targetStr).first());
         } else {
-          locators.push(() => page.getByLabel(targetStr).first());
-          locators.push(() => page.getByPlaceholder(targetStr).first());
+          locators.push(() => safeLabelLocator(page, targetStr).first());
+          locators.push(() => page.getByPlaceholder(targetStr, { exact: shouldExactMatchName(targetStr) }).first());
         }
       }
       for (const make of locators) {
@@ -417,7 +414,7 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         if (looksLikeCssSelector(targetStr)) {
           locators.push(() => page.locator(targetStr).first());
         } else {
-          locators.push(() => page.getByLabel(targetStr).first());
+          locators.push(() => safeLabelLocator(page, targetStr).first());
           locators.push(() => page.locator(`select:has-text("${value}")`).first());
         }
       }
@@ -440,8 +437,8 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         if (looksLikeCssSelector(targetStr)) {
           comboboxLocators.push(() => page.locator(targetStr).first());
         } else {
-          comboboxLocators.push(() => page.getByRole("combobox", { name: targetStr }));
-          comboboxLocators.push(() => page.getByText(targetStr, { exact: false }));
+          comboboxLocators.push(() => safeRoleLocator(page, "combobox", targetStr));
+          comboboxLocators.push(() => safeTextLocator(page, targetStr));
         }
       }
       for (const make of comboboxLocators) {
@@ -449,7 +446,7 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
           const trigger = make();
           if (!(await trigger.isVisible({ timeout: 1500 }).catch(() => false))) continue;
           await trigger.click({ timeout: 3000 });
-          const option = page.getByRole("option", { name: new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }).first();
+          const option = safeRoleLocator(page, "option", value).first();
           if (await option.isVisible({ timeout: 2000 }).catch(() => false)) {
             await option.click({ timeout: 3000 });
             log?.layer(layer, `act: combobox selected "${value.slice(0, 50)}"`, "info");
@@ -471,8 +468,8 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         if (looksLikeCssSelector(targetStr)) {
           locators.push(() => page.locator(targetStr).first());
         } else {
-          locators.push(() => page.getByLabel(targetStr).first());
-          locators.push(() => page.getByRole("checkbox", { name: targetStr }).first());
+          locators.push(() => safeLabelLocator(page, targetStr).first());
+          locators.push(() => safeRoleLocator(page, "checkbox", targetStr).first());
         }
       }
       for (const make of locators) {

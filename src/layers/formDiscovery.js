@@ -23,6 +23,7 @@ import {
   USERNAME_FIELD_PATTERN_SOURCE,
 } from "../patterns/index.js";
 import { mergeOverlaySnap, scanBlockingOverlays } from "./adDismiss.js";
+import { safeRoleLocator } from "../primitives/safeLocator.js";
 import { isNonCookiePopup } from "../consentDetection.js";
 import { pageStateSummary } from "./pageState.js";
 import { entryHrefScoreDelta } from "./applyUrlSafety.js";
@@ -1615,10 +1616,11 @@ async function enrichViaPlaywright(page, snap) {
   await enrichCustomControlWidgetTypes(page, snap);
 
   if ((snap.entryCount || 0) === 0) {
-    for (const pattern of [/interested/i, /apply now/i, /easy apply/i, /\bapply\b/i]) {
+    // Anchored only — bare /\bapply\b/ was matching "Apply with Indeed" / "Apply with Apple" randomly.
+    for (const pattern of [/^interested$/i, /^apply now$/i, /^easy apply$/i, /^apply$/i]) {
       for (const role of ["button", "link"]) {
         try {
-          const loc = page.getByRole(role, { name: pattern }).first();
+          const loc = safeRoleLocator(page, role, pattern).first();
           if (!(await loc.isVisible({ timeout: 400 }).catch(() => false))) continue;
           const testId = ((await loc.getAttribute("data-testid").catch(() => "")) || "").trim();
           const text = ((await loc.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();

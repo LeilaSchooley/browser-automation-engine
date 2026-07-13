@@ -75,6 +75,15 @@ import { buildDeterministicPlan, shouldInvokeLlm, isDeterministicState, smartFil
 import { buildPagePerception, computePageDiff } from "./layers/pagePerception.js";
 import { recordEngineEvent, getLlmMetrics } from "./observability.js";
 import { mapLabelToMapped } from "./primitives/controlPatterns.js";
+import {
+  escapeRegExp,
+  normalizeRoleName,
+  roleNameMatcher,
+  safeLabelLocator,
+  safeRoleLocator,
+  safeTextLocator,
+  shouldExactMatchName,
+} from "./primitives/safeLocator.js";
 import { readControlValue, verifyCommitted, interactWidget } from "./primitives/interactWidget.js";
 import { refreshSnapIfNeeded } from "./layers/pagePerception.js";
 import { loadAiLayers } from "./ai/runtimeHooks.js";
@@ -269,6 +278,13 @@ export {
   saveApiSkill,
   tryDirectoryApiFastPath,
   tryUnbrowseHole,
+  escapeRegExp,
+  normalizeRoleName,
+  roleNameMatcher,
+  safeLabelLocator,
+  safeRoleLocator,
+  safeTextLocator,
+  shouldExactMatchName,
 };
 
 export {

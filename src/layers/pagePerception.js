@@ -2,6 +2,7 @@
  * Accessibility-tree-first page perception with stable element refs and page diffing.
  */
 import { getSettings } from "../runtime.js";
+import { safeRoleLocator } from "../primitives/safeLocator.js";
 
 let refCounter = 0;
 let lastSnapshot = null;
@@ -179,7 +180,7 @@ export function locatorForRef(page, refId, refs = []) {
   if (!entry) return null;
   if (entry.selector) return page.locator(entry.selector).first();
   if (entry.label) {
-    return page.getByRole(entry.role === "link" ? "link" : "button", { name: new RegExp(entry.label.slice(0, 40), "i") }).first();
+    return safeRoleLocator(page, entry.role === "link" ? "link" : "button", entry.label.slice(0, 40)).first();
   }
   return null;
 }

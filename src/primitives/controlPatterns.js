@@ -28,7 +28,12 @@ export const APPLICATION_LABEL_TO_MAPPED = [
   { re: /disabilit/i, mappedTo: "eeocdisability", type: "eeocdisability" },
 ];
 
-export const SIGNUP_CTA_PATTERNS = [/sign up now/i, /sign up for free/i, /get started/i, /^continue$/i];
+export const SIGNUP_CTA_PATTERNS = [
+  /^sign up now$/i,
+  /^sign up for free$/i,
+  /^get started$/i,
+  /^continue$/i,
+];
 
 /** Strict confirm-button patterns for picker commit (anchored). */
 export const PICKER_CONFIRM_PATTERNS = [

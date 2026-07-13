@@ -82,17 +82,23 @@ export const PASSWORD_SELECTORS = [
   'input[type="password"]',
 ];
 
-export const LOGIN_SUBMIT_PATTERNS = [/^login$/i, /^log in$/i, /^sign in$/i, /sign in with email/i, /^continue$/i];
+export const LOGIN_SUBMIT_PATTERNS = [
+  /^login$/i,
+  /^log in$/i,
+  /^sign in$/i,
+  /^sign in with email$/i,
+  /^continue$/i,
+];
 
 export const SIGNUP_SUBMIT_PATTERNS = [
-  /create (an )?account/i,
-  /sign up with email/i,
-  /sign up to apply/i,
+  /^create (an )?account$/i,
+  /^sign up with email$/i,
+  /^sign up to apply$/i,
   /^sign up$/i,
   /^register$/i,
-  /get started/i,
+  /^get started$/i,
   /^join$/i,
-  /sign up now/i,
+  /^sign up now$/i,
 ];
 
 /** Multi-step registration wizards (JobLeads-style) — Continue after identity/password. */
