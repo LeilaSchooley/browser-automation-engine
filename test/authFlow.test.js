@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classifyApplyStep, stepToPlan } from "../src/layers/applyStep.js";
-import { looksLikeAuthFailure } from "../src/layers/authActions.js";
+import { looksLikeAuthFailure, looksLikeHardGate, looksLikeOAuthOnly, hasEmailAuthPath } from "../src/layers/authActions.js";
 import { inspectPage } from "../src/layers/formDiscovery.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { initTestRuntime } from "./helpers/runtime.js";
@@ -65,5 +65,36 @@ describe("auth flow (BetaList-style login)", () => {
       assert.equal(c.step, "signup_entry");
       assert.equal(stepToPlan(c, snap, history)?.type, "click_signup");
     });
+  });
+});
+
+describe("Indeed email auth vs Continue with Apple", () => {
+  const indeedEmailSnap = {
+    url: "https://secure.indeed.com/auth?from=indapply-login-SmartApply",
+    hostname: "secure.indeed.com",
+    title: "Sign In | Indeed Accounts",
+    pageText: "Email address Continue Continue with Apple Continue with Google Sign in",
+    pageKind: "content",
+    fieldCount: 1,
+    emailFieldCount: 1,
+    passwordFieldCount: 0,
+    continueCount: 2,
+    fields: [{ type: "email", label: "Email address *" }],
+    continueCandidates: [
+      { text: "Continue", score: 105 },
+      { text: "Continue with Apple", score: 55 },
+    ],
+  };
+
+  it("has an email auth path when Apple SSO is also present", () => {
+    assert.equal(hasEmailAuthPath(indeedEmailSnap), true);
+    assert.equal(looksLikeOAuthOnly(indeedEmailSnap), false);
+    assert.equal(looksLikeHardGate(indeedEmailSnap).hard, false);
+  });
+
+  it("does not classify Indeed email Continue as blocked OAuth-only", () => {
+    const c = classifyApplyStep(indeedEmailSnap, { filled: [] }, [], null);
+    assert.notEqual(c.step, "blocked");
+    assert.notEqual(c.hardStop, true);
   });
 });

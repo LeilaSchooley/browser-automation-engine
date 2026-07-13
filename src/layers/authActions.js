@@ -56,6 +56,27 @@ export function looksLikeAuthForm(snap) {
   return passwords > 0 && LOGIN_WALL_TEXT.test(blob);
 }
 
+function hasEmailIdentityField(snap) {
+  if ((snap.emailFieldCount || 0) > 0) return true;
+  return (snap.fields || []).some((f) => {
+    const t = `${f.type || ""} ${f.label || ""} ${f.name || ""}`.toLowerCase();
+    return f.type === "email" || /email/.test(t);
+  });
+}
+
+/** True when the page offers an email Continue / password path (not SSO-only). */
+export function hasEmailAuthPath(snap) {
+  if (!snap) return false;
+  if (hasEmailIdentityField(snap)) return true;
+  const continues = snap.continueCandidates || [];
+  if (continues.some((c) => /^continue$/i.test(String(c.text || "").trim()))) return true;
+  if (continues.some((c) => /\b(continue with email|sign in with email)\b/i.test(String(c.text || "")))) {
+    return true;
+  }
+  const blob = `${snap.pageText || ""} ${continues.map((c) => c.text).join(" ")}`;
+  return /\b(email address|continue with email|sign in with email)\b/i.test(blob);
+}
+
 export function looksLikeAuthFailure(snap) {
   if (!snap) return false;
   const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
@@ -64,6 +85,8 @@ export function looksLikeAuthFailure(snap) {
 
 export function looksLikeOAuthOnly(snap) {
   if (!snap || looksLikeAuthForm(snap)) return false;
+  // Email field or exact Continue (Indeed) means SSO buttons are optional, not exclusive.
+  if (hasEmailAuthPath(snap)) return false;
   const blob = [
     snap.title,
     snap.applyModalTitle,

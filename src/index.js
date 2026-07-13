@@ -100,7 +100,6 @@ import {
   tryUnbrowseHole,
 } from "./networkSkills.js";
 import { observeStagehandCandidates } from "./layers/stagehandAdapter.js";
-import { reflectFromHistory } from "./learningRecorder.js";
 import { recoveryToPlanType } from "./layers/semanticRecovery.js";
 
 /**
