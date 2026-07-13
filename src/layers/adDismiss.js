@@ -12,6 +12,7 @@ import {
   isResumeReviewUpsell,
   looksLikeGoogleVignetteAd,
 } from "../heuristics.js";
+import { safeLabelLocator, safeRoleLocator, safeTextLocator } from "../primitives/safeLocator.js";
 
 /** Known close controls — tried before DOM scan candidates. */
 const STRUCTURAL_DISMISS_SELECTORS = [
@@ -319,7 +320,7 @@ async function clickDismissCandidate(page, candidate, log, layer) {
         }
       }
       for (const pattern of INTERSTITIAL_DISMISS_PATTERNS) {
-        const scoped = modal.getByRole("button", { name: pattern }).first();
+        const scoped = safeRoleLocator(modal, "button", pattern).first();
         if (await scoped.isVisible({ timeout: 800 }).catch(() => false)) {
           await scoped.click({ timeout: 6000 });
           log?.layer(layer, `dismiss: interstitial — "${pattern.source}"`, "info");
@@ -328,7 +329,7 @@ async function clickDismissCandidate(page, candidate, log, layer) {
       }
       // Design-system div buttons (e.g. ds-button)
       if (await clickDismissByTextInDialog(modal.first(), log, layer)) return true;
-      const anySkip = page.getByRole("button", { name: /^Skip$/i }).first();
+      const anySkip = safeRoleLocator(page, "button", "Skip").first();
       if (await anySkip.isVisible({ timeout: 800 }).catch(() => false)) {
         await anySkip.click({ timeout: 6000 });
         log?.layer(layer, 'dismiss: Skip button', "info");
@@ -361,13 +362,13 @@ async function clickDismissCandidate(page, candidate, log, layer) {
   const text = (candidate.text || "").trim();
   if (/^(close|×|✕|x)$/i.test(text)) {
     attempts.push(async () => {
-      const loc = page.getByRole("link", { name: /^close$/i }).first();
+      const loc = safeRoleLocator(page, "link", "Close").first();
       if (await loc.isVisible({ timeout: 800 }).catch(() => false)) {
         await loc.click({ timeout: 6000 });
         log?.layer(layer, "dismiss: Close link", "info");
         return true;
       }
-      const btn = page.getByRole("button", { name: /^close$/i }).first();
+      const btn = safeRoleLocator(page, "button", "Close").first();
       if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
         await btn.click({ timeout: 6000 });
         log?.layer(layer, "dismiss: Close button", "info");
@@ -379,7 +380,7 @@ async function clickDismissCandidate(page, candidate, log, layer) {
 
   if (candidate.aria && /close/i.test(candidate.aria)) {
     attempts.push(async () => {
-      const loc = page.getByLabel(new RegExp(candidate.aria.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first();
+      const loc = safeLabelLocator(page, candidate.aria).first();
       if (!(await loc.isVisible({ timeout: 800 }).catch(() => false))) return false;
       await loc.click({ timeout: 6000 });
       log?.layer(layer, `dismiss: aria "${candidate.aria}"`, "info");
@@ -390,14 +391,13 @@ async function clickDismissCandidate(page, candidate, log, layer) {
   // Generic text dismiss (Skip, No thanks, Not now, etc.)
   if (text && text.length < 40 && !/^(close|×|✕|x)$/i.test(text)) {
     attempts.push(async () => {
-      const re = new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-      const btn = page.getByRole("button", { name: re }).first();
+      const btn = safeRoleLocator(page, "button", text).first();
       if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
         await btn.click({ timeout: 6000 });
         log?.layer(layer, `dismiss: button "${text}"`, "info");
         return true;
       }
-      const link = page.getByRole("link", { name: re }).first();
+      const link = safeRoleLocator(page, "link", text).first();
       if (await link.isVisible({ timeout: 800 }).catch(() => false)) {
         await link.click({ timeout: 6000 });
         log?.layer(layer, `dismiss: link "${text}"`, "info");
@@ -528,7 +528,7 @@ export async function dismissInterstitialDialog(page, log, layer = "page_prep") 
 
       for (const pattern of INTERSTITIAL_DISMISS_PATTERNS) {
         for (const role of ["button", "link"]) {
-          const btn = dialog.getByRole(role, { name: pattern }).first();
+          const btn = safeRoleLocator(dialog, role, pattern).first();
           if (!(await btn.isVisible({ timeout: 250 }).catch(() => false))) continue;
           const label = ((await btn.innerText().catch(() => "")) || pattern.source).replace(/\s+/g, " ").trim();
           await btn.click({ timeout: 6000 });
@@ -693,7 +693,7 @@ async function clickDismissByTextInDialog(dialog, log, layer) {
     }
 
     // Last resort: getByText on the dialog
-    const byText = dialog.getByText(pattern).first();
+    const byText = safeTextLocator(dialog, pattern).first();
     if (await byText.isVisible({ timeout: 250 }).catch(() => false)) {
       const label = ((await byText.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim().slice(0, 60);
       await byText.click({ timeout: 6000 });
@@ -727,14 +727,14 @@ export async function dismissGoogleVignette(page, log, layer = "page_prep") {
 
     // 1) Visible Close above the ad (parent page control)
     for (const pattern of [/^Close$/i, /^[×✕]$/]) {
-      const btn = page.getByRole("button", { name: pattern }).first();
+      const btn = safeRoleLocator(page, "button", pattern).first();
       if (await btn.isVisible({ timeout: 350 }).catch(() => false)) {
         await btn.click({ timeout: 4000, force: true }).catch(() => null);
         await humanPause(500, 900);
         log?.layer(layer, `dismiss: google vignette — clicked Close (${pattern})`, "info");
         if (!/#google_vignette\b/i.test(page.url())) return true;
       }
-      const link = page.getByRole("link", { name: pattern }).first();
+      const link = safeRoleLocator(page, "link", pattern).first();
       if (await link.isVisible({ timeout: 250 }).catch(() => false)) {
         await link.click({ timeout: 4000, force: true }).catch(() => null);
         await humanPause(500, 900);

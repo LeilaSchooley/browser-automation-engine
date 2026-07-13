@@ -137,6 +137,17 @@ export function renderSoftHints(snap) {
   return `\nSOFT HINTS (regex priors — prefer ELEMENTS by index when they conflict):\n${lines.join("\n")}\n`;
 }
 
+/** Compact CDP perception refs for the planner (when page_perception_enabled). */
+export function renderPerceptionRefs(snap, limit = 12) {
+  const refs = snap?._perception?.refs || [];
+  if (!refs.length) return "";
+  const lines = refs.slice(0, limit).map((r) => {
+    const label = String(r.label || r.name || r.role || "?").slice(0, 40);
+    return `  ${r.refId || r.id}: ${r.role || "node"} "${label}"`;
+  });
+  return `\nPERCEPTION REFS (stable a11y ids — prefer when choosing clicks):\n${lines.join("\n")}\n`;
+}
+
 /**
  * @param {object} snap
  * @param {object} [fillResult]
@@ -159,6 +170,7 @@ export async function buildAgentContext(snap, fillResult = null, page = null) {
       fieldsBlock: renderFieldsAndControls(snap, pageState),
       interactivesBlock: renderInteractivesForPrompt(snap),
       softHintsBlock: renderSoftHints(snap),
+      perceptionRefsBlock: renderPerceptionRefs(snap),
     };
   }
   const pageState = await buildPageState(snap, page, fillResult);
@@ -168,5 +180,6 @@ export async function buildAgentContext(snap, fillResult = null, page = null) {
     fieldsBlock: renderFieldsAndControls(snap, pageState),
     interactivesBlock: renderInteractivesForPrompt(snap),
     softHintsBlock: renderSoftHints(snap),
+    perceptionRefsBlock: renderPerceptionRefs(snap),
   };
 }

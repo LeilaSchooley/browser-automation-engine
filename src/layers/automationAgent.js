@@ -709,7 +709,23 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           source: "auto-submit",
         });
       } else {
-        log.layer("agent", "objective: form filled — ready for human review/submit", "info");
+        const reviewMode = settings.review_mode !== false;
+        log.layer(
+          "agent",
+          reviewMode
+            ? "handoff: review — form filled, awaiting human submit (review_mode)"
+            : "objective: form filled — ready for human review/submit",
+          "info",
+        );
+        history.push({
+          step,
+          action: "wait_user",
+          applyStep: "review",
+          ok: true,
+          progress: true,
+          handoff: "review",
+          source: reviewMode ? "review-mode" : "ready-for-review",
+        });
       }
       break;
     }

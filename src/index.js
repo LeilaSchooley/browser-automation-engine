@@ -22,6 +22,7 @@ import {
   recordPipelineOutcome,
   synthesizeLearningsFromRun,
   shouldRecordLearnings,
+  reflectFromHistory,
 } from "./learningRecorder.js";
 import { loadSiteAccounts, loadAccountForHost, resolveAccountForHost, saveAccountForHost } from "./accountStore.js";
 import * as patterns from "./patterns/index.js";
@@ -56,6 +57,8 @@ import {
   shouldRunValidator,
   parseValidatorResponse,
   parseEndStateResponse,
+  normalizeRecoveryAction,
+  isLikelyNoopClick,
 } from "./layers/actionValidator.js";
 import { tryAdoptFormIframe } from "./layers/iframeAdopt.js";
 import { isQueueableApplyUrl } from "./layers/applyUrlSafety.js";
@@ -96,6 +99,9 @@ import {
   tryDirectoryApiFastPath,
   tryUnbrowseHole,
 } from "./networkSkills.js";
+import { observeStagehandCandidates } from "./layers/stagehandAdapter.js";
+import { reflectFromHistory } from "./learningRecorder.js";
+import { recoveryToPlanType } from "./layers/semanticRecovery.js";
 
 /**
  * @typedef {Object} EngineOptions
@@ -285,6 +291,11 @@ export {
   safeRoleLocator,
   safeTextLocator,
   shouldExactMatchName,
+  observeStagehandCandidates,
+  normalizeRecoveryAction,
+  isLikelyNoopClick,
+  reflectFromHistory,
+  recoveryToPlanType,
 };
 
 export {

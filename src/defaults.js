@@ -20,6 +20,15 @@ export const DEFAULT_SETTINGS = {
    * Job-apply products should leave this false (human reviews/submits).
    */
   auto_submit: false,
+  /**
+   * When true (default), stop after a filled apply form for human review instead of
+   * inventing further actions. Pair with auto_submit=false for job-apply products.
+   */
+  review_mode: true,
+  /** Persist lastStallReason / failedActions / suggestedNext into site learnings. */
+  reflection_enabled: true,
+  /** Treat no-op clicks (actor ok, no DOM fingerprint change) as failed progress. */
+  validator_detect_noop: true,
   objective_mode: true,
   cloudflare_wait_enabled: true,
   cloudflare_wait_timeout_sec: 120,
@@ -61,7 +70,7 @@ export const DEFAULT_SETTINGS = {
   /** Optional: shell out to `unbrowse` CLI if installed (directory fast path only). */
   unbrowse_enabled: false,
   /** CDP accessibility-tree perception with stable refs and page diff. */
-  page_perception_enabled: false,
+  page_perception_enabled: true,
   /** Directory for JSONL event logs and debug screenshots. */
   event_log_dir: "",
   debug_screenshots_enabled: false,

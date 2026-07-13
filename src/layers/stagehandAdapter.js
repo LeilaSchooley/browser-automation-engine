@@ -123,6 +123,38 @@ export async function replayStagehandSkill(page, skill, log = null, opts = {}) {
 }
 
 /**
+ * Observe without acting — returns Stagehand candidates for catalog/brain ranking.
+ * @param {import('playwright').Page} page
+ * @param {object} context
+ * @param {{ instruction?: string, log?: object, variables?: object }} [opts]
+ */
+export async function observeStagehandCandidates(page, context, opts = {}) {
+  const log = opts.log || null;
+  const gate = canUseStagehand(context);
+  if (!gate.ok) return { ok: false, reason: gate.reason, candidates: [] };
+
+  const stagehand = await getStagehand(context);
+  if (!stagehand) {
+    return { ok: false, reason: stagehandInitError || "not_available", candidates: [] };
+  }
+
+  const instruction = String(opts.instruction || "Find the best next action to continue the application").trim();
+  try {
+    const observeOpts = { page };
+    if (opts.variables && Object.keys(opts.variables).length) {
+      observeOpts.variables = opts.variables;
+    }
+    const actions = await stagehand.observe(instruction, observeOpts);
+    const candidates = (Array.isArray(actions) ? actions : [actions]).filter(Boolean);
+    log?.layer("stagehand", `observe: ${candidates.length} candidate(s) for "${instruction.slice(0, 60)}"`, "info");
+    return { ok: true, candidates, instruction, source: "stagehand-observe" };
+  } catch (err) {
+    log?.layer("stagehand", `observe failed: ${err.message}`, "warn");
+    return { ok: false, reason: err.message, candidates: [] };
+  }
+}
+
+/**
  * General observe/act for navigation or custom controls.
  * @param {import('playwright').Page} page
  * @param {object} context

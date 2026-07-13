@@ -2,6 +2,7 @@
  * Post-signup platform onboarding (Jobright diagnostics wizard, etc.).
  */
 import { normalizeHost } from "./host.js";
+import { safeRoleLocator, safeTextLocator } from "./primitives/safeLocator.js";
 
 const ONBOARDING_URL_RE = /\/onboarding(-v\d+)?\//i;
 const ONBOARDING_BODY_RE =
@@ -86,7 +87,7 @@ export async function tickOnboardingDefaults(page, log) {
   ];
   for (const { name } of targets) {
     try {
-      const loc = page.getByRole("checkbox", { name }).first();
+      const loc = safeRoleLocator(page, "checkbox", name).first();
       if (!(await loc.isVisible({ timeout: 600 }).catch(() => false))) continue;
       const checked = await loc.isChecked().catch(() => false);
       if (!checked) {
@@ -116,10 +117,10 @@ export async function clickWelcomeConfirm(page, snap, log) {
     }
   }
 
-  const patterns = [/confirm\s*&\s*see jobs/i, /confirm and see jobs/i, /^confirm$/i];
+  const patterns = [/^confirm\s*&\s*see jobs$/i, /^confirm and see jobs$/i, /^confirm$/i];
   for (const pattern of patterns) {
     try {
-      const btn = page.getByRole("button", { name: pattern }).first();
+      const btn = safeRoleLocator(page, "button", pattern).first();
       if (await btn.isVisible({ timeout: 600 }).catch(() => false)) {
         await btn.click({ timeout: 8000 });
         log?.layer("onboarding", `clicked welcome confirm: ${pattern}`, "info");
@@ -131,7 +132,7 @@ export async function clickWelcomeConfirm(page, snap, log) {
   }
 
   try {
-    const byText = page.getByText(/confirm\s*&\s*see jobs/i).first();
+    const byText = safeTextLocator(page, /confirm\s*&\s*see jobs/i).first();
     if (await byText.isVisible({ timeout: 600 }).catch(() => false)) {
       await byText.click({ timeout: 8000 });
       log?.layer("onboarding", "clicked welcome confirm via text", "info");
@@ -211,11 +212,11 @@ export function didYouApplyDeclineCta(snap) {
 export async function clickDidYouApplyDecline(page, snap, log) {
   const cta = didYouApplyDeclineCta(snap);
   const patterns = [
-    /not yet/i,
+    /^not yet$/i,
     /i('ll| will) apply later/i,
     /haven'?t applied/i,
     /^no$/i,
-    /no[, ]?thanks/i,
+    /^no[, ]?thanks$/i,
   ];
 
   if (cta?.selector) {
@@ -234,7 +235,7 @@ export async function clickDidYouApplyDecline(page, snap, log) {
   for (const pattern of patterns) {
     for (const role of ["button", "link"]) {
       try {
-        const btn = page.getByRole(role, { name: pattern }).first();
+        const btn = safeRoleLocator(page, role, pattern).first();
         if (!(await btn.isVisible({ timeout: 500 }).catch(() => false))) continue;
         await btn.click({ timeout: 8000 });
         log?.layer("onboarding", `did-you-apply: clicked ${role} ${pattern}`, "info");
@@ -270,7 +271,7 @@ export async function clickDidYouApplyDecline(page, snap, log) {
         log?.layer("onboarding", `did-you-apply: clicked "${label}" (text host)`, "info");
         return true;
       }
-      const byText = root.getByText(pattern).first();
+      const byText = safeTextLocator(root, pattern).first();
       if (await byText.isVisible({ timeout: 300 }).catch(() => false)) {
         await byText.click({ timeout: 8000 });
         log?.layer("onboarding", `did-you-apply: clicked text ${pattern}`, "info");

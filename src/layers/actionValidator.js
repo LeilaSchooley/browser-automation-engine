@@ -84,14 +84,77 @@ export function shouldRunValidator({ actorOk, mechanicalProgress, signals }) {
 }
 
 export function parseValidatorResponse(text) {
-  const data = parseJsonFromLlm(text, ValidatorResponseSchema);
-  if (!data) return null;
+  // Accept alias recoveries ("dismiss") then normalize to catalog action ids.
+  let raw = null;
+  try {
+    const match = String(text || "").match(/\{[\s\S]*\}/);
+    raw = JSON.parse(match ? match[0] : text);
+  } catch {
+    raw = null;
+  }
+  if (!raw || typeof raw.progressed !== "boolean") {
+    const data = parseJsonFromLlm(text, ValidatorResponseSchema);
+    if (!data) return null;
+    return {
+      progressed: data.progressed,
+      reason: data.reason || "validator",
+      recovery: normalizeRecoveryAction(data.recovery),
+      source: "validator",
+    };
+  }
   return {
-    progressed: data.progressed,
-    reason: data.reason || "validator",
-    recovery: data.recovery || null,
+    progressed: raw.progressed,
+    reason: String(raw.reason || "validator").slice(0, 240),
+    recovery: normalizeRecoveryAction(raw.recovery),
     source: "validator",
   };
+}
+
+/** Map free-text / alias recoveries onto catalog action types. */
+export function normalizeRecoveryAction(recovery) {
+  if (!recovery) return null;
+  const raw = String(recovery).trim().toLowerCase().replace(/\s+/g, "_");
+  const aliases = {
+    dismiss: "dismiss_overlay",
+    dismiss_overlay: "dismiss_overlay",
+    overlay: "dismiss_overlay",
+    upload: "upload_resume",
+    upload_resume: "upload_resume",
+    modal: "click_modal",
+    click_modal: "click_modal",
+    apply: "click_apply",
+    click_apply: "click_apply",
+    continue: "click_continue",
+    click_continue: "click_continue",
+    cookies: "accept_cookies",
+    accept_cookies: "accept_cookies",
+    fill: "smart_fill",
+    smart_fill: "smart_fill",
+    wait: "wait_load",
+    wait_load: "wait_load",
+    ai: "ai_replan",
+    ai_replan: "ai_replan",
+    signup: "auth_signup",
+    auth_signup: "auth_signup",
+    login: "auth_login",
+    auth_login: "auth_login",
+  };
+  return aliases[raw] || (raw.includes("dismiss") ? "dismiss_overlay" : null);
+}
+
+/** Actor claimed success but DOM fingerprint/URL/modals unchanged — likely wrong click. */
+export function isLikelyNoopClick(signals, mechanicalProgress, actorOk) {
+  if (!actorOk || mechanicalProgress) return false;
+  return (
+    !signals.fingerprintChanged &&
+    !signals.urlChanged &&
+    !signals.modalAppeared &&
+    !signals.pickerClosed &&
+    !signals.commitCompleted &&
+    (signals.fieldCountDelta || 0) === 0 &&
+    (signals.fileInputDelta || 0) === 0 &&
+    (signals.filledDelta || 0) === 0
+  );
 }
 
 export function parseEndStateResponse(text) {
@@ -222,6 +285,15 @@ export async function validateActionOutcome({
       reason: plan?.reason ? `actor failed: ${plan.reason}` : "actor failed",
       recovery: "ai_replan",
       source: "fast-fail",
+    };
+  }
+
+  if (getSettings().validator_detect_noop !== false && isLikelyNoopClick(signals, mechanicalProgress, actorOk)) {
+    return {
+      progressed: false,
+      reason: "noop click — page fingerprint unchanged after actor success",
+      recovery: plan?.type === "smart_fill" ? "dismiss_overlay" : "ai_replan",
+      source: "noop-detect",
     };
   }
 

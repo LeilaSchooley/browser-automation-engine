@@ -25,6 +25,7 @@ import { pageStateSummary } from "./pageState.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
 import { buildStagehandPlan } from "./stagehandPolicy.js";
 import { looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
+import { normalizeRecoveryAction } from "./actionValidator.js";
 
 const RECOVERY_ACTIONS = new Set([
   "dismiss_overlay",
@@ -36,7 +37,15 @@ const RECOVERY_ACTIONS = new Set([
   "smart_fill",
   "wait_load",
   "auth_signup",
+  "auth_login",
 ]);
+
+/** Bind validator recovery string to an executable plan type. */
+export function recoveryToPlanType(recovery) {
+  const normalized = normalizeRecoveryAction(recovery);
+  if (!normalized || normalized === "ai_replan") return null;
+  return RECOVERY_ACTIONS.has(normalized) ? normalized : null;
+}
 
 export function validatorRecentlyRejected(history, n = 2) {
   return (history || []).slice(-n).some((h) => h.progressSource === "validator" && !h.progress && h.ok);
@@ -162,12 +171,15 @@ export function deriveRecoveryPlan({ verdict, snap, history, lastPlan }) {
     };
   }
 
-  if (raw && raw !== "null" && raw !== "ai_replan" && RECOVERY_ACTIONS.has(raw)) {
-    return {
-      type: raw,
-      reason: `validator recovery: ${verdict?.reason || raw}`,
-      source: "semantic-recovery",
-    };
+  if (raw && raw !== "null" && raw !== "ai_replan") {
+    const bound = recoveryToPlanType(raw);
+    if (bound) {
+      return {
+        type: bound,
+        reason: `validator recovery: ${verdict?.reason || raw}`,
+        source: "semantic-recovery",
+      };
+    }
   }
 
   const reason = earlyReason;

@@ -38,6 +38,10 @@ export function pickBestAction(catalog, opts = {}) {
     if (step === "signin_entry" && action.type === "click_signin") score += 28;
     if (step === "auth" && action.type === "auth_login") score += 24;
     if (step === "continue" && action.type === "click_continue") score += 15;
+
+    // Reflection from prior stalled runs on this host
+    const suggested = String(context?.siteLearnings?.suggestedNext || "").trim();
+    if (suggested && action.type === suggested) score += 18;
     if (step === "form" && action.type === "smart_fill") score += 15;
     if (step === "form" && looksLikePlatformOnboarding(snap) && action.type === "click_continue") score += 20;
     if (step === "upload" && action.type === "upload_resume" && !uploadStalled(history)) score += 10;

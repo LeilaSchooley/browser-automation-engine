@@ -276,7 +276,42 @@ export function synthesizeLearningsFromRun({
     Object.assign(patch, aggregatorLearning);
   }
 
+  const reflection = reflectFromHistory(history, snap);
+  if (reflection) {
+    Object.assign(patch, reflection);
+  }
+
   return { host, patch };
+}
+
+/**
+ * Lightweight reflection — what stalled, which actions failed, what to try next.
+ * Persisted into site learnings so the next run on this host boosts recovery.
+ */
+export function reflectFromHistory(history = [], snap = null) {
+  if (!history?.length) return null;
+  const failed = history.filter((h) => h.ok === false || (h.ok && h.progress === false)).slice(-10);
+  if (!failed.length && history.every((h) => h.progress)) return null;
+
+  const lastStall = [...history].reverse().find((h) => !h.progress) || history[history.length - 1];
+  const failedActions = [...new Set(failed.map((h) => h.action).filter(Boolean))].slice(0, 8);
+
+  let suggestedNext = "dismiss_overlay";
+  const act = lastStall?.action || "";
+  if (act === "smart_fill" && (snap?.hasBlockingOverlay || snap?.hasApplyModal)) suggestedNext = "dismiss_overlay";
+  else if (act === "auth_login") suggestedNext = "auth_signup";
+  else if (act === "click_continue" || act === "click_apply") suggestedNext = "smart_fill";
+  else if (act === "dismiss_overlay") suggestedNext = "click_continue";
+  else if (act === "stagehand_act") suggestedNext = "wait_user";
+  else if (snap?.entryCount > 0) suggestedNext = "click_apply";
+  else if ((snap?.fileInputCount || 0) > 0) suggestedNext = "upload_resume";
+
+  return {
+    lastStallReason: String(lastStall?.reason || lastStall?.action || "stalled").slice(0, 200),
+    failedActions,
+    suggestedNext,
+    reflectedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -284,7 +319,15 @@ export function synthesizeLearningsFromRun({
  * @returns {object | null}
  */
 export function recordLearningsFromRun(args = {}) {
-  if (!shouldRecordLearnings(args)) return null;
+  if (!shouldRecordLearnings(args)) {
+    // Still record reflection on failed/review runs even when fill is thin.
+    if (args.outcome === "failed" || args.outcome === "review") {
+      const reflection = reflectFromHistory(args.history || [], args.snap || null);
+      const host = normalizeHost(args.hostname || "");
+      if (host && reflection) return recordSiteLearning(host, reflection);
+    }
+    return null;
+  }
   const synthesized = synthesizeLearningsFromRun(args);
   if (!synthesized?.host || !synthesized.patch) return null;
   return recordSiteLearning(synthesized.host, synthesized.patch);

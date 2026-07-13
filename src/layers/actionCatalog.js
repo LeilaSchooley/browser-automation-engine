@@ -302,6 +302,25 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     });
   }
 
+  // Sparse DOM (login wall, empty listing, SPA shell) — Stagehand observe→act as safety net
+  if (
+    canUseStagehand(context).ok &&
+    (snap.entryCount || 0) === 0 &&
+    (snap.fieldCount || 0) < 2 &&
+    (snap.continueCount || 0) === 0 &&
+    !looksLikeAuthForm(snap) &&
+    classification?.step !== "blocked"
+  ) {
+    actions.push({
+      id: "stagehand_sparse_dom",
+      type: "stagehand_act",
+      score: 55,
+      reason: "sparse DOM — semantic observe/act",
+      instruction: buildStagehandInstruction(snap, classification || { step: "entry" }, history, context),
+      step: classification?.step || "entry",
+    });
+  }
+
   const seen = new Set();
   return actions
     .filter((a) => {
