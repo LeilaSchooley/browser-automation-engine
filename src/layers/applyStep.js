@@ -3,7 +3,7 @@
  */
 import { looksLikeApplyForm } from "./formDiscovery.js";
 import { isPageUnloaded } from "./pageReady.js";
-import { looksLikeDeadApplyDestination, looksLikeAggregatorTrap } from "./applyUrlSafety.js";
+import { looksLikeDeadApplyDestination, looksLikeAggregatorTrap, isOauthProviderHost } from "./applyUrlSafety.js";
 import {
   hasAuthCredentials,
   looksLikeAuthForm,
@@ -227,6 +227,18 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
       step: "blocked",
       confidence: "high",
       reason: dead.reason,
+      target: null,
+      affordances,
+      fingerprint: fp,
+      hardStop: true,
+    };
+  }
+
+  if (isOauthProviderHost(snap.url || snap.hostname || "")) {
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: "third-party SSO (Apple/Google/…) — use email Continue on the job site",
       target: null,
       affordances,
       fingerprint: fp,

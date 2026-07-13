@@ -18,6 +18,7 @@ import { dismissInterstitialDialog } from "./adDismiss.js";
 import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { rankEntryCandidates, entryCandidateKey } from "./pageIntent.js";
 import { resolveDialogScope } from "./dialogScope.js";
+import { isSocialSsoCta } from "./applyUrlSafety.js";
 
 function rankFileSelectors(selectors = []) {
   const score = (sel) => {
@@ -28,6 +29,17 @@ function rankFileSelectors(selectors = []) {
     return 50;
   };
   return [...selectors].sort((a, b) => score(b) - score(a));
+}
+
+/** Role/name match — exact for short CTAs so "Continue" does not hit "Continue with Apple". */
+function roleNameMatcher(text = "") {
+  const t = String(text || "").trim();
+  const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 40);
+  if (!escaped) return null;
+  if (/^(continue|next|proceed|sign in|log in|sign up|submit|ok|yes|no|not yet)$/i.test(t)) {
+    return new RegExp(`^${escaped}$`, "i");
+  }
+  return new RegExp(escaped, "i");
 }
 
 function shouldScopeUploadToDialog(snap) {
@@ -122,14 +134,25 @@ async function clickInModal(page, candidate, log, layer, label, { force = false,
   }
 
   if (candidate.text) {
-    const snippet = candidate.text.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    attempts.push(async () => {
-      const loc = dialog.getByText(new RegExp(snippet, "i")).first();
-      if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) return false;
-      await loc.click({ timeout: 8000, force });
-      log.layer(layer, `${label}: modal click text "${candidate.text.slice(0, 50)}"`, "info");
-      return true;
-    });
+    const nameRe = roleNameMatcher(candidate.text);
+    if (nameRe) {
+      attempts.push(async () => {
+        const loc = dialog.getByText(nameRe).first();
+        if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) return false;
+        await loc.click({ timeout: 8000, force });
+        log.layer(layer, `${label}: modal click text "${candidate.text.slice(0, 50)}"`, "info");
+        return true;
+      });
+      for (const role of ["button", "link"]) {
+        attempts.push(async () => {
+          const loc = dialog.getByRole(role, { name: nameRe }).first();
+          if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
+          await loc.click({ timeout: 8000, force });
+          log.layer(layer, `${label}: modal click role=${role} "${candidate.text.slice(0, 50)}"`, "info");
+          return true;
+        });
+      }
+    }
   }
 
   for (const tryClick of attempts) {
@@ -176,11 +199,11 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
   }
 
   if (candidate.text) {
-    const escaped = candidate.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 40);
-    if (escaped.length >= 2) {
+    const nameRe = roleNameMatcher(candidate.text);
+    if (nameRe) {
       for (const role of ["button", "link"]) {
         attempts.push(async () => {
-          const loc = page.getByRole(role, { name: new RegExp(escaped, "i") }).first();
+          const loc = page.getByRole(role, { name: nameRe }).first();
           if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
           await loc.scrollIntoViewIfNeeded().catch(() => {});
           await loc.click({ timeout: 8000, force });
@@ -189,7 +212,7 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
         });
       }
       attempts.push(async () => {
-        const loc = page.getByText(new RegExp(escaped, "i")).first();
+        const loc = page.getByText(nameRe).first();
         if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
         await loc.scrollIntoViewIfNeeded().catch(() => {});
         await loc.click({ timeout: 8000, force });
@@ -255,18 +278,20 @@ export async function clickTargetCandidate(page, target, log, layer = "agent") {
     /* fall through */
   }
 
-  const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 40);
-  for (const role of ["button", "link"]) {
-    try {
-      const loc = page.getByRole(role, { name: new RegExp(escaped, "i") }).first();
-      if (await loc.isVisible({ timeout: 1200 }).catch(() => false)) {
-        await loc.click({ timeout: 8000 });
-        log.layer(layer, `target: clicked role=${role} "${t.slice(0, 50)}"`, "info");
-        await humanPause(700, 1400);
-        return true;
+  const nameRe = roleNameMatcher(t);
+  if (nameRe) {
+    for (const role of ["button", "link"]) {
+      try {
+        const loc = page.getByRole(role, { name: nameRe }).first();
+        if (await loc.isVisible({ timeout: 1200 }).catch(() => false)) {
+          await loc.click({ timeout: 8000 });
+          log.layer(layer, `target: clicked role=${role} "${t.slice(0, 50)}"`, "info");
+          await humanPause(700, 1400);
+          return true;
+        }
+      } catch {
+        /* next */
       }
-    } catch {
-      /* next */
     }
   }
 
@@ -635,6 +660,7 @@ export async function clickDiscoveredContinue(page, log, layer = "agent", snap =
 
   for (const c of state.continueCandidates || []) {
     if ((c.text || "").length > 80) continue;
+    if (isSocialSsoCta(c.text || c.aria || "")) continue;
     if (await clickCandidate(page, c, log, layer, "continue")) return true;
   }
   return false;

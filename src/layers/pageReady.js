@@ -1,7 +1,11 @@
 import { humanPause } from "../human.js";
 import { inspectPage } from "./formDiscovery.js";
 import { normalizeHost } from "../host.js";
-import { isBrowserUnreachablePage, isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import {
+  isBrowserUnreachablePage,
+  isOauthProviderHost,
+  isSuspiciousApplyHost,
+} from "./applyUrlSafety.js";
 import { isBlankOrNewTabUrl, pruneExtraPages } from "./tabHygiene.js";
 
 export function isPageUnloaded(snap) {
@@ -53,6 +57,11 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
     }
     if (isSuspiciousApplyHost(normalizeHost(url))) {
       log?.layer(layer, `closing suspicious apply tab ${url.slice(0, 90)}`, "warn");
+      await candidate.close().catch(() => {});
+      continue;
+    }
+    if (isOauthProviderHost(url)) {
+      log?.layer(layer, `closing SSO popup (stay on email auth) ${url.slice(0, 90)}`, "warn");
       await candidate.close().catch(() => {});
       continue;
     }

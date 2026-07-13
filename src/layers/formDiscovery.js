@@ -555,6 +555,14 @@ async function scanDom(page, { listingMode = true } = {}) {
       function isContinueAction(meta, blob) {
         if (isJobDescriptionNoise(meta, blob)) return false;
         const text = (meta.text || "").trim();
+        // "Continue with Apple/Google" must not steal email Continue clicks.
+        if (
+          /\b((continue|sign|log)\s+(in\s+)?with\s+(apple|google|facebook|github|microsoft|linkedin|x|twitter)|(sign|log)\s+up\s+with\s+(apple|google|facebook|github|microsoft))\b/i.test(
+            text,
+          )
+        ) {
+          return false;
+        }
         if (/confirm\s*&\s*see jobs|confirm and see jobs/i.test(text)) return true;
         if (meta.inApplyModal) {
           if (/^continue$/i.test(text) || /^next$/i.test(text) || /^proceed$/i.test(text)) return true;
@@ -620,7 +628,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         ) {
           return 0;
         }
-        if (/\bsign in with (x|twitter|google|github)\b/.test(blob)) return 0;
+        if (/\bsign in with (x|twitter|google|github|apple|microsoft|facebook)\b/.test(blob)) return 0;
         let score = 50;
         if (/sign in with email|log in with email/.test(blob)) score += 80;
         if (/sign in now|already a member/.test(blob)) score += 55;
@@ -632,7 +640,7 @@ async function scanDom(page, { listingMode = true } = {}) {
       function scoreSignUpButton(meta) {
         const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
         if (!/\b(sign up|signup|create account|register|get started|join)\b/.test(blob)) return 0;
-        if (/\bsign up with (x|twitter|google|github)\b/.test(blob) && !/email/.test(blob)) return 0;
+        if (/\bsign up with (x|twitter|google|github|apple|microsoft|facebook)\b/.test(blob) && !/email/.test(blob)) return 0;
         let score = 55;
         if (/sign up with email|create account/.test(blob)) score += 75;
         if (/^sign up$|create account|^register$/i.test((meta.text || "").trim())) score += 45;

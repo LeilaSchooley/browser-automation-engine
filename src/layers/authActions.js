@@ -21,6 +21,7 @@ import {
   CAPTCHA_TEXT,
   TWO_FACTOR_TEXT,
 } from "../patterns/index.js";
+import { isOauthProviderHost } from "./applyUrlSafety.js";
 import { fillFirstVisible, fillFirstVisibleTracked, clickRoleMatching, clickSubmitByPatterns } from "./fillPrimitives.js";
 import { inspectPage } from "./formDiscovery.js";
 import { humanPause } from "../human.js";
@@ -76,6 +77,12 @@ export function looksLikeOAuthOnly(snap) {
 }
 
 export function looksLikeHardGate(snap) {
+  if (isOauthProviderHost(snap?.url || snap?.hostname || "")) {
+    return {
+      hard: true,
+      reason: "third-party SSO (Apple/Google/…) — use email Continue on the job site",
+    };
+  }
   const blob = `${snap?.title || ""} ${snap?.pageText || ""} ${snap?.headings || ""}`.toLowerCase();
   if (CAPTCHA_TEXT.test(blob)) {
     return { hard: true, reason: "CAPTCHA / human verification" };

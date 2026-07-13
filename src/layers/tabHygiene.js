@@ -3,7 +3,7 @@
  * Keeps one working page and closes blanks, ads, and abandoned siblings.
  */
 import { normalizeHost } from "../host.js";
-import { isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import { isOauthProviderHost, isSuspiciousApplyHost } from "./applyUrlSafety.js";
 
 const AD_POPUP_HOST_RE =
   /doubleclick|googlesyndication|googleads|adservice|adsystem|taboola|outbrain|popads|propeller|onclicka|clickadu|adsterra|adnxs|criteo/i;
@@ -79,8 +79,12 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
       await closePage(page, "blank");
       continue;
     }
-    if (AD_POPUP_HOST_RE.test(url) || isSuspiciousApplyHost(normalizeHost(url))) {
-      await closePage(page, "ad/suspicious");
+    if (
+      AD_POPUP_HOST_RE.test(url) ||
+      isSuspiciousApplyHost(normalizeHost(url)) ||
+      isOauthProviderHost(url)
+    ) {
+      await closePage(page, isOauthProviderHost(url) ? "sso-popup" : "ad/suspicious");
     }
   }
 

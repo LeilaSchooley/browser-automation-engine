@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import {
   entryHrefScoreDelta,
   isChromeErrorPage,
+  isOauthProviderHost,
   isQueueableApplyUrl,
+  isSocialSsoCta,
   isSuspiciousApplyHost,
   looksLikeAggregatorTrap,
   looksLikeDeadApplyDestination,
@@ -13,6 +15,7 @@ import { classifyApplyStep } from "../src/layers/applyStep.js";
 import { scoreEntryCandidate } from "../src/layers/formDiscovery.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { inspectPage } from "../src/layers/formDiscovery.js";
+import { adoptOpenedPage } from "../src/layers/pageReady.js";
 
 describe("applyUrlSafety", () => {
   it("detects chrome error pages", () => {
@@ -23,6 +26,69 @@ describe("applyUrlSafety", () => {
   it("flags suspicious apply hosts", () => {
     assert.equal(isSuspiciousApplyHost("careersprint.7f.liveblog365.com"), true);
     assert.equal(isSuspiciousApplyHost("jobs.lever.co"), false);
+  });
+
+  it("detects Apple/Google SSO hosts and social CTAs", () => {
+    assert.equal(isOauthProviderHost("https://appleid.apple.com/auth/authorize?client_id=com.indeed.secure"), true);
+    assert.equal(isOauthProviderHost("accounts.google.com"), true);
+    assert.equal(isOauthProviderHost("https://secure.indeed.com/auth"), false);
+    assert.equal(isOauthProviderHost("https://www.linkedin.com/jobs/view/1"), false);
+    assert.equal(isSocialSsoCta("Continue with Apple"), true);
+    assert.equal(isSocialSsoCta("Continue"), false);
+  });
+
+  it("hard-stops classifyApplyStep on Apple SSO pages", () => {
+    const c = classifyApplyStep(
+      {
+        url: "https://appleid.apple.com/auth/authorize?client_id=com.indeed.secure",
+        hostname: "appleid.apple.com",
+        title: "Sign in to Apple Account",
+        pageKind: "auth",
+        fieldCount: 2,
+        emailFieldCount: 1,
+        passwordFieldCount: 1,
+        pageText: "Sign in to Apple Account",
+      },
+      { filled: [] },
+    );
+    assert.equal(c.step, "blocked");
+    assert.equal(c.hardStop, true);
+    assert.match(c.reason, /SSO|Apple|email Continue/i);
+  });
+
+  it("adoptOpenedPage closes Apple SSO popups and keeps Indeed auth", async () => {
+    const closed = [];
+    const indeed = {
+      isClosed: () => false,
+      url: () => "https://secure.indeed.com/auth?from=indapply",
+      context: () => context,
+      bringToFront: async () => {},
+      close: async () => {
+        throw new Error("should not close Indeed tab");
+      },
+    };
+    const apple = {
+      isClosed: () => closed.includes("apple"),
+      url: () =>
+        "https://appleid.apple.com/auth/authorize?client_id=com.indeed.secure&redirect_uri=https%3A%2F%2Fsecure.indeed.com",
+      waitForLoadState: async () => {},
+      title: async () => "Sign in to Apple Account",
+      bringToFront: async () => {},
+      close: async () => {
+        closed.push("apple");
+        list = list.filter((p) => p !== apple);
+      },
+    };
+    let list = [indeed, apple];
+    const context = {
+      pages: () => list.filter((p) => !p.isClosed()),
+    };
+    const known = new Set([indeed]);
+    const adopted = await adoptOpenedPage(indeed, known, { layer() {} });
+    assert.equal(adopted, null);
+    assert.deepEqual(closed, ["apple"]);
+    assert.equal(list.length, 1);
+    assert.equal(list[0], indeed);
   });
 
   it("blocks navigation to suspicious hosts", () => {

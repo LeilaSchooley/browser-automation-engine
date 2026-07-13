@@ -27,7 +27,7 @@ export const SIGN_IN_TEXT =
   /\b(sign in with email|log in with email|sign in|log in|login|continue with email)\b/i;
 
 export const OAUTH_PROVIDER_TEXT =
-  /\b((sign|log|continue) in with (x|twitter|google|github|apple|microsoft)|(sign|log) up with (x|twitter|google|github))\b/i;
+  /\b((continue|sign|log)\s+(in\s+)?with\s+(x|twitter|google|github|apple|microsoft|facebook|linkedin)|(sign|log)\s+up\s+with\s+(x|twitter|google|github|apple|microsoft|facebook))\b/i;
 
 /** Server-side rejection after a login/signup submit. */
 export const AUTH_FAILURE_TEXT =

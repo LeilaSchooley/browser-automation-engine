@@ -14,6 +14,46 @@ export const SEO_JOB_BOARD_HOST_RE = /devitjobs\./i;
 export const SUSPICIOUS_APPLY_HOST_RE =
   /liveblog365|000webhost|blogspot\.|wixsite\.com|weebly\.com|godaddysites\.com|strikingly\.com|tiiny\.site|free\.nf|rf\.gd/i;
 
+/**
+ * Third-party identity hosts opened by "Continue with Apple/Google/…" — never apply targets.
+ * Keep the job-site auth tab; close these popups.
+ */
+export function isOauthProviderHost(hostOrUrl = "") {
+  const raw = String(hostOrUrl || "").trim();
+  if (!raw) return false;
+  let host = raw;
+  let path = "";
+  try {
+    if (/^https?:/i.test(raw) || raw.includes("/")) {
+      const u = new URL(raw, "https://example.com");
+      host = u.hostname;
+      path = `${u.pathname || ""}${u.search || ""}`;
+    }
+  } catch {
+    host = raw;
+  }
+  host = normalizeHost(host);
+  if (!host) return false;
+
+  if (/(?:^|\.)(?:appleid\.apple|idmsa\.apple|account\.apple)\.com$/i.test(host)) return true;
+  if (/(?:^|\.)(?:accounts\.google|myaccount\.google)\.com$/i.test(host)) return true;
+  if (/(?:^|\.)(?:login\.microsoftonline|login\.live)\.com$/i.test(host)) return true;
+  // Facebook / GitHub only when the path is clearly OAuth/login, not careers.
+  if (/(?:^|\.)(?:facebook|fb)\.com$/i.test(host) && /\/(login|dialog|v\d+\.\d+\/dialog)/i.test(path)) {
+    return true;
+  }
+  if (/(?:^|\.)github\.com$/i.test(host) && /\/(login\/oauth|session)/i.test(path)) return true;
+  return false;
+}
+
+/** CTAs that start Facebook/Apple/Google/Microsoft SSO instead of email Continue. */
+export const SOCIAL_SSO_CTA_RE =
+  /\b((continue|sign|log)\s+(in\s+)?with\s+(apple|google|facebook|github|microsoft|linkedin|x|twitter)|(sign|log)\s+up\s+with\s+(apple|google|facebook|github|microsoft))\b/i;
+
+export function isSocialSsoCta(text = "") {
+  return SOCIAL_SSO_CTA_RE.test(String(text || "").trim());
+}
+
 export function isChromeErrorPage(url = "", _title = "") {
   const u = String(url || "");
   if (/^chrome-error:/i.test(u) || /chromewebdata/i.test(u)) return true;

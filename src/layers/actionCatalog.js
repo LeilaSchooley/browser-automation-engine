@@ -31,6 +31,7 @@ import {
 } from "../platformOnboarding.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
+import { isOauthProviderHost } from "./applyUrlSafety.js";
 
 /**
  * @typedef {{ id: string, type: string, score: number, reason: string, targetCandidate?: object, instruction?: string, step?: string }} CatalogAction
@@ -134,10 +135,13 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     });
   }
 
-  if (looksLikeAuthForm(snap)) {
+  if (looksLikeAuthForm(snap) && !isOauthProviderHost(snap.url || snap.hostname || "")) {
     actions.push({ id: "auth_login", type: "auth_login", score: 88, reason: "auth login form", step: "auth" });
   }
-  if (looksLikeSignupForm(snap) || hasIdentityRegistrationFields(snap)) {
+  if (
+    (looksLikeSignupForm(snap) || hasIdentityRegistrationFields(snap)) &&
+    !isOauthProviderHost(snap.url || snap.hostname || "")
+  ) {
     actions.push({ id: "auth_signup", type: "auth_signup", score: 86, reason: "registration form", step: "signup" });
     actions.push({ id: "smart_fill_signup", type: "smart_fill", score: 84, reason: "fill registration fields", step: "signup" });
   }
