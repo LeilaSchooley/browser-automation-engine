@@ -806,15 +806,23 @@ export async function dismissBlockingOverlays(page, log, layer = "page_prep", sn
 
   if (!overlay.hasBlockingOverlay && !(overlay.dismissCandidates || []).length) {
     if (await clickStructuralDismiss(page, log, layer)) return true;
-    // Resume boost modals often lack Skip text + hasBlockingOverlay — still try Escape.
-    if (snap && (isResumeReviewUpsell(snap) || INTERSTITIAL_UPSELL_BODY.test(String(snap.applyModalTitle || snap.pageText || "")))) {
+    // Resume boost modals often lack Skip text + hasBlockingOverlay — try Escape,
+    // but only report success if something actually cleared (avoid Escape loops).
+    if (snap && (isResumeReviewUpsell(snap) || INTERSTITIAL_UPSELL_BODY.test(String(snap.applyModalTitle || "")))) {
       try {
+        const beforeBlocked = Boolean(snap.hasBlockingOverlay || (snap.modalCount || 0) > 0);
         await page.keyboard.press("Escape");
         await humanPause(400, 800);
-        log?.layer(layer, "dismiss: Escape after unmatched resume upsell", "info");
-        return true;
+        const after = await scanBlockingOverlays(page).catch(() => ({ hasBlockingOverlay: beforeBlocked }));
+        if (beforeBlocked && !after.hasBlockingOverlay) {
+          log?.layer(layer, "dismiss: Escape cleared resume upsell", "info");
+          return true;
+        }
+        // No prior overlay flag — Escape is a guess; do not claim progress.
+        log?.layer(layer, "dismiss: Escape had no measurable effect", "warn");
+        return false;
       } catch {
-        /* ignore */
+        return false;
       }
     }
     return false;

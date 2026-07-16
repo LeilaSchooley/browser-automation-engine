@@ -24,6 +24,7 @@ import { attemptObstacleRecovery } from "./obstacleActions.js";
 import { dismissBlockingOverlays, dismissInterstitialDialog } from "./adDismiss.js";
 import { acceptFundingChoicesConsent } from "./fundingChoices.js";
 import { attemptCaptchaSolve } from "./captchaSolve.js";
+import { waitForCaptchaClear } from "../captchaDetect.js";
 import { recoverFromWrongNavigation, getTriedEntryKeys, clickRankedEntry } from "./navigationRecovery.js";
 import { shouldBlockAdvance } from "../gateComplete.js";
 import { shouldNeverDismiss } from "../workflowGates.js";
@@ -61,6 +62,7 @@ export async function executePlan(page, plan, {
   fillResult = null,
   history = [],
   classification = null,
+  shouldStop = null,
 } = {}) {
   let ok = false;
   let entryKey = "";
@@ -369,9 +371,15 @@ export async function executePlan(page, plan, {
     case "clear_obstacle": {
       const obstacle = await attemptObstacleRecovery(page, snap, log);
       ok = obstacle.ok;
-      if (obstacle.hardStop && obstacle.reason?.includes("CAPTCHA")) {
+      if (obstacle.hardStop && /captcha|human verification/i.test(obstacle.reason || "")) {
         const solved = await attemptCaptchaSolve(page, snap, log);
-        ok = solved.ok;
+        if (solved.ok) {
+          ok = true;
+          break;
+        }
+        ok = await waitForCaptchaClear(page, sessionId, {
+          initial: { reason: obstacle.reason, source: "clear_obstacle" },
+        });
       }
       break;
     }
@@ -394,6 +402,7 @@ export async function executePlan(page, plan, {
         instruction,
         log,
         variables: plan.variables,
+        shouldStop,
       });
       ok = sh.ok;
       if (ok) await waitAfterClickTransition(page);

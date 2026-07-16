@@ -1,0 +1,42 @@
+# When smart_fill.js changes on main, notify the autofill extension to vendor a fresh copy.
+# Requires repo secret AUTOFILL_DISPATCH_TOKEN (PAT with repo scope on LeilaSchooley/autofill).
+# If the secret is missing, the daily schedule in autofill still picks up changes.
+
+name: Notify autofill smart-fill sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/smart_fill.js"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch smart-fill-updated to autofill
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFILL_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::AUTOFILL_DISPATCH_TOKEN not set. Autofill daily/manual sync will still update smart-fill.js."
+            exit 0
+          fi
+          REF="${{ github.sha }}"
+          gh api repos/LeilaSchooley/autofill/dispatches \
+            --method POST \
+            --input - <<EOF
+          {
+            "event_type": "smart-fill-updated",
+            "client_payload": {
+              "ref": "$REF",
+              "source": "browser-automation-engine",
+              "sha": "$REF"
+            }
+          }
+          EOF
+          echo "Dispatched smart-fill-updated to LeilaSchooley/autofill (ref=$REF)"

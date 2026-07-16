@@ -1,4 +1,4 @@
-import { getSettings } from "../runtime.js";
+import { getRuntime, getSettings } from "../runtime.js";
 import { isCloudflarePage, waitForCloudflareClear, gotoWithCloudflareRetry } from "../cloudflare.js";
 import { humanPause } from "../human.js";
 import { runSmartFill } from "../smartFill.js";
@@ -12,6 +12,7 @@ import { initEventLog, recordEngineEvent, resetLlmMetrics } from "../observabili
 import { resetPagePerception } from "./pagePerception.js";
 import { attachNetworkSkillCapture, tryDirectoryApiFastPath } from "../networkSkills.js";
 import { normalizeHost } from "../host.js";
+import { isBlankOrNewTabUrl, preferAtsWorkingPage, pruneExtraPages } from "./tabHygiene.js";
 
 /** Prefer a concrete submit path over a bare homepage when provided. */
 export function resolveStartUrl(url, submitUrl) {
@@ -71,25 +72,30 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory = 
 
 /**
  * Unified automation pipeline — navigation then dynamic agent loop.
+ * @param {object} opts
+ * @param {boolean} [opts.resumeFromCurrentPage] — skip goto; continue from the open tab (AdsPower resume).
  */
-export async function runPipeline(page, { url, submitUrl, context = {}, log, sessionId = null, shouldStop = null, entryLabel = "Apply" } = {}) {
+export async function runPipeline(page, { url, submitUrl, context = {}, log, sessionId = null, shouldStop = null, entryLabel = null, resumeFromCurrentPage = false } = {}) {
   if (!url) throw new Error("runPipeline requires url");
 
   let networkCapture = null;
+  let workingPage = page;
   try {
   resetPagePerception();
   resetLlmMetrics();
   if (sessionId) initEventLog(sessionId);
-  recordEngineEvent("pipeline_start", { url, sessionId });
+  recordEngineEvent("pipeline_start", { url, sessionId, resumeFromCurrentPage: !!resumeFromCurrentPage });
   const startUrl = resolveStartUrl(url, submitUrl || context?.submitUrl);
   if (startUrl !== url) {
     log.layer("navigate", `using submit URL ${startUrl}`, "info");
   }
 
   const settings = getSettings();
+  const activeProfile = getRuntime().profile;
+  const activeEntryLabel = entryLabel || activeProfile?.entryLabel || "Apply";
   if (settings.network_skills_enabled || settings.listing_mode || process.env.NETWORK_SKILLS_ENABLED === "1") {
     try {
-      networkCapture = attachNetworkSkillCapture(page, {
+      networkCapture = attachNetworkSkillCapture(workingPage, {
         hostname: normalizeHost(startUrl),
         log,
       });
@@ -98,23 +104,60 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     }
     await tryDirectoryApiFastPath(
       { url: startUrl, targetHost: normalizeHost(startUrl) },
-      { intent: settings.listing_mode ? "submit_listing" : "submit_application", log },
+      {
+        intent:
+          settings.workflow_intent ||
+          activeProfile?.intent ||
+          (settings.listing_mode ? "submit_listing" : "submit_application"),
+        log,
+      },
     ).catch(() => {});
   }
 
-  log.step("navigate", `Loading ${startUrl}`);
-  await gotoWithCloudflareRetry(page, startUrl, { sessionId });
-  await humanPause(800, 1500);
-
-  const afterNav = await waitForApplySurface(page, log, { timeoutMs: 28000 });
-  logPageSnapshot(log, afterNav, "navigate");
-  log.layer("navigate", `loaded ${page.url()}`, "info");
-
-  if (await isCloudflarePage(page)) {
-    log.layer("cloudflare", "challenge detected — waiting", "warn");
-    await waitForCloudflareClear(page, sessionId);
+  // Prefer an employer ATS tab when resuming a multi-tab AdsPower profile.
+  if (resumeFromCurrentPage) {
+    try {
+      const preferred = await preferAtsWorkingPage(workingPage.context(), workingPage);
+      if (preferred) workingPage = preferred;
+      await pruneExtraPages(workingPage.context(), workingPage, { log, maxPages: 3 }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
   }
 
+  let currentUrl = "";
+  try {
+    currentUrl = workingPage.url() || "";
+  } catch {
+    currentUrl = "";
+  }
+  const canResume =
+    resumeFromCurrentPage &&
+    /^https?:/i.test(currentUrl) &&
+    !isBlankOrNewTabUrl(currentUrl);
+
+  if (canResume) {
+    log.step("navigate", `Resuming on open page ${currentUrl.slice(0, 140)}`);
+    log.layer("navigate", "skip goto — continuing from current browser tab", "info");
+  } else {
+    if (resumeFromCurrentPage) {
+      log.layer("navigate", "resume requested but no live page — loading apply URL", "warn");
+    }
+    log.step("navigate", `Loading ${startUrl}`);
+    await gotoWithCloudflareRetry(workingPage, startUrl, { sessionId });
+    await humanPause(800, 1500);
+  }
+
+  const afterNav = await waitForApplySurface(workingPage, log, { timeoutMs: 28000 });
+  logPageSnapshot(log, afterNav, "navigate");
+  log.layer("navigate", `loaded ${workingPage.url()}`, "info");
+
+  if (await isCloudflarePage(workingPage)) {
+    log.layer("cloudflare", "challenge detected — waiting", "warn");
+    await waitForCloudflareClear(workingPage, sessionId);
+  }
+
+  const agentStartUrl = canResume ? workingPage.url() : startUrl;
   const agentContext = enrichContextWithLearnings(
     {
       ...context,
@@ -139,17 +182,17 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
 
   let agentResult;
   if (getSettings().agent_enabled) {
-    agentResult = await runAutomationAgent(page, agentContext, log, {
-      url: startUrl,
+    agentResult = await runAutomationAgent(workingPage, agentContext, log, {
+      url: agentStartUrl,
       submitUrl: submitUrl || context?.submitUrl,
       sessionId,
       shouldStop,
     });
   } else {
     log.step("page_prep", "Linear prep (agent disabled)…");
-    const prep = await preparePageForApply(page, url, log);
-    const fillResult = await runSmartFill(page, context, log, { sessionId });
-    const snap = await inspectPage(page);
+    const prep = await preparePageForApply(workingPage, url, log);
+    const fillResult = await runSmartFill(workingPage, context, log, { sessionId });
+    const snap = await inspectPage(workingPage);
     agentResult = {
       prep,
       fillResult,
@@ -160,7 +203,7 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
   }
 
   const { prep, fillResult, snap, history, agentSteps } = agentResult;
-  const activePage = agentResult.page || page;
+  const activePage = agentResult.page || workingPage;
 
   log.layer(
     "agent",
@@ -180,13 +223,21 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     log.layer("agent", `trail: ${trail}`, "debug");
   }
 
-  const readyMessage = buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory: history, entryLabel });
+  const readyMessage = buildReadyMessage({
+    fillResult,
+    snap,
+    prep,
+    agentSteps,
+    agentHistory: history,
+    entryLabel: activeEntryLabel,
+  });
 
   recordEngineEvent("pipeline_end", {
     sessionId,
     agentSteps,
     filled: fillResult.filled?.length || 0,
     pageKind: snap.pageKind,
+    resumed: canResume,
   });
 
   return {
@@ -198,6 +249,7 @@ export async function runPipeline(page, { url, submitUrl, context = {}, log, ses
     agentSteps,
     agentHistory: history,
     page: activePage,
+    resumed: canResume,
   };
   } finally {
     try {

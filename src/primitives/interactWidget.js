@@ -39,7 +39,9 @@ export async function interactWidget(page, spec, value, handlers, opts = {}) {
   if (widgetType === "combobox" || mappedTo === "salary" || mappedTo === "custom") {
     ok = await handlers.combobox(page, spec, value, log, snap);
   } else if (widgetType === "select") {
-    ok = await handlers.select(page, spec.labelRe, value, log, snap);
+    ok = await handlers.select(page, spec, value, log, snap);
+  } else if (widgetType === "checkbox") {
+    ok = await (handlers.checkbox || handlers.radio)(page, spec, value, log, snap);
   } else if (widgetType === "typeahead") {
     ok = await handlers.typeahead(page, spec.labelRe, value, log, snap);
   } else if (widgetType === "radio") {
@@ -51,7 +53,7 @@ export async function interactWidget(page, spec, value, handlers, opts = {}) {
   } else if (widgetType === "contenteditable") {
     ok = await handlers.contenteditable(page, spec.labelRe, value, log);
   } else {
-    ok = await handlers.text(page, spec.labelRe, value, log);
+    ok = await handlers.text(page, spec, value, log, snap);
   }
 
   if (!ok) return { ok: false, committed: false };

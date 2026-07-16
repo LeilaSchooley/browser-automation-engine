@@ -1,7 +1,38 @@
 import { normalizeHost } from "../host.js";
 import { looksLikeClosedJobListing } from "../heuristics.js";
-import { CLOSED_JOB_URL_RE, SEO_AGGREGATOR_HOST_RE } from "../patterns/listing.js";
+import { CLOSED_JOB_URL_RE, JOB_BOARD_HOST_RE, SEO_AGGREGATOR_HOST_RE } from "../patterns/listing.js";
 import { looksLikeScrapedMirrorUrl } from "./applyUrlHealth.js";
+
+/** Employer / ATS application hosts — never prune these tabs under a tab-cap. */
+export const EMPLOYER_ATS_HOST_RE =
+  /(^|\.)(jobs\.)?lever\.co$|(^|\.)(boards|job-boards)\.greenhouse\.io$|(^|\.)jobs\.ashbyhq\.com$|(^|\.)(.*\.)?myworkdayjobs\.com$|(^|\.)(.*\.)?wd\d+\.myworkdayjobs\.com$|(^|\.)jobs\.workable\.com$|(^|\.)apply\.workable\.com$|(^|\.)(.*\.)?greenhouse\.io$|(^|\.)(.*\.)?ashbyhq\.com$|(^|\.)(.*\.)?smartrecruiters\.com$|(^|\.)(.*\.)?jobvite\.com$|(^|\.)(.*\.)?icims\.com$|(^|\.)(.*\.)?bamboohr\.com$|(^|\.)(.*\.)?recruitee\.com$|(^|\.)(.*\.)?personio\.(de|com)$|(^|\.)(.*\.)?ultipro\.com$/i;
+
+export function isEmployerAtsHost(hostOrUrl = "") {
+  const raw = String(hostOrUrl || "").trim();
+  if (!raw) return false;
+  let host = raw;
+  try {
+    if (/^https?:/i.test(raw) || raw.includes("/")) {
+      host = new URL(raw, "https://example.com").hostname;
+    }
+  } catch {
+    host = raw;
+  }
+  host = normalizeHost(host);
+  if (!host) return false;
+  if (EMPLOYER_ATS_HOST_RE.test(host)) return true;
+  if (JOB_BOARD_HOST_RE.test(host)) return true;
+  return false;
+}
+
+export function isEmployerAtsUrl(url = "") {
+  return isEmployerAtsHost(url);
+}
+
+/** Board membership / product onboard URLs — safe to close when under tab pressure. */
+export function isBoardOnboardUrl(url = "") {
+  return /\/onboard(?:ing)?(?:-v\d+)?(?:\/|\?|$)/i.test(String(url || ""));
+}
 
 /** SEO job mirrors that chain outbound “apply” links instead of hosting forms. */
 export const AGGREGATOR_HOST_RE =

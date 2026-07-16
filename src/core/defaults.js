@@ -1,0 +1,53 @@
+/**
+ * Domain-neutral runtime defaults.
+ *
+ * Product policy (apply review, directory listing, signup/email verification)
+ * belongs to a profile. The legacy root defaults compose this object with
+ * compatibility policy in ../defaults.js.
+ */
+export const CORE_DEFAULT_SETTINGS = Object.freeze({
+  browser_human_behavior: true,
+  human_type_delay_min: 45,
+  human_type_delay_max: 130,
+  human_timing_scale: 1.25,
+  human_long_text_threshold: 80,
+  smart_fill_passes: 3,
+  ai_fill_enabled: false,
+  agent_enabled: true,
+  agent_max_steps: 24,
+  agent_max_no_progress: 4,
+  agent_ai: false,
+  action_validator: true,
+  reflection_enabled: true,
+  run_history_path: "",
+  skill_proposals_path: "",
+  situation_skills_enabled: true,
+  validator_detect_noop: true,
+  objective_mode: true,
+  cloudflare_wait_enabled: true,
+  cloudflare_wait_timeout_sec: 120,
+  captcha_wait_enabled: true,
+  captcha_wait_timeout_sec: 300,
+  site_mappings_path: "",
+  site_learnings_path: "",
+  site_accounts_path: "",
+  browser_sessions_dir: "",
+  vision_fallback_enabled: false,
+  vision_include_screenshot: true,
+  layout_context_enabled: true,
+  early_vision_escalation: true,
+  action_brain_mode: "",
+  deterministic_first: true,
+  action_catalog_first: true,
+  network_skills_enabled: false,
+  api_skills_path: "",
+  unbrowse_enabled: false,
+  page_perception_enabled: true,
+  event_log_dir: "",
+  debug_screenshots_enabled: false,
+  stagehand_enabled: false,
+  stagehand_model: "",
+  stagehand_cache_enabled: true,
+  captcha_solver_enabled: false,
+  captcha_solver_url: "",
+});

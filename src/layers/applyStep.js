@@ -40,6 +40,8 @@ import {
   isExpertReviewGate,
   isResumeChoiceStep,
   isResumeReviewUpsell,
+  dismissLoopStalled,
+  continueLoopStalled,
   pageFingerprintFromSnap,
   shouldPreferUpload,
   uploadAlreadySucceeded,
@@ -57,8 +59,10 @@ import {
   looksLikeJobAlertSignupForm,
   looksLikeApplySignupGate,
   looksLikeGoogleVignetteAd,
+  boardLeaveSucceeded,
+  shouldBlockBoardSignupAfterLeave,
 } from "../heuristics.js";
-import { looksLikePlatformOnboarding, platformOnboardingIncomplete, looksLikeJobBoardWelcomeConfirm, welcomeConfirmCta, looksLikeDidYouApplyPrompt, didYouApplyDeclineCta } from "../platformOnboarding.js";
+import { looksLikePlatformOnboarding, platformOnboardingIncomplete, looksLikeJobBoardWelcomeConfirm, welcomeConfirmCta, looksLikeDidYouApplyPrompt, didYouApplyDeclineCta, looksLikeBoardSignupOnboarding } from "../platformOnboarding.js";
 import { BLOCKED_TEXT } from "../patterns/index.js";
 
 /** Maps step type → default agent action. */
@@ -495,6 +499,18 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   }
 
   if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) {
+    // Don't keep Escape-dismiss when Apply is still available and dismiss already failed.
+    if (dismissLoopStalled(history, 2) && (snap.entryCount || 0) > 0) {
+      const top = snap.entryCandidates?.[0];
+      return {
+        step: "entry",
+        confidence: "high",
+        reason: `dismiss loop broken — apply CTA: ${top?.text || "Apply"}`,
+        target: top || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
     const top = findBestDismissCandidate(snap) || snap.dismissCandidates?.[0];
     return {
       step: "overlay",
@@ -517,6 +533,53 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
       step: "entry",
       confidence: "high",
       reason: `job board index — pick listing for ${label}${at}`,
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  // Board membership wizard (/onboard/) — not the employer job application.
+  if (looksLikeBoardSignupOnboarding(snap)) {
+    const recoveryTries = (history || []).filter((h) => h.action === "nav_recovery").length;
+    const continueLoops = continueLoopStalled(history, fillResult, 2);
+    if (recoveryTries >= 1 || continueLoops || boardLeaveSucceeded(history)) {
+      return {
+        step: "blocked",
+        confidence: "high",
+        reason: "board signup/onboarding wizard — not the job application (manual handoff)",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    return {
+      step: "nav_recovery",
+      confidence: "high",
+      reason: "board signup onboarding — leave wizard, return to job listing",
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  // After leaving board onboard, never re-enter via Sign Up on the board listing.
+  if (shouldBlockBoardSignupAfterLeave(history, snap) && (looksLikeSignupEntry(snap) || (snap.signUpCount || 0) > 0)) {
+    if ((snap.entryCount || 0) > 0) {
+      const top = snap.entryCandidates?.[0];
+      return {
+        step: "entry",
+        confidence: "high",
+        reason: `board leave done — skip Sign Up, prefer Apply: ${top?.text || "Apply"}`,
+        target: top || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    return {
+      step: "blocked",
+      confidence: "high",
+      reason: "board leave done — Sign Up would re-enter onboard (handoff)",
       target: null,
       affordances,
       fingerprint: fp,
@@ -1019,6 +1082,26 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
         step: "form",
         confidence: "high",
         reason: "preferences incomplete — fill before continue",
+        target: null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+    if (continueLoopStalled(history, fillResult, 3) && (fillResult?.filled?.length || 0) === 0) {
+      if ((history || []).some((h) => h.action === "nav_recovery")) {
+        return {
+          step: "blocked",
+          confidence: "high",
+          reason: "continue loop with no fills — handoff",
+          target: null,
+          affordances,
+          fingerprint: fp,
+        };
+      }
+      return {
+        step: "nav_recovery",
+        confidence: "high",
+        reason: "continue loop with no fills — recover navigation",
         target: null,
         affordances,
         fingerprint: fp,

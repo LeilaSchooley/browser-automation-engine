@@ -7,6 +7,7 @@ import {
   looksLikeClosedJobListing,
   looksLikeJobAlertSignupForm,
   looksLikeMarketingYesNoModal,
+  boardLeaveSucceeded,
 } from "./heuristics.js";
 import {
   recordSiteLearning,
@@ -15,9 +16,13 @@ import {
   mergeModalSelectors,
   mergeControlSkills,
   mergeAffordanceSkills,
+  mergeSituationSkills,
   normalizeFieldHints,
   stableAuthSelector,
 } from "./siteLearnings.js";
+import { enqueueSkillProposal } from "./skillProposals.js";
+import { recordEngineEvent } from "./observability.js";
+import { getSettings } from "./runtime.js";
 
 /** smart_fill internal type → buildFillConfig key */
 const FILL_TYPE_TO_CONFIG_KEY = {
@@ -61,7 +66,7 @@ export function fieldHintsFromFilled(filled = []) {
       entry.widgetType === "yesno" ||
       entry.widgetType === "radio" ||
       entry.widgetType === "select" ||
-      ["visasponsorship", "workauthorization", "eeocgender", "eeocrace", "eeocveteran", "eeocdisability"].includes(
+      ["visasponsorship", "workauthorization", "policyack", "eeocgender", "eeocrace", "eeocveteran", "eeocdisability"].includes(
         String(entry.mappedTo || type).toLowerCase(),
       );
     if (isAppControl) {
@@ -281,7 +286,75 @@ export function synthesizeLearningsFromRun({
     Object.assign(patch, reflection);
   }
 
+  const situations = harvestSituationSkills({ history, snap, host, outcome });
+  if (situations.skills?.length) {
+    patch.situationSkills = mergeSituationSkills([], situations.skills);
+    recordEngineEvent("skill_harvest", {
+      host,
+      count: situations.skills.length,
+      signatures: situations.skills.map((s) => s.signature),
+    });
+  }
+  for (const proposal of situations.proposals || []) {
+    enqueueSkillProposal({ host, ...proposal });
+  }
+
   return { host, patch };
+}
+
+/**
+ * Harvest situation skills from board traps / clear recovery patterns.
+ */
+export function harvestSituationSkills({ history = [], snap = null, host = "", outcome = "partial" } = {}) {
+  const skills = [];
+  const proposals = [];
+
+  if (boardLeaveSucceeded(history)) {
+    skills.push({
+      signature: "board_signup_onboarding",
+      action: "nav_recovery",
+      avoidActions: ["click_continue", "click_signup"],
+      urlPattern: "/onboard",
+      bodyHints: ["how long have you been searching", "find your dream job"],
+      priority: 92,
+      confidence: "high",
+      successCount: 1,
+      hostPattern: host,
+    });
+    const signupAfter = history.some(
+      (h, i) =>
+        h.action === "click_signup" &&
+        history.slice(0, i).some((x) => /leave_board/i.test(String(x.source || ""))),
+    );
+    if (signupAfter || outcome === "failed" || outcome === "review") {
+      skills.push({
+        signature: "board_leave_skip_signup",
+        action: "click_apply",
+        avoidActions: ["click_signup"],
+        priority: 90,
+        confidence: "high",
+        successCount: 1,
+        hostPattern: host,
+      });
+    }
+  }
+
+  const continues = history.filter((h) => h.action === "click_continue");
+  if (continues.length >= 3 && history.filter((h) => h.action === "smart_fill" && h.progress).length === 0) {
+    proposals.push({
+      evidence: `click_continue×${continues.length} with no fill progress`,
+      skill: {
+        signature: "continue_loop_no_fill",
+        action: "smart_fill",
+        avoidActions: ["click_continue"],
+        priority: 70,
+        confidence: "medium",
+        successCount: 1,
+      },
+    });
+  }
+
+  return { skills, proposals };
 }
 
 /**
@@ -303,13 +376,48 @@ export function reflectFromHistory(history = [], snap = null) {
   else if (act === "click_continue" || act === "click_apply") suggestedNext = "smart_fill";
   else if (act === "dismiss_overlay") suggestedNext = "click_continue";
   else if (act === "stagehand_act") suggestedNext = "wait_user";
+  else if (act === "click_signup" && boardLeaveSucceeded(history)) suggestedNext = "wait_user";
   else if (snap?.entryCount > 0) suggestedNext = "click_apply";
   else if ((snap?.fileInputCount || 0) > 0) suggestedNext = "upload_resume";
+
+  const proposedSkills = [];
+  if (act === "click_signup" && boardLeaveSucceeded(history)) {
+    proposedSkills.push({
+      signature: "board_leave_skip_signup",
+      action: "wait_user",
+      avoidActions: ["click_signup"],
+      priority: 88,
+      confidence: "high",
+      successCount: 1,
+    });
+  } else if (failedActions.includes("click_continue") && failedActions.length >= 2) {
+    proposedSkills.push({
+      signature: "stalled_continue",
+      action: suggestedNext,
+      avoidActions: ["click_continue"],
+      priority: 65,
+      confidence: "medium",
+      successCount: 1,
+    });
+  }
+
+  if (getSettings().reflection_enabled !== false) {
+    for (const skill of proposedSkills) {
+      if (skill.confidence !== "high") {
+        enqueueSkillProposal({
+          host: normalizeHost(snap?.hostname || ""),
+          evidence: `stall on ${act}; failed=${failedActions.join(",")}`,
+          skill,
+        });
+      }
+    }
+  }
 
   return {
     lastStallReason: String(lastStall?.reason || lastStall?.action || "stalled").slice(0, 200),
     failedActions,
     suggestedNext,
+    proposedSituationSkills: proposedSkills.length ? proposedSkills : undefined,
     reflectedAt: new Date().toISOString(),
   };
 }
@@ -320,11 +428,23 @@ export function reflectFromHistory(history = [], snap = null) {
  */
 export function recordLearningsFromRun(args = {}) {
   if (!shouldRecordLearnings(args)) {
-    // Still record reflection on failed/review runs even when fill is thin.
     if (args.outcome === "failed" || args.outcome === "review") {
       const reflection = reflectFromHistory(args.history || [], args.snap || null);
       const host = normalizeHost(args.hostname || "");
-      if (host && reflection) return recordSiteLearning(host, reflection);
+      const situations = harvestSituationSkills({
+        history: args.history || [],
+        snap: args.snap || null,
+        host,
+        outcome: args.outcome,
+      });
+      const patch = { ...(reflection || {}) };
+      if (situations.skills?.length) {
+        patch.situationSkills = mergeSituationSkills([], situations.skills);
+      }
+      for (const proposal of situations.proposals || []) {
+        enqueueSkillProposal({ host, ...proposal });
+      }
+      if (host && Object.keys(patch).length) return recordSiteLearning(host, patch);
     }
     return null;
   }

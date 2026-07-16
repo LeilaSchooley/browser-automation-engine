@@ -16,7 +16,7 @@ import {
 } from "../heuristics.js";
 import { JOB_BOARD_HOST_RE, JOB_BOARD_PAGE_BODY } from "../patterns/listing.js";
 import { hasPreferencesGateFields, getPreferencesFromContext } from "../fillPreferences.js";
-import { looksLikePlatformOnboarding, looksLikeJobBoardWelcomeConfirm, looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
+import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding, looksLikeJobBoardWelcomeConfirm, looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 import {
   buildApplicationControlsStagehandInstruction,
   hasUnfilledApplicationControls,
@@ -70,6 +70,7 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
   }
   if (looksLikeApplySignupGate(snap)) return false;
   if (looksLikePlatformOnboarding(snap)) return false;
+  if (looksLikeBoardSignupOnboarding(snap)) return false;
   if (looksLikeJobBoardWelcomeConfirm(snap)) return false;
   if (looksLikeDidYouApplyPrompt(snap)) return false;
   if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) return false;

@@ -62,6 +62,17 @@ export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk,
   if (customFill && signals.filledDelta > 0 && !signals.commitCompleted && !signals.salaryCommittedDelta && !signals.pickerClosed) {
     return false;
   }
+  // Board wizard Next that only advances ?step= with no fills is not progress.
+  if (
+    plan?.type === "click_continue" &&
+    signals.urlChanged &&
+    signals.filledDelta === 0 &&
+    !(signals.fieldCountDelta > 0) &&
+    !(signals.fileInputDelta > 0) &&
+    !signals.modalAppeared
+  ) {
+    return false;
+  }
   return (
     signals.urlChanged ||
     signals.fieldCountDelta > 0 ||

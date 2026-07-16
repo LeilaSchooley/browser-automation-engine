@@ -49,6 +49,40 @@ describe("closed job + Jobright Orion", () => {
     assert.equal(isResumeReviewUpsell(snap), true);
     assert.equal(textMatchesInterstitialDismiss("EXIT"), true);
   });
+
+  it("does not treat listing chrome with Apply Now as resume upsell", () => {
+    const snap = {
+      pageKind: "listing",
+      pageText:
+        "Data Operations Associate Apply Now Subscribe to job alerts Boost your career newsletter signup",
+      entryCount: 1,
+      entryCandidates: [{ text: "Apply Now", score: 107 }],
+      hasBlockingOverlay: false,
+      modalCount: 0,
+      hasApplyModal: false,
+      dismissCandidates: [],
+    };
+    assert.equal(isResumeReviewUpsell(snap), false);
+  });
+
+  it("breaks dismiss loop toward Apply when entry remains", async () => {
+    const { dismissLoopStalled } = await import("../src/heuristics.js");
+    const history = [
+      { action: "dismiss_overlay", progress: false, ok: true },
+      { action: "dismiss_overlay", progress: false, ok: true },
+    ];
+    assert.equal(dismissLoopStalled(history, 2), true);
+    const snap = {
+      pageText: "Apply Now Subscribe",
+      entryCount: 1,
+      entryCandidates: [{ text: "Apply Now", score: 100 }],
+      hasBlockingOverlay: false,
+      modalCount: 0,
+    };
+    const c = classifyApplyStep(snap, {}, history, {});
+    // Without upsell signals, classification should prefer entry — or at least not overlay-only loop.
+    assert.notEqual(c.step, "overlay");
+  });
 });
 
 describe("action-driven picker retrieval", () => {

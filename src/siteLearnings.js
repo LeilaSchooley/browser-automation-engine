@@ -275,6 +275,144 @@ export function mergeAffordanceSkills(prev = [], next = []) {
     .slice(0, 24);
 }
 
+function situationKey(skill) {
+  return `${String(skill.signature || "").toLowerCase()}::${String(skill.action || "").toLowerCase()}`;
+}
+
+export function mergeSituationSkills(prev = [], next = []) {
+  const map = new Map();
+  for (const s of [...(Array.isArray(prev) ? prev : []), ...(Array.isArray(next) ? next : [])]) {
+    if (!s || typeof s !== "object" || !s.signature || !s.action) continue;
+    const key = situationKey(s);
+    const existing = map.get(key);
+    if (existing) {
+      map.set(key, {
+        ...existing,
+        ...s,
+        id: existing.id || s.id,
+        successCount: (existing.successCount || 0) + (s.successCount || 1),
+        avoidActions: [...new Set([...(existing.avoidActions || []), ...(s.avoidActions || [])])],
+        bodyHints: [...new Set([...(existing.bodyHints || []), ...(s.bodyHints || [])])].slice(0, 12),
+        priority: Math.max(existing.priority || 0, s.priority || 0),
+        lastUsed: s.lastUsed || existing.lastUsed,
+      });
+    } else {
+      map.set(key, {
+        id: s.id || `skill_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        successCount: s.successCount || 1,
+        confidence: s.confidence || "medium",
+        priority: s.priority ?? 60,
+        avoidActions: s.avoidActions || [],
+        bodyHints: s.bodyHints || [],
+        ...s,
+      });
+    }
+  }
+  return [...map.values()]
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0) || (b.successCount || 0) - (a.successCount || 0))
+    .slice(0, 24);
+}
+
+/** Built-in cold-start situation skills for known board traps. */
+export function seedSituationSkillsForHost(hostname = "") {
+  const host = normalizeHost(hostname);
+  if (!host) return [];
+  if (/remoterocketship\.com$/i.test(host)) {
+    return [
+      {
+        id: "seed_rr_board_onboard",
+        signature: "board_signup_onboarding",
+        action: "nav_recovery",
+        avoidActions: ["click_continue", "click_signup"],
+        hostPattern: "remoterocketship.com",
+        urlPattern: "/onboard",
+        bodyHints: ["how long have you been searching", "find your dream job", "looking for my first remote"],
+        priority: 95,
+        confidence: "high",
+        successCount: 2,
+      },
+      {
+        id: "seed_rr_skip_signup_after_leave",
+        signature: "board_leave_skip_signup",
+        action: "click_apply",
+        avoidActions: ["click_signup"],
+        hostPattern: "remoterocketship.com",
+        bodyHints: ["apply now", "sign up"],
+        priority: 90,
+        confidence: "high",
+        successCount: 2,
+      },
+    ];
+  }
+  return [];
+}
+
+/**
+ * Rank situation skills for the current page.
+ * @returns {object[]}
+ */
+export function findRelevantSkills(snap, siteLearnings = null, { limit = 5, hostname = "" } = {}) {
+  const host = normalizeHost(hostname || snap?.hostname || snap?.url || "");
+  const seeds = seedSituationSkillsForHost(host);
+  const stored = siteLearnings?.situationSkills || [];
+  const skills = mergeSituationSkills(seeds, stored);
+  if (!skills.length) return [];
+
+  const url = String(snap?.url || "");
+  const body = `${snap?.title || ""} ${snap?.pageText || ""} ${snap?.headings || ""}`.toLowerCase();
+
+  const scored = skills.map((skill) => {
+    let score = Number(skill.priority) || 50;
+    score += Math.min(20, (skill.successCount || 0) * 3);
+    if (skill.confidence === "high") score += 15;
+    else if (skill.confidence === "medium") score += 5;
+    if (skill.hostPattern && host.includes(String(skill.hostPattern).toLowerCase())) score += 20;
+    if (skill.urlPattern) {
+      try {
+        if (new RegExp(skill.urlPattern, "i").test(url)) score += 35;
+      } catch {
+        if (url.toLowerCase().includes(String(skill.urlPattern).toLowerCase())) score += 25;
+      }
+    }
+    for (const hint of skill.bodyHints || []) {
+      if (hint && body.includes(String(hint).toLowerCase())) score += 12;
+    }
+    if (skill.signature && body.includes(String(skill.signature).replace(/_/g, " "))) score += 8;
+    return { ...skill, _retrieveScore: score };
+  });
+
+  return scored
+    .sort((a, b) => (b._retrieveScore || 0) - (a._retrieveScore || 0))
+    .slice(0, limit);
+}
+
+/**
+ * High-confidence situation skill that maps to an executable catalog type.
+ */
+export function findSituationMemoryPlan(snap, siteLearnings, catalogActions = []) {
+  const relevant = findRelevantSkills(snap, siteLearnings, { limit: 3 });
+  const top = relevant.find(
+    (s) =>
+      s.confidence === "high" &&
+      (s.successCount || 0) >= 2 &&
+      (s._retrieveScore || 0) >= 90,
+  );
+  if (!top) return null;
+  const match =
+    (catalogActions || []).find((a) => a.type === top.action) ||
+    (top.action
+      ? { type: top.action, reason: `situation memory — ${top.signature}`, score: top._retrieveScore }
+      : null);
+  if (!match) return null;
+  return {
+    ...match,
+    reason: match.reason || `situation memory — ${top.signature}`,
+    source: "situation-memory",
+    situationSkillId: top.id,
+    avoidActions: top.avoidActions || [],
+  };
+}
+
 export function interactiveMatchesSignature(item, signature) {
   if (!item || !signature) return false;
   const sig = affordanceSignature(item);
@@ -408,6 +546,9 @@ export function recordSiteLearning(hostname, patch) {
   if (patch.affordanceSkills) {
     merged.affordanceSkills = mergeAffordanceSkills(prev.affordanceSkills, patch.affordanceSkills);
   }
+  if (patch.situationSkills) {
+    merged.situationSkills = mergeSituationSkills(prev.situationSkills, patch.situationSkills);
+  }
 
   store.hosts[key] = {
     ...merged,
@@ -438,6 +579,7 @@ export function learningsAsSiteMappings() {
         authSelectors: data.authSelectors || {},
         controlSkills: data.controlSkills || [],
         affordanceSkills: data.affordanceSkills || [],
+        situationSkills: data.situationSkills || [],
         dismissFirst: data.dismissFirst || false,
         avoidFillWhenAlert: data.avoidFillWhenAlert || false,
         skipAggregatorApply: data.skipAggregatorApply || false,

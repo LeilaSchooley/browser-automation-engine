@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Lever — company affiliation cards</title>
+  </head>
+  <body>
+    <form class="application-form">
+      <ul>
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Are you a current or former employee of the Trevor Project?<span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label><input type="radio" name="cards[0][emp]" value="Yes" /><span>Yes</span></label>
+              </li>
+              <li>
+                <label><input type="radio" name="cards[0][emp]" value="No" /><span>No</span></label>
+              </li>
+            </ul>
+          </div>
+        </li>
+        <li class="application-question custom-question">
+          <div class="application-label">
+            If you are a current employee of the Trevor Project, have you been in your position for at
+            least one year?
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label><input type="radio" name="cards[0][ten]" value="Yes" /><span>Yes</span></label>
+              </li>
+              <li>
+                <label><input type="radio" name="cards[0][ten]" value="No" /><span>No</span></label>
+              </li>
+            </ul>
+          </div>
+        </li>
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Are you currently a volunteer for The Trevor Project?<span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label><input type="radio" name="cards[0][vol]" value="Yes" /><span>Yes</span></label>
+              </li>
+              <li>
+                <label><input type="radio" name="cards[0][vol]" value="No" /><span>No</span></label>
+              </li>
+            </ul>
+          </div>
+        </li>
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Are you currently a contractor through a third party for The Trevor Project?<span
+              class="required"
+              >*</span
+            >
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label><input type="radio" name="cards[0][con]" value="Yes" /><span>Yes</span></label>
+              </li>
+              <li>
+                <label><input type="radio" name="cards[0][con]" value="No" /><span>No</span></label>
+              </li>
+            </ul>
+          </div>
+        </li>
+        <li class="application-question custom-question">
+          <div class="application-label full-width textarea">
+            <div class="text">
+              Are you currently related to an employee of The Trevor Project? If so, to whom, and what
+              is the relation?<span class="required">✱</span>
+            </div>
+          </div>
+          <div class="application-field full-width required-field">
+            <textarea class="card-field-input" name="cards[0][rel]" required></textarea>
+          </div>
+        </li>
+      </ul>
+    </form>
+  </body>
+</html>

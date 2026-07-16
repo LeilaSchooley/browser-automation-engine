@@ -5,6 +5,8 @@ import {
   isBrowserUnreachablePage,
   isOauthProviderHost,
   isSuspiciousApplyHost,
+  isEmployerAtsUrl,
+  isBoardOnboardUrl,
 } from "./applyUrlSafety.js";
 import { isBlankOrNewTabUrl, pruneExtraPages } from "./tabHygiene.js";
 
@@ -39,8 +41,9 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
   const fresh = pages.filter((p) => p !== page && !knownPages.has(p) && !p.isClosed());
   if (!fresh.length) return null;
 
-  let adopted = null;
-  for (const candidate of fresh.reverse()) {
+  // Prefer employer ATS tabs over board onboard / marketing tabs.
+  const ranked = [];
+  for (const candidate of fresh) {
     let url = "";
     try {
       await candidate.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => {});
@@ -48,6 +51,20 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
     } catch {
       continue;
     }
+    ranked.push({ candidate, url });
+  }
+  ranked.sort((a, b) => {
+    const score = (u) => {
+      if (isEmployerAtsUrl(u)) return 0;
+      if (isBoardOnboardUrl(u)) return 80;
+      if (AD_POPUP_HOST_RE.test(u) || isSuspiciousApplyHost(normalizeHost(u))) return 90;
+      return 40;
+    };
+    return score(a.url) - score(b.url);
+  });
+
+  let adopted = null;
+  for (const { candidate, url } of ranked) {
     if (!/^https?:/i.test(url)) {
       if (isBlankOrNewTabUrl(url) || isBrowserUnreachablePage({ url, title: await candidate.title().catch(() => "") })) {
         log?.layer(layer, `closing unreachable tab ${url.slice(0, 90)}`, "warn");
@@ -70,6 +87,12 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
       await candidate.close().catch(() => {});
       continue;
     }
+    // Close board onboard siblings when an ATS tab is available to adopt.
+    if (isBoardOnboardUrl(url) && ranked.some((r) => isEmployerAtsUrl(r.url))) {
+      log?.layer(layer, `closing board onboard tab (ATS available) ${url.slice(0, 90)}`, "info");
+      await candidate.close().catch(() => {});
+      continue;
+    }
     if (!adopted) {
       try {
         await candidate.bringToFront();
@@ -78,8 +101,8 @@ export async function adoptOpenedPage(page, knownPages, log, layer = "agent") {
       }
       log?.layer(layer, `following new tab → ${url.slice(0, 120)}`, "info");
       adopted = candidate;
-    } else {
-      // Extra apply-ish tabs after the one we adopted — close to keep AdsPower tidy.
+    } else if (!isEmployerAtsUrl(url)) {
+      // Extra non-ATS tabs after the one we adopted — close to keep AdsPower tidy.
       log?.layer(layer, `closing extra tab ${url.slice(0, 90)}`, "debug");
       await candidate.close().catch(() => {});
     }

@@ -4,29 +4,81 @@
 
 export const LABEL_TO_MAPPED = [
   { re: /desired\s*job|job\s*title|target\s*role|position\s*sought/i, mappedTo: "desiredtitle", type: "desiredtitle" },
-  { re: /salary|compensation|pay\s*expect|expected\s*pay/i, mappedTo: "salary", type: "salary" },
+  {
+    re: /salary\s*expect|compensation|pay\s*expect|expected\s*pay|\bsalary\b/i,
+    mappedTo: "salary",
+    type: "salary",
+  },
   { re: /\blocation\b|where\s*are\s*you|based\s*in|city\s*region/i, mappedTo: "location", type: "location" },
   { re: /\bcountry\b/i, mappedTo: "country", type: "country" },
 ];
 
-/** Visa / EEOC / work-auth application questions (Ashby-style yes/no, radios, selects). */
+/** Visa / EEOC / work-auth / pronouns / employer-policy application questions. */
 export const APPLICATION_LABEL_TO_MAPPED = [
   {
-    // Sponsorship first — "require sponsorship" must not fall into work auth.
-    re: /visa|require.*sponsor|sponsorship|need.*sponsor|will you.*sponsor/i,
+    // Acknowledgments that contain "sponsor" must answer Yes (understand) — before sponsorship.
+    re: /do you understand|unable to sponsor|acknowledge|confirm that you (understand|agree)|agree that applicants must be authorized/i,
+    mappedTo: "policyack",
+    type: "policyack",
+  },
+  {
+    // Future sponsorship need — not the "unable to sponsor" policy ack.
+    re: /will you (now|in the future).*sponsor|require.*(immigrat|sponsor)|need.*sponsor|sponsorship for an employment|H-1B/i,
     mappedTo: "visasponsorship",
     type: "visasponsorship",
   },
   {
-    re: /legally\s*authorized|authorized\s*to\s*work|work\s*authorization|eligible\s*to\s*work|right\s*to\s*work/i,
+    re: /legally\s*authorized|authorized\s*to\s*work|work\s*authorization|eligible\s*to\s*work|right\s*to\s*work|authorized to work for any employer/i,
     mappedTo: "workauthorization",
     type: "workauthorization",
   },
+  // Employer conflict-of-interest / affiliation (Trevor-style cards) — default No for external applicants.
+  // "related to an employee" before "current…employee" — "currently related" must not match current employee.
+  {
+    re: /related to an employee|related to .{0,40}\bemployee\b|family member.{0,40}(employ|work)/i,
+    mappedTo: "employeerelation",
+    type: "employeerelation",
+  },
+  {
+    re: /\bcurrent or former employee\b|\bformer employee of\b|are you (a |an )?(current|former)\s+employee\b/i,
+    mappedTo: "formeremployee",
+    type: "formeremployee",
+  },
+  {
+    re: /been in your position for at least|at least one year.{0,80}(eligible|apply)|current employee.{0,60}one year/i,
+    mappedTo: "employeetenure",
+    type: "employeetenure",
+  },
+  {
+    re: /\bvolunteer\b/i,
+    mappedTo: "volunteer",
+    type: "volunteer",
+  },
+  {
+    re: /\bcontractor\b|third[\s-]party/i,
+    mappedTo: "contractor",
+    type: "contractor",
+  },
+  { re: /\bpronouns?\b/i, mappedTo: "pronouns", type: "pronouns" },
   { re: /gender\s*identity|\bgender\b/i, mappedTo: "eeocgender", type: "eeocgender" },
-  { re: /race|ethnic/i, mappedTo: "eeocrace", type: "eeocrace" },
+  // \brace\b — do not match "relation" / "contractor".
+  { re: /\brace\b|ethnic/i, mappedTo: "eeocrace", type: "eeocrace" },
   { re: /veteran/i, mappedTo: "eeocveteran", type: "eeocveteran" },
   { re: /disabilit/i, mappedTo: "eeocdisability", type: "eeocdisability" },
 ];
+
+/** Employer affiliation questions answered "No" for typical external applicants. */
+export const COMPANY_NO_MAPPED = new Set([
+  "formeremployee",
+  "employeetenure",
+  "volunteer",
+  "contractor",
+  "employeerelation",
+]);
+
+/** Soft-match voluntary decline options across ATS variants. */
+export const EEOC_DECLINE_OPTION_RE =
+  /decline to self-identify|prefer not(?:\s+to)?\s+(?:say|answer|self[- ]?identify)|do not (?:want to )?answer|choose not to|i do not wish/i;
 
 export const SIGNUP_CTA_PATTERNS = [
   /^sign up now$/i,

@@ -1,19 +1,80 @@
 /**
  * Post-signup platform onboarding (Jobright diagnostics wizard, etc.).
+ * Distinct from board membership onboard traps (Remote Rocketship /onboard/, etc.).
  */
 import { normalizeHost } from "./host.js";
 import { safeRoleLocator, safeTextLocator } from "./primitives/safeLocator.js";
+import { APPLICATION_FIELD_RE } from "./patterns/listing.js";
 
 const ONBOARDING_URL_RE = /\/onboarding(-v\d+)?\//i;
+/** Board product tour / join flow: `/onboard/` or `/onboarding/` path segment. */
+const ONBOARD_PATH_RE = /\/onboard(?:ing)?(?:-v\d+)?(?:\/|\?|$)/i;
 const ONBOARDING_BODY_RE =
   /\b(what type of role|job function|job type|open to remote|your jobright ai copilot|orion)\b/i;
+
+/**
+ * Generic job-board signup questions — not employer ATS / job-specific apply.
+ * Remote Rocketship and similar "join the board" wizards.
+ */
+const BOARD_SIGNUP_TRAP_BODY_RE =
+  /\b(how long have you been searching|looking for my first remote|find your dream job|join .{0,80}rocketship|what.?s your biggest challenge|tell us about your (job )?search|are you actively (looking|searching)|how soon (can|do) you (want to )?start|what (type of )?remote work|remote job search)\b/i;
+
+/** Signals the real job application / ATS surface. */
+const JOB_APPLICATION_PAGE_RE =
+  /\b((upload|attach).{0,24}(resume|cv)|eeoc|equal opportunity|cover letter|work authorization|sponsorship|linkedin.?url|salary expectation|veteran status|disability status|race\/ethnicity|gender identity)\b/i;
 
 /** Jobright welcome confirm after onboarding — "Confirm & See Jobs". */
 const WELCOME_CONFIRM_BODY_RE =
   /\b(welcome!\s*we found|roles that fit you|confirm\s*&\s*see jobs|making sure everything looks right)\b/i;
 
+/**
+ * Stronger check: resume upload, EEOC, authorization, etc. — not generic board Q&A.
+ */
+export function looksLikeJobApplicationPage(snap) {
+  if (!snap) return false;
+  if ((snap.fileInputCount || 0) > 0) return true;
+  const fieldBlob = (snap.fields || [])
+    .map((f) => `${f.label || ""} ${f.name || ""} ${f.placeholder || ""}`)
+    .join(" ");
+  if (APPLICATION_FIELD_RE.test(fieldBlob)) return true;
+  if ((snap.customControls || []).some((c) => /yesno|visa|eeoc|sponsorship/i.test(`${c.label || ""} ${c.mappedTo || ""}`))) {
+    return true;
+  }
+  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""} ${snap.applyModalTitle || ""}`;
+  return JOB_APPLICATION_PAGE_RE.test(blob);
+}
+
+/**
+ * Company/board membership onboarding (e.g. remoterocketship.com/us/onboard/) —
+ * NOT the employer job application. Clicking Next forever never reaches ATS.
+ */
+export function looksLikeBoardSignupOnboarding(snap) {
+  if (!snap) return false;
+  if (looksLikeJobApplicationPage(snap)) return false;
+
+  const url = String(snap.url || "");
+  const host = normalizeHost(snap.hostname || url);
+  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`;
+
+  // Jobright preference wizard is intentional — fill then leave via Confirm & See Jobs
+  if (/jobright\.ai$/i.test(host) && ONBOARDING_URL_RE.test(url)) return false;
+
+  if (BOARD_SIGNUP_TRAP_BODY_RE.test(blob) && (ONBOARD_PATH_RE.test(url) || (snap.continueCount || 0) > 0)) {
+    return true;
+  }
+
+  // /onboard/ (not /onboarding/) wizard with Next and no application surface
+  if (/\/onboard(?:\/|\?|$)/i.test(url) && (snap.continueCount || 0) > 0) {
+    return true;
+  }
+
+  return false;
+}
+
 export function looksLikePlatformOnboarding(snap) {
   if (!snap) return false;
+  // Board membership trap is not Jobright-style preference onboarding
+  if (looksLikeBoardSignupOnboarding(snap)) return false;
   const url = String(snap.url || "");
   const host = normalizeHost(snap.hostname || url);
   const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();

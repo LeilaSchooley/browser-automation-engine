@@ -3,6 +3,7 @@
  */
 import { uploadStalled, hasUnfilledApplicationFields } from "../heuristics.js";
 import { looksLikePlatformOnboarding } from "../platformOnboarding.js";
+import { findRelevantSkills } from "../siteLearnings.js";
 import { buildStagehandPlan } from "./stagehandPolicy.js";
 
 /** Clear winner margin — lower = trust catalog more often (action-driven). */
@@ -26,6 +27,12 @@ export function pickBestAction(catalog, opts = {}) {
   const learnedMapped = new Set(
     (context?.siteLearnings?.controlSkills || []).map((s) => String(s.mappedTo || "").toLowerCase()),
   );
+  const relevantSkills = findRelevantSkills(snap, context?.siteLearnings, {
+    limit: 5,
+    hostname: snap?.hostname || context?.targetHost,
+  });
+  const avoid = new Set(relevantSkills.flatMap((s) => s.avoidActions || []));
+  const preferActions = new Map(relevantSkills.map((s) => [s.action, s]));
 
   const boosted = catalog.map((action) => {
     let score = action.score;
@@ -59,6 +66,12 @@ export function pickBestAction(catalog, opts = {}) {
     if (action.type === "smart_fill" && (learnedMapped.has("salary") || learnedMapped.has("visasponsorship"))) {
       score += 6;
     }
+
+    const sit = preferActions.get(action.type);
+    if (sit) {
+      score += sit.confidence === "high" ? 40 : 22;
+    }
+    if (avoid.has(action.type)) score -= 55;
 
     const submitCta = /submit\s+application/i.test(
       `${action.targetCandidate?.text || ""} ${action.reason || ""}`,
@@ -116,7 +129,7 @@ export function planFromCatalogAction(action, opts = {}) {
   const plan = {
     type: action.type,
     reason: action.reason,
-    source: "action-catalog",
+    source: action.source || "action-catalog",
     step: action.step,
     catalogId: action.id,
     catalogScore: action.score,
@@ -124,6 +137,7 @@ export function planFromCatalogAction(action, opts = {}) {
   if (action.targetCandidate) plan.targetCandidate = action.targetCandidate;
   if (action.instruction) plan.instruction = action.instruction;
   if (action.mappedTo) plan.mappedTo = action.mappedTo;
+  if (action.situationSkillId) plan.situationSkillId = action.situationSkillId;
   return plan;
 }
 

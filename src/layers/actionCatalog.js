@@ -18,17 +18,22 @@ import {
   looksLikeGoogleVignetteAd,
   looksLikeInlineApplicationForm,
   looksLikeJobBoardIndex,
+  dismissLoopStalled,
+  continueLoopStalled,
   shouldPreferUpload,
   uploadAlreadySucceeded,
   uploadStalled,
+  shouldBlockBoardSignupAfterLeave,
 } from "../heuristics.js";
-import { looksLikePlatformOnboarding } from "../platformOnboarding.js";
 import {
+  looksLikePlatformOnboarding,
+  looksLikeBoardSignupOnboarding,
   looksLikeJobBoardWelcomeConfirm,
   welcomeConfirmCta,
   looksLikeDidYouApplyPrompt,
   didYouApplyDeclineCta,
 } from "../platformOnboarding.js";
+import { findRelevantSkills } from "../siteLearnings.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
 import { isOauthProviderHost } from "./applyUrlSafety.js";
@@ -89,19 +94,23 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       isExpertReviewGate(snap) ||
       looksLikeGoogleVignetteAd(snap))
   ) {
+    const looping = dismissLoopStalled(history, 2);
     const top = classification?.target || snap.dismissCandidates?.[0];
-    actions.push({
-      id: "dismiss_resume_upsell",
-      type: "dismiss_overlay",
-      score: 96,
-      reason: looksLikeGoogleVignetteAd(snap)
-        ? "dismiss google vignette ad"
-        : top
-          ? `dismiss resume upsell — ${top.text || top._text || top.aria || "close"}`
-          : "dismiss resume boost / review upsell",
-      targetCandidate: top || null,
-      step: "overlay",
-    });
+    // After failed dismisses, demote Escape path so Apply wins.
+    if (!looping || top) {
+      actions.push({
+        id: "dismiss_resume_upsell",
+        type: "dismiss_overlay",
+        score: looping ? 40 : 96,
+        reason: looksLikeGoogleVignetteAd(snap)
+          ? "dismiss google vignette ad"
+          : top
+            ? `dismiss resume upsell — ${top.text || top._text || top.aria || "close"}`
+            : "dismiss resume boost / review upsell",
+        targetCandidate: top || null,
+        step: "overlay",
+      });
+    }
   }
 
   if (looksLikeJobBoardIndex(snap)) {
@@ -125,11 +134,14 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     }
   } else if ((snap.entryCount || 0) > 0 && !applyEntrySucceeded(history, fp)) {
     const top = snap.entryCandidates?.[0];
+    const loopingDismiss = dismissLoopStalled(history, 2);
     actions.push({
       id: "click_apply",
       type: "click_apply",
-      score: top?.score || 70,
-      reason: `apply CTA: ${top?.text || "Apply"}`,
+      score: loopingDismiss ? 98 : top?.score || 70,
+      reason: loopingDismiss
+        ? `dismiss loop — force apply CTA: ${top?.text || "Apply"}`
+        : `apply CTA: ${top?.text || "Apply"}`,
       targetCandidate: top || null,
       step: "entry",
     });
@@ -145,8 +157,27 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     actions.push({ id: "auth_signup", type: "auth_signup", score: 86, reason: "registration form", step: "signup" });
     actions.push({ id: "smart_fill_signup", type: "smart_fill", score: 84, reason: "fill registration fields", step: "signup" });
   }
-  if (looksLikeSignupEntry(snap)) {
+  if (looksLikeSignupEntry(snap) && !shouldBlockBoardSignupAfterLeave(history, snap)) {
     actions.push({ id: "click_signup", type: "click_signup", score: 72, reason: "signup entry CTA", step: "signup_entry" });
+  } else if (shouldBlockBoardSignupAfterLeave(history, snap)) {
+    actions.push({
+      id: "skip_board_signup",
+      type: "wait_user",
+      score: 96,
+      reason: "board leave done — skip Sign Up (would re-enter onboard)",
+      step: "blocked",
+    });
+    if ((snap.entryCount || 0) > 0) {
+      const top = snap.entryCandidates?.[0];
+      actions.push({
+        id: "click_apply_after_board_leave",
+        type: "click_apply",
+        score: 97,
+        reason: `after board leave — Apply: ${top?.text || "Apply"}`,
+        targetCandidate: top || null,
+        step: "entry",
+      });
+    }
   }
   if (classification?.step === "signin_entry" || ((snap.signInCount || 0) > 0 && classification?.step === "auth")) {
     actions.push({
@@ -183,7 +214,26 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     });
   }
 
-  if (looksLikePlatformOnboarding(snap)) {
+  if (looksLikeBoardSignupOnboarding(snap)) {
+    const recoveryTries = (history || []).filter((h) => h.action === "nav_recovery").length;
+    if (recoveryTries >= 1 || continueLoopStalled(history, fillResult, 2)) {
+      actions.push({
+        id: "board_onboard_handoff",
+        type: "wait_user",
+        score: 99,
+        reason: "board signup onboarding — not job application (handoff)",
+        step: "blocked",
+      });
+    } else {
+      actions.push({
+        id: "leave_board_onboard",
+        type: "nav_recovery",
+        score: 99,
+        reason: "board signup onboarding — return to job listing",
+        step: "nav_recovery",
+      });
+    }
+  } else if (looksLikePlatformOnboarding(snap)) {
     actions.push({
       id: "smart_fill_onboarding",
       type: "smart_fill",
@@ -318,6 +368,24 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       reason: "sparse DOM — semantic observe/act",
       instruction: buildStagehandInstruction(snap, classification || { step: "entry" }, history, context),
       step: classification?.step || "entry",
+    });
+  }
+
+  const skills = findRelevantSkills(snap, context?.siteLearnings, {
+    limit: 3,
+    hostname: snap?.hostname || context?.targetHost,
+  });
+  for (const skill of skills) {
+    if (!skill.action) continue;
+    if (actions.some((a) => a.id === `situation_${skill.signature}_${skill.action}`)) continue;
+    actions.push({
+      id: `situation_${skill.signature}_${skill.action}`,
+      type: skill.action,
+      score: skill.confidence === "high" ? 88 : 70,
+      reason: `situation skill — ${skill.signature}`,
+      step: skill.action === "wait_user" ? "blocked" : skill.action === "nav_recovery" ? "nav_recovery" : "ambiguous",
+      situationSkillId: skill.id,
+      source: "situation-memory",
     });
   }
 

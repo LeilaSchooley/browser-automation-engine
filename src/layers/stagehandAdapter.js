@@ -4,6 +4,7 @@
  */
 import { getSettings } from "../runtime.js";
 import { getPreferencesFromContext } from "../fillPreferences.js";
+import { isBrowserClosedError, isBrowserSessionGone, raceUntilGone } from "../pageAlive.js";
 
 let stagehandInstance = null;
 let stagehandInitFailed = false;
@@ -182,21 +183,29 @@ export async function attemptStagehandAct(page, context, opts = {}) {
   const variables = { ...(opts.variables || {}) };
 
   try {
+    const gone = () => Boolean(opts.shouldStop?.()) || isBrowserSessionGone(page);
     const observeOpts = { page };
     if (Object.keys(variables).some((k) => variables[k])) {
       observeOpts.variables = variables;
     }
-    const actions = await stagehand.observe(instruction, observeOpts);
-    const action = Array.isArray(actions) ? actions[0] : actions;
-    if (action) {
-      await stagehand.act(action, { page });
-      log?.layer("stagehand", `act via observe: ${instruction.slice(0, 80)}`, "info");
-      return { ok: true, action, instruction, source: "stagehand" };
-    }
-    await stagehand.act(instruction, { page, variables });
-    log?.layer("stagehand", `act direct: ${instruction.slice(0, 80)}`, "info");
-    return { ok: true, instruction, source: "stagehand" };
+    const run = async () => {
+      const actions = await stagehand.observe(instruction, observeOpts);
+      const action = Array.isArray(actions) ? actions[0] : actions;
+      if (action) {
+        await stagehand.act(action, { page });
+        log?.layer("stagehand", `act via observe: ${instruction.slice(0, 80)}`, "info");
+        return { ok: true, action, instruction, source: "stagehand" };
+      }
+      await stagehand.act(instruction, { page, variables });
+      log?.layer("stagehand", `act direct: ${instruction.slice(0, 80)}`, "info");
+      return { ok: true, instruction, source: "stagehand" };
+    };
+    return await raceUntilGone(run(), { isGone: gone, intervalMs: 500 });
   } catch (err) {
+    if (isBrowserClosedError(err) || err?.code === "BROWSER_CLOSED") {
+      log?.layer("stagehand", "browser closed during act — abort", "warn");
+      throw err;
+    }
     log?.layer("stagehand", `failed: ${err.message}`, "warn");
     return { ok: false, reason: err.message };
   }

@@ -13,6 +13,7 @@ import {
   targetHostFromContext,
 } from "./pageIntent.js";
 import { filterSafeEntryCandidates, shouldBlockApplyNavigation } from "./applyUrlSafety.js";
+import { looksLikeBoardSignupOnboarding } from "../platformOnboarding.js";
 
 export function getTriedEntryKeys(history = []) {
   return new Set(
@@ -104,6 +105,24 @@ export async function recoverFromWrongNavigation(page, snap, context, history, l
   const ctx = enrichContextWithLearnings(context, snap?.hostname);
   const intent = analyzePageIntent(snap, ctx);
   if (!intent.wrongPage && intent.onSubmitSurface) return { recovered: false };
+
+  const boardOnboard =
+    intent.signals.includes("board_signup_onboarding") || looksLikeBoardSignupOnboarding(snap);
+  if (boardOnboard) {
+    const dest = ctx.submitUrl || ctx.startUrl;
+    if (dest) {
+      log.layer("nav_recovery", `board signup onboard — goto job URL ${dest}`, "warn");
+      await gotoWithCloudflareRetry(page, dest, { sessionId });
+      await humanPause(600, 1000);
+      const freshSnap = await inspectPage(page);
+      if (!looksLikeBoardSignupOnboarding(freshSnap)) {
+        return { recovered: true, snap: freshSnap, action: "leave_board_onboard" };
+      }
+      // Still trapped (SPA redirect) — mark recovered so classifier can escalate to handoff
+      return { recovered: true, snap: freshSnap, action: "leave_board_onboard_stuck" };
+    }
+    return { recovered: false, reason: "board signup onboarding with no job URL" };
+  }
 
   const isClearlyWrong = intent.wrongPage || (intent.signals.includes("feed_not_submit") && intent.score < 10);
   if (!isClearlyWrong) return { recovered: false };

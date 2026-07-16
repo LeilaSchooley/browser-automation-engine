@@ -12,6 +12,7 @@ import {
   SUBMIT_PAGE_TEXT,
   WRONG_PAGE_TEXT,
 } from "../patterns/index.js";
+import { looksLikeBoardSignupOnboarding } from "../platformOnboarding.js";
 
 export { normalizeHost, targetHostFromContext, COMMON_SUBMIT_PATHS };
 
@@ -92,6 +93,13 @@ export function analyzePageIntent(snap, context = {}) {
     wrongReason = wrongReason || "page looks like job/accelerator apply, not directory listing";
     score -= 75;
     signals.push("wrong_apply_context");
+  }
+
+  if (looksLikeBoardSignupOnboarding(snap)) {
+    wrongPage = true;
+    wrongReason = wrongReason || "board signup onboarding — not job application";
+    score -= 100;
+    signals.push("board_signup_onboarding");
   }
 
   const onHomepage =

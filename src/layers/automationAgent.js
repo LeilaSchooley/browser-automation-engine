@@ -1,5 +1,10 @@
 import { getRuntime, getSettings } from "../runtime.js";
 import { isCloudflarePage, waitForCloudflareClear } from "../cloudflare.js";
+import {
+  detectCaptcha,
+  waitForCaptchaClear,
+  looksLikeCaptchaReason,
+} from "../captchaDetect.js";
 import { humanPause, humanPauseInterruptible } from "../human.js";
 import { uploadDiscoveredFile } from "./domActions.js";
 import {
@@ -10,17 +15,31 @@ import {
   progressScore,
 } from "./formDiscovery.js";
 import { adoptOpenedPage, isPageUnloaded, waitForApplySurface } from "./pageReady.js";
-import { pruneExtraPages } from "./tabHygiene.js";
+import { pruneExtraPages, preferAtsWorkingPage } from "./tabHygiene.js";
 import { allowsHostHop, normalizeHost } from "../host.js";
 import {
   isAggregatorHost,
   looksLikeDeadApplyDestination,
   looksLikeAggregatorTrap,
   shouldBlockApplyNavigation,
+  isEmployerAtsUrl,
 } from "./applyUrlSafety.js";
 import { gotoWithCloudflareRetry } from "../cloudflare.js";
-import { isStuck, shouldPreferUpload, uploadAlreadySucceeded, uploadStalled, hasUnfilledApplicationFields, looksLikeApplySignupGate } from "../heuristics.js";
-import { looksLikePlatformOnboarding } from "../platformOnboarding.js";
+import {
+  isStuck,
+  shouldPreferUpload,
+  uploadAlreadySucceeded,
+  uploadStalled,
+  hasUnfilledApplicationFields,
+  looksLikeApplySignupGate,
+  dismissLoopStalled,
+  continueLoopStalled,
+  shouldBlockBoardSignupAfterLeave,
+  boardLeaveSucceeded,
+} from "../heuristics.js";
+import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding } from "../platformOnboarding.js";
+import { RecoveryTracker } from "../recoveryTracker.js";
+import { appendRunHistory, trailFingerprint } from "../runHistory.js";
 import { hasUnfilledApplicationControls } from "../fillApplicationAnswers.js";
 import { attemptApplicationControlsStagehand } from "./stagehandPolicy.js";
 import { fillCustomControls } from "../fillCustomControls.js";
@@ -30,6 +49,7 @@ import { recordSiteLearning, loadSiteLearnings } from "../siteLearnings.js";
 import { recordEngineEvent, captureDebugScreenshot } from "../observability.js";
 import { buildPagePerception, refreshSnapIfNeeded } from "./pagePerception.js";
 import { recordLearningsFromRun } from "../learningRecorder.js";
+import { isBrowserSessionGone, raceUntilGone, isBrowserClosedError } from "../pageAlive.js";
 import {
   enrichContextWithLearnings,
   recoverFromWrongNavigation,
@@ -73,6 +93,8 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     })(),
   );
   const history = [];
+  const recoveryTracker = new RecoveryTracker({ maxPerAction: 3, maxGlobal: maxSteps + 4 });
+  let hasUsedStagehand = false;
   let fillResult = { filled: [], unfilled: [], unfilled_count: 0, ai_filled: 0 };
   let prepActions = [];
   let bestScore = 0;
@@ -98,10 +120,77 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
   log.step("agent", `Dynamic agent (max ${maxSteps} steps, affordance-driven)…`);
 
-  const stopRequested = () => shouldStop?.();
+  /** Current handle closed after a tab hop ≠ session dead — prefer ATS / any live sibling. */
+  const recoverWorkingPage = () => {
+    try {
+      const ctx = page?.context?.();
+      const pages = (ctx?.pages?.() || []).filter((p) => {
+        try {
+          return p && !p.isClosed();
+        } catch {
+          return false;
+        }
+      });
+      if (!pages.length) return null;
+      const ats = [...pages].reverse().find((p) => {
+        try {
+          return isEmployerAtsUrl(p.url());
+        } catch {
+          return false;
+        }
+      });
+      return ats || pages[pages.length - 1] || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const sessionGone = () => {
+    try {
+      if (!isBrowserSessionGone(page)) return false;
+      const live = recoverWorkingPage();
+      if (live) {
+        if (live !== page) {
+          log.layer("agent", `working page closed after hop — adopted live tab ${(() => {
+            try {
+              return live.url();
+            } catch {
+              return "(unknown)";
+            }
+          })()}`, "warn");
+          page = live;
+        }
+        return false;
+      }
+      return true;
+    } catch {
+      const live = recoverWorkingPage();
+      if (live) {
+        page = live;
+        return false;
+      }
+      return true;
+    }
+  };
+  // User stop / CDP disconnect only — do not treat a closed hop tab as stop.
+  const stopRequested = () => Boolean(shouldStop?.()) || sessionGone();
 
   for (let step = 1; step <= maxSteps; step++) {
-    if (stopRequested()) {
+    if (sessionGone()) {
+      log.layer("agent", "browser closed — exiting agent loop", "warn");
+      history.push({
+        step,
+        action: "stopped",
+        ok: true,
+        fingerprint: pageFingerprint(lastSnap || {}),
+        progress: false,
+        reason: "browser_closed",
+      });
+      const err = new Error("Browser closed");
+      err.code = "BROWSER_CLOSED";
+      throw err;
+    }
+    if (Boolean(shouldStop?.())) {
       log.layer("agent", "stop requested — exiting agent loop", "info");
       history.push({ step, action: "stopped", ok: true, fingerprint: pageFingerprint(lastSnap || {}), progress: false });
       break;
@@ -110,6 +199,25 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     if (await isCloudflarePage(page)) {
       log.layer("agent", "cloudflare — waiting", "warn");
       await waitForCloudflareClear(page, sessionId);
+    }
+
+    {
+      const challenge = await detectCaptcha(page).catch(() => ({ detected: false }));
+      if (challenge.detected) {
+        log.layer("agent", `captcha — ${challenge.reason} — waiting for manual solve`, "warn");
+        const cleared = await waitForCaptchaClear(page, sessionId, { initial: challenge });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          progress: cleared,
+          reason: challenge.reason,
+        });
+        if (!cleared) break;
+        consecutiveNoProgress = 0;
+        continue;
+      }
     }
 
     let snap = await inspectPage(page);
@@ -167,6 +275,100 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     let { plan, classification, decision } = await decideNextAction(snap, fillResult, history, agentContext, page);
     lastClassification = classification;
 
+    // Loop breaker: repeated dismiss without progress while Apply is visible → click Apply.
+    if (
+      plan?.type === "dismiss_overlay" &&
+      dismissLoopStalled(history, 2) &&
+      (snap.entryCount || 0) > 0
+    ) {
+      const top = snap.entryCandidates?.[0];
+      plan = {
+        type: "click_apply",
+        reason: `dismiss loop broken — force ${top?.text || "Apply"}`,
+        source: "loop-breaker",
+        targetCandidate: top || null,
+      };
+      decision = { path: "loop-breaker", reason: plan.reason };
+      log.layer("agent", plan.reason, "warn");
+    }
+
+    // Loop breaker: Next/Continue thrashing (esp. board onboard wizards) with no fills.
+    if (plan?.type === "click_continue" && continueLoopStalled(history, fillResult, 3)) {
+      if (looksLikeBoardSignupOnboarding(snap)) {
+        plan = {
+          type: "wait_user",
+          reason: "continue loop on board signup onboarding — handoff",
+          source: "loop-breaker",
+        };
+      } else if (hasUnfilledApplicationFields(snap, fillResult)) {
+        plan = {
+          type: "smart_fill",
+          reason: "continue loop broken — fill before Next",
+          source: "loop-breaker",
+        };
+      } else if ((agentContext?.submitUrl || agentContext?.startUrl) && !history.some((h) => h.action === "nav_recovery")) {
+        plan = {
+          type: "nav_recovery",
+          reason: "continue loop broken — recover navigation",
+          source: "loop-breaker",
+        };
+      } else {
+        plan = {
+          type: "wait_user",
+          reason: "continue loop stalled — no application progress",
+          source: "loop-breaker",
+        };
+      }
+      decision = { path: "loop-breaker", reason: plan.reason };
+      log.layer("agent", plan.reason, "warn");
+    }
+
+    // Loop breaker: Sign Up after board leave re-enters onboard.
+    if (plan?.type === "click_signup" && shouldBlockBoardSignupAfterLeave(history, snap)) {
+      if ((snap.entryCount || 0) > 0) {
+        plan = {
+          type: "click_apply",
+          reason: "board leave done — force Apply instead of Sign Up",
+          source: "loop-breaker",
+          targetCandidate: snap.entryCandidates?.[0] || null,
+        };
+      } else {
+        plan = {
+          type: "wait_user",
+          reason: "board leave done — Sign Up would re-enter onboard (handoff)",
+          source: "loop-breaker",
+        };
+      }
+      decision = { path: "loop-breaker", reason: plan.reason };
+      log.layer("agent", plan.reason, "warn");
+    }
+
+    // RecoveryTracker — escalate repeating actions
+    if (plan?.type) {
+      const fp = pageFingerprint(snap);
+      recoveryTracker.record(plan.type, fp);
+      if (plan.type === "stagehand_act") hasUsedStagehand = true;
+      const esc = recoveryTracker.escalate(plan.type, fp, { hasUsedStagehand });
+      if (esc === "stagehand" && plan.type !== "stagehand_act" && plan.type !== "wait_user") {
+        plan = {
+          type: "stagehand_act",
+          reason: `recovery: ${plan.type} looping — Stagehand escalate`,
+          source: "recovery-tracker",
+          instruction: `Previous ${plan.type} failed repeatedly. Try a different approach to progress the application.`,
+        };
+        decision = { path: "recovery-tracker", reason: plan.reason };
+        log.layer("agent", plan.reason, "warn");
+      } else if (esc === "wait_user" && plan.type !== "wait_user") {
+        plan = {
+          type: "wait_user",
+          reason: `recovery: ${plan.type} exhausted — handoff`,
+          source: "recovery-tracker",
+        };
+        decision = { path: "recovery-tracker", reason: plan.reason };
+        log.layer("agent", plan.reason, "warn");
+      }
+    }
+
     if (decision?.path) {
       recordEngineEvent("agent_decide", {
         path: decision.path,
@@ -199,12 +401,29 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       recoveryRounds += 1;
       const obstacle = await attemptObstacleRecovery(page, snap, log);
       if (obstacle.hardStop) {
-        if (obstacle.reason?.includes("CAPTCHA")) {
+        if (looksLikeCaptchaReason(obstacle.reason)) {
           const solved = await attemptCaptchaSolve(page, snap, log);
           if (solved.ok) {
             history.push({ step, action: "captcha_solve", ok: true, progress: true });
             continue;
           }
+          log.layer("agent", `captcha hard gate — waiting for manual solve (${obstacle.reason})`, "warn");
+          const cleared = await waitForCaptchaClear(page, sessionId, {
+            initial: { reason: obstacle.reason, source: "hard_gate" },
+          });
+          history.push({
+            step,
+            action: cleared ? "captcha_wait" : "wait_user",
+            applyStep: "blocked",
+            ok: cleared,
+            progress: cleared,
+            reason: obstacle.reason,
+          });
+          if (cleared) {
+            consecutiveNoProgress = 0;
+            continue;
+          }
+          break;
         }
         log.layer("agent", `hard stop: ${obstacle.reason}`, "warn");
         history.push({ step, action: "wait_user", applyStep: "blocked", ok: true, progress: false });
@@ -284,6 +503,30 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     if (plan.type === "wait_user") {
+      const captchaReason =
+        looksLikeCaptchaReason(plan.reason) ||
+        looksLikeCaptchaReason(classification?.reason) ||
+        looksLikeCaptchaReason(looksLikeHardGate(snap).reason);
+      if (captchaReason) {
+        log.layer("agent", `captcha wait_user — waiting for manual solve (${plan.reason || classification?.reason})`, "warn");
+        const cleared = await waitForCaptchaClear(page, sessionId, {
+          initial: { reason: plan.reason || classification?.reason || "CAPTCHA / human verification", source: "wait_user" },
+        });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          fingerprint: pageFingerprint(snap),
+          progress: cleared,
+          reason: plan.reason || classification?.reason,
+        });
+        if (cleared) {
+          consecutiveNoProgress = 0;
+          continue;
+        }
+        break;
+      }
       const hard = classification.hardStop || looksLikeHardGate(snap).hard;
       if (objectiveMode && !hard && recoveryRounds < maxRecoveryRounds) {
         recoveryRounds += 1;
@@ -331,16 +574,40 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     const fpBefore = pageFingerprint(snap);
     const filledBefore = fillResult.filled?.length || 0;
-    const executed = await executePlan(page, plan, {
-      snap,
-      context: agentContext,
-      log,
-      url,
-      sessionId,
-      fillResult,
-      history,
-      classification,
-    });
+    let executed;
+    try {
+      // Mid-step Stagehand/Playwright can hang after AdsPower/CDP dies — abort the await.
+      executed = await raceUntilGone(
+        executePlan(page, plan, {
+          snap,
+          context: agentContext,
+          log,
+          url,
+          sessionId,
+          fillResult,
+          history,
+          classification,
+          shouldStop: () => Boolean(shouldStop?.()) || sessionGone(),
+        }),
+        { isGone: sessionGone, intervalMs: 500 },
+      );
+    } catch (stepErr) {
+      if (isBrowserClosedError(stepErr) || stepErr?.code === "BROWSER_CLOSED" || sessionGone()) {
+        log.layer("agent", "browser closed mid-step — exiting agent loop", "warn");
+        history.push({
+          step,
+          action: "stopped",
+          ok: true,
+          fingerprint: pageFingerprint(lastSnap || snap || {}),
+          progress: false,
+          reason: "browser_closed",
+        });
+        const err = new Error("Browser closed");
+        err.code = "BROWSER_CLOSED";
+        throw err;
+      }
+      throw stepErr;
+    }
 
     let ok = executed.ok;
     const entryKeyForHistory = executed.entryKey || "";
@@ -368,8 +635,14 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         }
       }
       try {
+        const atsPage = await preferAtsWorkingPage(page.context(), page);
+        if (atsPage && atsPage !== page) {
+          page = atsPage;
+          ok = true;
+          log.layer("agent", "switched working page to employer ATS tab", "info");
+        }
         knownPages = new Set(page.context().pages());
-        // Periodic hygiene — AdsPower leaves blanks/ads around after target=_blank clicks.
+        // Periodic hygiene — never closes ATS tabs (see tabHygiene).
         if (step % 3 === 0 || plan.type === "stagehand_act") {
           await pruneExtraPages(page.context(), page, { log, maxPages: 2 }).catch(() => {});
         }
@@ -382,6 +655,44 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       force: ["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "smart_fill", "upload_resume"].includes(plan.type),
     });
     lastSnap = snapAfter;
+
+    // Failed Continue / CTA with no DOM progress — often an invisible captcha overlay
+    // (Playwright: "<div></div> … intercepts pointer events"). Wait for manual solve.
+    if (
+      !ok &&
+      ["click_continue", "click_modal", "click_apply", "act", "stagehand_act"].includes(plan.type)
+    ) {
+      const challenge = await detectCaptcha(page, {
+        snap: snapAfter,
+        suspectPointerBlock: true,
+      }).catch(() => ({ detected: false }));
+      if (challenge.detected) {
+        log.layer(
+          "agent",
+          `captcha after failed ${plan.type} — ${challenge.reason} — waiting for manual solve`,
+          "warn",
+        );
+        const cleared = await waitForCaptchaClear(page, sessionId, {
+          initial: challenge,
+          keepSuspectOverlay: challenge.source === "overlay",
+        });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: cleared,
+          reason: challenge.reason,
+        });
+        if (cleared) {
+          consecutiveNoProgress = 0;
+          continue;
+        }
+        break;
+      }
+    }
+
     let progressed = pageFingerprint(snapAfter) !== fpBefore || progressScore(snapAfter, fillResult) > score;
 
     // Clicked apply but nothing changed (overlay swallowed the click, JS-guarded
@@ -853,6 +1164,17 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       snap: finalSnap,
       bestScore,
       outcome: (fillResult.filled?.length || 0) >= 2 ? "success" : "partial",
+    });
+    appendRunHistory({
+      jobId: sessionId,
+      host,
+      url: finalSnap?.url || url,
+      success: (fillResult.filled?.length || 0) >= 2,
+      filled: fillResult.filled?.length || 0,
+      score: bestScore,
+      outcome: (fillResult.filled?.length || 0) >= 2 ? "success" : boardLeaveSucceeded(history) ? "review" : "partial",
+      trail: trailFingerprint(history).split("→"),
+      fingerprint: pageFingerprint(finalSnap),
     });
   } catch {
     /* ignore learnings write errors */

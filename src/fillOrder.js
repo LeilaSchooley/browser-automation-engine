@@ -1,5 +1,6 @@
 /**
  * Visual top-to-bottom fill ordering (scroll Y, then X; type as tie-breaker).
+ * Apply-aware order (required + logical band) lives in fieldMapper.js.
  */
 
 export const FIELD_TYPE_ORDER = {
@@ -18,12 +19,16 @@ export const FIELD_TYPE_ORDER = {
   desiredtitle: 40,
   linkedinurl: 45,
   website: 46,
-  salary: 50,
+  pronouns: 15,
+  salary: 55,
   visasponsorship: 60,
+  workauthorization: 59,
+  policyack: 60,
   eeocgender: 61,
   eeocrace: 62,
   eeocveteran: 63,
   eeocdisability: 64,
+  citystatezip: 34,
   resume: 70,
   coverletter: 80,
   additionalinfo: 90,
@@ -44,3 +49,18 @@ export function compareVisualOrder(a, b) {
 export function sortByVisualOrder(entries) {
   return [...(entries || [])].sort(compareVisualOrder);
 }
+
+export {
+  sortApplyFields,
+  sortFieldsIntelligently,
+  compareApplyFillOrder,
+  isJobApplicationField,
+  isNoiseApplicationField,
+  detectRequiredUnfilled,
+  buildRequiredFieldsInstruction,
+  looksRequiredField,
+  isTrulyRequired,
+  isVoluntaryField,
+  isEarlyCustomControl,
+  requiredPriorityRank,
+} from "./fieldMapper.js";

@@ -61,7 +61,7 @@ export const INTERSTITIAL_DISMISS_PATTERNS = [
 
 /** Copy that means "this dialog is an upsell/paywall, not the application". */
 export const INTERSTITIAL_UPSELL_BODY =
-  /\b(auto-?rejected|won[\u2019']?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score|increase your chances|tailor your resume|boost your resume|boost your resume here|customize your resume|customizing your resume|stand out among applicants|paste any linkedin|linkedin profile url|get more replies|expert review|free expert review|free expert resume review|resume score|resume is not recommended|not recommended|\/\d+\/100|resume is not ready yet|not ready yet|upgrade (now|your)|go premium|subscribe|newsletter signup|paywall|orion)\b/i;
+  /\b(auto-?rejected|won[\u2019']?t reach a human|ats software will filter|fix my resume|quick wins to improve|successful candidates score|increase your chances|tailor your resume|boost your resume|boost your resume here|customize your resume|customizing your resume|stand out among applicants|paste any linkedin|linkedin profile url|get more replies|expert review|free expert review|free expert resume review|resume score|resume is not recommended|not recommended|\/\d+\/100|resume is not ready yet|not ready yet|upgrade (now|your)|go premium|paywall|orion)\b/i;
 
 /** @deprecated use INTERSTITIAL_UPSELL_BODY */
 export const RESUME_REVIEW_UPSELL_TEXT = INTERSTITIAL_UPSELL_BODY;
@@ -163,53 +163,135 @@ export function isBlockingInterstitial(snap) {
   if (!snap) return false;
   if (isActiveApplyWizard(snap)) return false;
   const hints = snap.overlayHints || [];
-  if (hints.some((h) => /interstitial|resume-review-upsell|upsell/i.test(h))) return true;
+  const hasDialogSurface =
+    snap.hasBlockingOverlay ||
+    ((snap.modalCount || 0) > 0 && Boolean(snap.hasApplyModal || snap.applyModalTitle)) ||
+    (snap.dismissCandidates || []).some((c) => textMatchesInterstitialDismiss(c.text));
+
+  if (hints.some((h) => /interstitial|resume-review-upsell|upsell/i.test(h)) && hasDialogSurface) {
+    return true;
+  }
   if ((snap.dismissCandidates || []).some((c) => /interstitial|upsell/i.test(c.source || ""))) return true;
-  const blob = [
-    snap.pageText,
-    snap.title,
+
+  // Prefer dialog-scoped copy — full pageText matches listing chrome and caused Escape loops.
+  const surfaceBlob = [
     snap.applyModalTitle,
     ...(snap.modalCandidates || []).map((c) => `${c.text || ""} ${c.testId || ""}`),
     ...(snap.dismissCandidates || []).map((c) => `${c.text || ""} ${c.testId || ""}`),
+    ...(snap.overlayHints || []),
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase()
     .replace(/[\u2018\u2019']/g, "'");
-  if (!INTERSTITIAL_UPSELL_BODY.test(blob)) return false;
-  return (
-    (snap.modalCount || 0) > 0 ||
-    (snap.dismissCandidates || []).some((c) => textMatchesInterstitialDismiss(c.text)) ||
-    snap.hasBlockingOverlay
-  );
+
+  if (INTERSTITIAL_UPSELL_BODY.test(surfaceBlob) && hasDialogSurface) return true;
+
+  // Full-page match only with a real blocking overlay (not leftover modalCount).
+  if (snap.hasBlockingOverlay) {
+    const pageBlob = String(snap.pageText || "")
+      .toLowerCase()
+      .replace(/[\u2018\u2019']/g, "'");
+    if (INTERSTITIAL_UPSELL_BODY.test(pageBlob)) return true;
+  }
+
+  return false;
 }
 
 export function isResumeReviewUpsell(snap) {
   if (isBlockingInterstitial(snap)) return true;
   const title = String(snap?.applyModalTitle || "").toLowerCase();
-  if (/boost your resume|improve your resume|tailor your resume|customize your resume|stand out among applicants|^orion$/i.test(title)) {
+  if (
+    /boost your resume|improve your resume|tailor your resume|customize your resume|stand out among applicants|^orion$/i.test(
+      title,
+    )
+  ) {
     return true;
   }
-  const blob = `${snap?.pageText || ""} ${title}`.toLowerCase();
-  // Jobright Orion / Boost pane — may not set hasApplyModal.
+  const surface = [
+    snap?.applyModalTitle,
+    ...(snap?.modalCandidates || []).map((c) => `${c.text || ""}`),
+    ...(snap?.dismissCandidates || []).map((c) => `${c.text || ""}`),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const hasDialog =
+    snap?.hasBlockingOverlay ||
+    ((snap?.modalCount || 0) > 0 && (snap?.hasApplyModal || title)) ||
+    (snap?.dismissCandidates || []).some((c) => textMatchesInterstitialDismiss(c.text));
+
+  // Jobright Orion / Boost pane — require a real dialog, not listing chrome alone.
   if (
     /boost your resume here|boost your resume|customizing your resume just got easier|access the tailoring tool|stand out among applicants/i.test(
-      blob,
+      `${surface} ${title}`,
     ) &&
-    ((snap?.modalCount || 0) > 0 ||
-      snap?.hasBlockingOverlay ||
-      snap?.hasApplyModal ||
-      (snap?.dismissCandidates || []).length > 0)
+    hasDialog
   ) {
     return true;
   }
   if (
-    /boost your resume|paste any linkedin profile|customize your resume in \d+|customizing your resume|stand out among applicants/i.test(blob) &&
-    snap?.hasApplyModal
+    /boost your resume|paste any linkedin profile|customize your resume in \d+|customizing your resume|stand out among applicants/i.test(
+      `${surface} ${title}`,
+    ) &&
+    snap?.hasApplyModal &&
+    hasDialog
   ) {
     return true;
   }
   return false;
+}
+
+/**
+ * Same action repeating without progress — recovery breaker.
+ * @param {object[]} history
+ * @param {string} action
+ * @param {number} [min=2]
+ */
+export function actionLoopStalled(history, action, min = 2) {
+  const recent = (history || []).filter((h) => h.action === action).slice(-min);
+  if (recent.length < min) return false;
+  return recent.every((h) => !h.progress);
+}
+
+/** Dismiss Escape/upsell loop — prefer Apply / continue instead. */
+export function dismissLoopStalled(history, min = 2) {
+  return actionLoopStalled(history, "dismiss_overlay", min);
+}
+
+/**
+ * click_continue / Next repeating without application fill progress.
+ * Board wizards advance `?step=` so `progress` can be true — still treat filled===0 as looping.
+ */
+export function continueLoopStalled(history, fillResult = null, min = 3) {
+  const continues = (history || []).filter((h) => h.action === "click_continue").slice(-min);
+  if (continues.length < min) return false;
+  const filled = fillResult?.filled?.length || 0;
+  if (filled === 0) return true;
+  return continues.every((h) => !h.progress);
+}
+
+/** Absolute count breaker — escalate after N attempts of the same action (ignores progress flag). */
+export function actionAttemptLimit(history, action, max = 4) {
+  return (history || []).filter((h) => h.action === action).length >= max;
+}
+
+/** True after a successful leave from board signup onboard (nav_recovery source). */
+export function boardLeaveSucceeded(history) {
+  return (history || []).some((h) => {
+    if (h.action !== "nav_recovery") return false;
+    const src = `${h.source || ""} ${h.reason || ""} ${h.recoveryAction || ""}`;
+    return /leave_board_onboard|board.?signup/i.test(src);
+  });
+}
+
+/** Block board Sign Up after we already left the onboard trap this run. */
+export function shouldBlockBoardSignupAfterLeave(history, snap = null) {
+  if (!boardLeaveSucceeded(history)) return false;
+  const url = String(snap?.url || "");
+  // Still allow real ATS registration
+  if (/(lever\.co|greenhouse\.io|ashbyhq\.com|myworkdayjobs|workable\.com)/i.test(url)) return false;
+  return true;
 }
 
 export const MARKETING_JOB_ALERT_BODY =

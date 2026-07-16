@@ -1,9 +1,19 @@
 import { initRuntime, getRuntime, getSettings } from "./runtime.js";
-import { DEFAULT_SETTINGS } from "./defaults.js";
+import {
+  CORE_DEFAULT_SETTINGS,
+  DEFAULT_SETTINGS,
+  LEGACY_PROFILE_SETTINGS,
+} from "./defaults.js";
 import { createLogger } from "./logger.js";
 import { runPipeline, buildReadyMessage } from "./layers/runPipeline.js";
 import { runAutomationAgent, runApplyAgent } from "./layers/automationAgent.js";
 import { runSmartFill, splitName } from "./smartFill.js";
+import {
+  sortApplyFields,
+  isJobApplicationField,
+  detectRequiredUnfilled,
+  buildRequiredFieldsInstruction,
+} from "./fieldMapper.js";
 import { inspectPage, logPageSnapshot, pageFingerprint, progressScore, looksLikeApplyForm, applyAffordances } from "./layers/formDiscovery.js";
 import { preparePageForApply } from "./layers/pagePrep.js";
 import { classifyApplyStep, stepToPlan, STEP_ACTIONS } from "./layers/applyStep.js";
@@ -13,9 +23,22 @@ import {
   isStuck,
   shouldPreferUpload,
   uploadAlreadySucceeded,
+  dismissLoopStalled,
+  actionLoopStalled,
+  continueLoopStalled,
+  isResumeReviewUpsell,
+  boardLeaveSucceeded,
+  shouldBlockBoardSignupAfterLeave,
 } from "./heuristics.js";
 import { loadSiteMappings, loadSiteMappingsFromPath } from "./siteMappings.js";
-import { loadSiteLearnings, recordSiteLearning, learningsAsSiteMappings } from "./siteLearnings.js";
+import {
+  loadSiteLearnings,
+  recordSiteLearning,
+  learningsAsSiteMappings,
+  findRelevantSkills,
+  mergeSituationSkills,
+  seedSituationSkillsForHost,
+} from "./siteLearnings.js";
 import {
   fieldHintsFromFilled,
   recordLearningsFromRun,
@@ -39,15 +62,32 @@ import {
   normalizeVerifyLink,
 } from "./manualVerifyLink.js";
 import { gotoWithCloudflareRetry, isCloudflarePage, waitForCloudflareClear } from "./cloudflare.js";
+import {
+  detectCaptcha,
+  waitForCaptchaClear,
+  looksLikeCaptchaInSnap,
+  looksLikeCaptchaReason,
+  CAPTCHA_SELECTORS,
+} from "./captchaDetect.js";
 import { humanPause, humanGoto } from "./human.js";
 import { planNextAction, buildPageState } from "./layers/agentPlan.js";
 import { buildAgentContext } from "./layers/agentContext.js";
 import {
   decideWithActionBrain,
+  planNextActionOmni,
   resolveActionBrainMode,
   shouldAttachVision,
   preferIndexedAct,
 } from "./layers/actionBrain.js";
+import { appendRunHistory, loadRecentRuns, loadSimilarRuns, trailFingerprint } from "./runHistory.js";
+import {
+  enqueueSkillProposal,
+  listSkillProposals,
+  applyApprovedSkillProposals,
+  setSkillProposalStatus,
+} from "./skillProposals.js";
+import { RecoveryTracker, recoveryEscalateFromHistory } from "./recoveryTracker.js";
+import { isEmployerAtsUrl, isBoardOnboardUrl } from "./layers/applyUrlSafety.js";
 import { resolveDialogScope } from "./layers/dialogScope.js";
 import {
   validateActionOutcome,
@@ -101,9 +141,20 @@ import {
 } from "./networkSkills.js";
 import { observeStagehandCandidates } from "./layers/stagehandAdapter.js";
 import { recoveryToPlanType } from "./layers/semanticRecovery.js";
+import { createAgentCore, runAgentCore } from "./core/agentLoop.js";
+import { defineProfile, extendProfile, isProfile } from "./core/profile.js";
+import {
+  APPLY_PROFILE,
+  DIRECTORY_PROFILE,
+  GENERIC_PROFILE,
+  LEGACY_PROFILE,
+  PROFILES,
+  resolveProfile,
+} from "./profiles/index.js";
 
 /**
  * @typedef {Object} EngineOptions
+ * @property {string | object} [profile]
  * @property {Record<string, unknown>} [settings]
  * @property {() => Record<string, unknown>} [loadSiteMappings]
  * @property {(context: unknown, opts: { sessionId?: string }) => Promise<Record<string, unknown>>} [buildFillConfig]
@@ -125,12 +176,31 @@ import { recoveryToPlanType } from "./layers/semanticRecovery.js";
  * @param {EngineOptions} options
  */
 export function createEngine(options = {}) {
-  initRuntime(options);
+  const profile = resolveProfile(options.profile);
+  const runtime = initRuntime({ ...options, profile });
 
   return {
+    get profile() {
+      return runtime.profile;
+    },
+    get capabilities() {
+      return runtime.profile.capabilities;
+    },
     get settings() {
       return getSettings();
     },
+    /** Create a domain-neutral loop using this engine's active profile metadata. */
+    createAgent: (adapter = {}) =>
+      createAgentCore({
+        ...adapter,
+        profile: adapter.profile || runtime.profile,
+      }),
+    /** Run with the active profile's entry language and settings. */
+    run: (page, opts = {}) =>
+      runPipeline(page, {
+        entryLabel: runtime.profile.entryLabel,
+        ...opts,
+      }),
     /** Apply-oriented pipeline alias — apps set listing_mode/auto_submit via createEngine settings. */
     apply: (page, opts = {}) => runPipeline(page, { entryLabel: "Apply", ...opts }),
     runPipeline,
@@ -161,6 +231,10 @@ export function createEngine(options = {}) {
     gotoWithCloudflareRetry,
     isCloudflarePage,
     waitForCloudflareClear,
+    detectCaptcha,
+    waitForCaptchaClear,
+    looksLikeCaptchaInSnap,
+    looksLikeCaptchaReason,
     humanPause,
     humanGoto,
     provideManualVerifyLink,
@@ -171,8 +245,37 @@ export function createEngine(options = {}) {
   };
 }
 
+export function createProfileEngine(profile, options = {}) {
+  return createEngine({ ...options, profile: resolveProfile(profile) });
+}
+
+export function createApplyEngine(options = {}) {
+  return createProfileEngine(APPLY_PROFILE, options);
+}
+
+export function createDirectoryEngine(options = {}) {
+  return createProfileEngine(DIRECTORY_PROFILE, options);
+}
+
+export function createGenericEngine(options = {}) {
+  return createProfileEngine(GENERIC_PROFILE, options);
+}
+
 export {
   DEFAULT_SETTINGS,
+  CORE_DEFAULT_SETTINGS,
+  LEGACY_PROFILE_SETTINGS,
+  APPLY_PROFILE,
+  DIRECTORY_PROFILE,
+  GENERIC_PROFILE,
+  LEGACY_PROFILE,
+  PROFILES,
+  resolveProfile,
+  defineProfile,
+  extendProfile,
+  isProfile,
+  createAgentCore,
+  runAgentCore,
   initRuntime,
   getRuntime,
   getSettings,
@@ -195,6 +298,10 @@ export {
   computeApplyOutcome,
   outcomeJobStatus,
   isStuck,
+  dismissLoopStalled,
+  actionLoopStalled,
+  continueLoopStalled,
+  isResumeReviewUpsell,
   shouldPreferUpload,
   uploadAlreadySucceeded,
   loadSiteMappings,
@@ -207,6 +314,10 @@ export {
   synthesizeLearningsFromRun,
   fieldHintsFromFilled,
   shouldRecordLearnings,
+  sortApplyFields,
+  isJobApplicationField,
+  detectRequiredUnfilled,
+  buildRequiredFieldsInstruction,
   loadSiteAccounts,
   loadAccountForHost,
   resolveAccountForHost,
@@ -233,15 +344,38 @@ export {
   gotoWithCloudflareRetry,
   isCloudflarePage,
   waitForCloudflareClear,
+  detectCaptcha,
+  waitForCaptchaClear,
+  looksLikeCaptchaInSnap,
+  looksLikeCaptchaReason,
+  CAPTCHA_SELECTORS,
   humanPause,
   humanGoto,
   planNextAction,
   buildPageState,
   buildAgentContext,
   decideWithActionBrain,
+  planNextActionOmni,
   resolveActionBrainMode,
   shouldAttachVision,
   preferIndexedAct,
+  findRelevantSkills,
+  mergeSituationSkills,
+  seedSituationSkillsForHost,
+  appendRunHistory,
+  loadRecentRuns,
+  loadSimilarRuns,
+  trailFingerprint,
+  enqueueSkillProposal,
+  listSkillProposals,
+  applyApprovedSkillProposals,
+  setSkillProposalStatus,
+  RecoveryTracker,
+  recoveryEscalateFromHistory,
+  isEmployerAtsUrl,
+  isBoardOnboardUrl,
+  boardLeaveSucceeded,
+  shouldBlockBoardSignupAfterLeave,
   resolveDialogScope,
   validateActionOutcome,
   assessAgentEndState,

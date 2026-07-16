@@ -4,8 +4,12 @@
  */
 import { getPreferencesFromContext, resolvePreferenceFillValue } from "./fillPreferences.js";
 import { resolveIdentityFillValue } from "./fillProfile.js";
-import { resolveApplicationAnswer, EEOC_MAPPED } from "./fillApplicationAnswers.js";
-import { sortByVisualOrder } from "./fillOrder.js";
+import {
+  resolveApplicationAnswer,
+  EEOC_MAPPED,
+  APPLICATION_CONTROL_MAPPED,
+} from "./fillApplicationAnswers.js";
+import { sortByVisualOrder, compareApplyFillOrder, isVoluntaryField } from "./fillOrder.js";
 import { pickClosestSalaryOption } from "./salaryExpectation.js";
 import { humanPause, humanType } from "./human.js";
 import { loadSiteLearnings } from "./siteLearnings.js";
@@ -20,10 +24,12 @@ import {
   PLACEHOLDER_RE,
   SALARY_COMMITTED_RE,
   mapLabelToMapped,
+  mapApplicationLabelToMapped,
   nearbyLabelText,
   BEHAVIORAL_BUTTON_SEL,
   MIN_CONTROL_SKILL_SUCCESS,
   extractSalaryDisplay,
+  EEOC_DECLINE_OPTION_RE,
 } from "./primitives/controlPatterns.js";
 import {
   readControlValue,
@@ -236,7 +242,7 @@ async function verifyControlCommitted(page, mappedTo, log, opts = {}) {
 }
 
 function mapLabelToType(label) {
-  return mapLabelToMapped(label);
+  return mapLabelToMapped(label) || mapApplicationLabelToMapped(label);
 }
 
 function resolveValueForControl(mappedTo, label, context) {
@@ -394,40 +400,65 @@ async function selectFromOptions(page, options, value, mappedTo, log) {
   return true;
 }
 
-async function fillTextControl(page, labelRe, value, log) {
+async function fillTextControl(page, specOrLabelRe, value, log, snap = null) {
   if (!value) return false;
+  const spec =
+    specOrLabelRe && typeof specOrLabelRe === "object" && !(specOrLabelRe instanceof RegExp)
+      ? specOrLabelRe
+      : { labelRe: specOrLabelRe };
+  const labelRe = spec.labelRe instanceof RegExp ? spec.labelRe : null;
+
   try {
-    const byLabel = page.getByLabel(labelRe, { exact: false });
-    if ((await byLabel.count()) > 0 && (await visible(byLabel.first()))) {
-      const cur = await byLabel.first().inputValue().catch(() => "");
-      if (!cur.trim()) {
-        await byLabel.first().fill(value, { timeout: 5000 });
-        log?.layer("custom_controls", `filled ${labelRe} via label`, "debug");
+    if (spec.selector || spec.triggerSelector) {
+      const loc = page.locator(spec.selector || spec.triggerSelector).first();
+      if (await visible(loc)) {
+        const cur = await loc.inputValue().catch(() => "");
+        if (!String(cur || "").trim()) {
+          await loc.fill(String(value), { timeout: 5000 });
+          log?.layer("custom_controls", `filled text via selector`, "debug");
+          return true;
+        }
         return true;
       }
     }
   } catch {
-    /* next */
+    /* fall through */
   }
-  try {
-    const scope = page.locator("[role='dialog'], [aria-modal='true']").first();
-    const root = (await scope.count()) > 0 ? scope : page;
-    const inputs = root.locator("input[type='text'], input:not([type]), textarea");
-    const count = await inputs.count();
-    for (let i = 0; i < count; i += 1) {
-      const input = inputs.nth(i);
-      const blob = `${await input.getAttribute("placeholder").catch(() => "")} ${await input.getAttribute("aria-label").catch(() => "")}`.toLowerCase();
-      if (labelRe.test(blob)) {
-        const cur = await input.inputValue().catch(() => "");
+
+  if (labelRe) {
+    try {
+      const byLabel = page.getByLabel(labelRe, { exact: false });
+      if ((await byLabel.count()) > 0 && (await visible(byLabel.first()))) {
+        const cur = await byLabel.first().inputValue().catch(() => "");
         if (!cur.trim()) {
-          await input.fill(value, { timeout: 5000 });
-          log?.layer("custom_controls", `filled ${labelRe} via placeholder`, "debug");
+          await byLabel.first().fill(value, { timeout: 5000 });
+          log?.layer("custom_controls", `filled ${labelRe} via label`, "debug");
           return true;
         }
       }
+    } catch {
+      /* next */
     }
-  } catch {
-    /* ignore */
+    try {
+      const scope = page.locator("[role='dialog'], [aria-modal='true']").first();
+      const root = (await scope.count()) > 0 ? scope : page;
+      const inputs = root.locator("input[type='text'], input:not([type]), textarea");
+      const count = await inputs.count();
+      for (let i = 0; i < count; i += 1) {
+        const input = inputs.nth(i);
+        const blob = `${await input.getAttribute("placeholder").catch(() => "")} ${await input.getAttribute("aria-label").catch(() => "")}`.toLowerCase();
+        if (labelRe.test(blob)) {
+          const cur = await input.inputValue().catch(() => "");
+          if (!cur.trim()) {
+            await input.fill(value, { timeout: 5000 });
+            log?.layer("custom_controls", `filled ${labelRe} via placeholder`, "debug");
+            return true;
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
   }
   return false;
 }
@@ -460,25 +491,174 @@ async function fillContentEditable(page, labelRe, value, log) {
   return false;
 }
 
-async function fillSelectControl(page, labelRe, value, log, snap = null) {
+async function selectNativeOption(sel, value, log) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  const declineWanted = EEOC_DECLINE_OPTION_RE.test(raw) || /decline/i.test(raw);
+  try {
+    await sel.selectOption({ label: raw });
+    log?.layer("custom_controls", `selected native option ${raw}`, "debug");
+    return true;
+  } catch {
+    /* try value / soft match */
+  }
+  try {
+    await sel.selectOption({ value: raw });
+    return true;
+  } catch {
+    /* soft */
+  }
+  try {
+    const options = await sel.locator("option").allTextContents();
+    const match =
+      options.find((t) => String(t || "").trim().toLowerCase() === raw.toLowerCase()) ||
+      (declineWanted ? options.find((t) => EEOC_DECLINE_OPTION_RE.test(String(t || ""))) : null) ||
+      options.find((t) => new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(String(t || "")));
+    if (!match || !String(match).trim()) return false;
+    await sel.selectOption({ label: String(match).trim() });
+    log?.layer("custom_controls", `selected soft option ${String(match).trim().slice(0, 40)}`, "debug");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function mappedSelectNameRe(mappedTo) {
+  const m = String(mappedTo || "").toLowerCase();
+  if (m === "eeocgender") return /eeo\[?gender\]?|\bgender\b/i;
+  if (m === "eeocrace") return /eeo\[?race\]?|\brace\b|ethnic/i;
+  if (m === "eeocveteran") return /eeo\[?veteran\]?|veteran/i;
+  if (m === "eeocdisability") return /eeo\[?disabilit|disabilit/i;
+  if (m === "visasponsorship") return /visa|sponsor/i;
+  if (m === "workauthorization") return /authoriz|work.?auth|eligible/i;
+  return null;
+}
+
+async function fillSelectControl(page, specOrLabelRe, value, log, snap = null) {
   if (!value) return false;
+  const spec =
+    specOrLabelRe && typeof specOrLabelRe === "object" && !(specOrLabelRe instanceof RegExp)
+      ? specOrLabelRe
+      : { labelRe: specOrLabelRe };
+  const labelRe = spec.labelRe instanceof RegExp ? spec.labelRe : null;
+  const mappedTo = String(spec.mappedTo || "").toLowerCase();
+  const nameRe = mappedSelectNameRe(mappedTo);
   const scope = scopedDialog(page, snap, "fill_parent");
   const root = (await scope.count().catch(() => 0)) > 0 ? scope : page;
   try {
+    // Prefer stable Lever/Greenhouse EEOC name selectors when present.
+    if (EEOC_MAPPED.has(mappedTo)) {
+      const eeoName =
+        mappedTo === "eeocgender"
+          ? "eeo[gender]"
+          : mappedTo === "eeocrace"
+            ? "eeo[race]"
+            : mappedTo === "eeocveteran"
+              ? "eeo[veteran]"
+              : mappedTo === "eeocdisability"
+                ? "eeo[disability]"
+                : "";
+      if (eeoName) {
+        const byName = root.locator(`select[name="${eeoName}"]`).first();
+        if (await visible(byName)) {
+          if (await selectNativeOption(byName, value, log)) return true;
+        }
+      }
+    }
+
+    if (spec.selector || spec.triggerSelector) {
+      const loc = root.locator(spec.selector || spec.triggerSelector).first();
+      if (await visible(loc)) {
+        const tag = await loc.evaluate((el) => (el.tagName || "").toLowerCase()).catch(() => "");
+        const sel = tag === "select" ? loc : loc.locator("select").first();
+        if (await visible(sel)) {
+          if (await selectNativeOption(sel, value, log)) return true;
+        }
+      }
+    }
     const selects = root.locator("select");
     const count = await selects.count();
     for (let i = 0; i < count; i += 1) {
       const sel = selects.nth(i);
-      const blob = `${await sel.getAttribute("aria-label").catch(() => "")} ${await sel.getAttribute("name").catch(() => "")}`.toLowerCase();
-      if (!labelRe.test(blob) && count > 1) continue;
-      await sel.selectOption({ label: value }).catch(() => sel.selectOption({ value }));
-      log?.layer("custom_controls", `selected native option ${value}`, "debug");
-      return true;
+      if (!(await visible(sel))) continue;
+      const blob = `${await sel.getAttribute("aria-label").catch(() => "")} ${await sel.getAttribute("name").catch(() => "")} ${await nearbyLabelText(sel)}`.toLowerCase();
+      const matchesMapped = nameRe ? nameRe.test(blob) : false;
+      const matchesLabel = labelRe ? labelRe.test(blob) : false;
+      // When multiple selects exist, require a mapped/name or label hit — never pick the first blindly.
+      if (count > 1 && !matchesMapped && !matchesLabel) continue;
+      if (await selectNativeOption(sel, value, log)) return true;
     }
   } catch {
     /* ignore */
   }
   return false;
+}
+
+async function fillPronounCheckboxGroup(page, spec, value, log, snap = null) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  const scope = scopedDialog(page, snap, "fill_parent");
+  const root = (await scope.count().catch(() => 0)) > 0 ? scope : page;
+  try {
+    let group = spec.selector ? root.locator(spec.selector).first() : null;
+    if (!group || !(await visible(group))) {
+      group = root.locator("#candidatePronounsCheckboxes, [data-qa='candidatePronounsCheckboxes']").first();
+    }
+    if (!(await visible(group))) {
+      group = root.locator(".application-question").filter({ hasText: /\bpronouns?\b/i }).first();
+    }
+    if (!(await visible(group))) return false;
+
+    const compact = raw.replace(/\s+/g, "").toLowerCase();
+    const escape = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const fuzzyRe = new RegExp(escape.replace(/\s*\/\s*/g, "\\s*/\\s*"), "i");
+
+    let box = group.locator(`input[type="checkbox"][value="${raw.replace(/"/g, '\\"')}"]`).first();
+    if (!(await box.count().catch(() => 0))) {
+      box = group
+        .locator("label")
+        .filter({ hasText: new RegExp(`^\\s*${escape}\\s*$`, "i") })
+        .locator('input[type="checkbox"]')
+        .first();
+    }
+    if (!(await box.count().catch(() => 0))) {
+      box = group.locator('input[type="checkbox"]').filter({ hasText: fuzzyRe }).first();
+    }
+    if (!(await box.count().catch(() => 0))) {
+      const boxes = group.locator('input[type="checkbox"]');
+      const n = await boxes.count();
+      for (let i = 0; i < n; i += 1) {
+        const b = boxes.nth(i);
+        const v = ((await b.getAttribute("value").catch(() => "")) || "").replace(/\s+/g, "").toLowerCase();
+        if (v === compact || fuzzyRe.test(v)) {
+          box = b;
+          break;
+        }
+      }
+    }
+    // Fallback: "Use name only" when preferred pronouns option missing.
+    if (!(await box.count().catch(() => 0)) && !/use name only/i.test(raw)) {
+      box = group.locator('input[type="checkbox"][value="Use name only"], #useNameOnlyPronounsOption').first();
+    }
+    if (!(await box.count().catch(() => 0))) return false;
+
+    const checked = await box.isChecked().catch(() => false);
+    if (!checked) {
+      await box.check({ force: true }).catch(async () => {
+        await box.click({ force: true, timeout: 3000 });
+      });
+      // Lever sometimes needs the label / span click.
+      if (!(await box.isChecked().catch(() => false))) {
+        const label = group.locator("label").filter({ has: box }).first();
+        await label.click({ force: true, timeout: 3000 }).catch(() => {});
+      }
+    }
+    const ok = await box.isChecked().catch(() => false);
+    if (ok) log?.layer("custom_controls", `checked pronoun ${raw}`, "debug");
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 async function fillTypeaheadControl(page, labelRe, value, log, snap = null) {
@@ -523,6 +703,38 @@ async function fillRadioGroup(page, labelRe, value, log, snap = null) {
   return false;
 }
 
+async function clickYesNoInContainer(container, answer) {
+  const exact = new RegExp(`^\\s*${answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
+  const btn = container.locator(BEHAVIORAL_BUTTON_SEL).filter({ hasText: exact }).first();
+  if (await visible(btn)) {
+    await btn.click({ timeout: 4000 });
+    return true;
+  }
+  // Lever / Greenhouse: label wrapping radio, or input[value=Yes|No].
+  const labelOpt = container.locator("label").filter({ hasText: exact }).first();
+  if (await visible(labelOpt)) {
+    await labelOpt.click({ timeout: 4000 });
+    return true;
+  }
+  const radioExact = container
+    .locator(
+      `input[type="radio"][value="${answer}"], input[type="radio"][value="${answer.toLowerCase()}"]`,
+    )
+    .first();
+  if (await visible(radioExact)) {
+    await radioExact.click({ timeout: 4000 }).catch(async () => {
+      await radioExact.check({ force: true }).catch(() => {});
+    });
+    return true;
+  }
+  const spanOpt = container.locator("span, div").filter({ hasText: exact }).first();
+  if (await visible(spanOpt)) {
+    await spanOpt.click({ timeout: 4000 });
+    return true;
+  }
+  return false;
+}
+
 async function fillYesNoControl(page, spec, value, log, snap = null) {
   if (!value) return false;
   const raw = String(value).trim();
@@ -534,25 +746,24 @@ async function fillYesNoControl(page, spec, value, log, snap = null) {
     let container = spec.selector ? root.locator(spec.selector).first() : null;
     if (!container || !(await visible(container))) {
       const labelSnippet = (spec.questionLabel || spec.label || "")
-        .slice(0, 50)
+        .slice(0, 72)
         .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (!labelSnippet) return false;
       const entry = root
-        .locator('[class*="ashby-application-form-field-entry"], fieldset, [data-field-id]')
+        .locator(
+          '[class*="ashby-application-form-field-entry"], fieldset, [data-field-id], .application-question, .custom-question',
+        )
         .filter({ hasText: new RegExp(labelSnippet, "i") })
         .first();
-      container = entry.locator('[class*="yesno" i]').first();
+      container = entry.locator('[class*="yesno" i], [data-qa="multiple-choice"]').first();
       if (!(await visible(container))) container = entry;
     }
     if (!(await visible(container))) return false;
-    const btn = container
-      .locator(BEHAVIORAL_BUTTON_SEL)
-      .filter({ hasText: new RegExp(`^\\s*${answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i") })
-      .first();
-    if (!(await visible(btn))) return false;
-    await btn.click({ timeout: 4000 });
-    await humanPause(200, 350);
-    return true;
+    if (await clickYesNoInContainer(container, answer)) {
+      await humanPause(200, 350);
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -563,20 +774,33 @@ async function fillApplicationRadio(page, spec, value, log, snap = null) {
   const scope = scopedDialog(page, snap, "fill_parent");
   const root = (await scope.count().catch(() => 0)) > 0 ? scope : page;
   const labelSnippet = (spec.questionLabel || spec.label || "")
-    .slice(0, 50)
+    .slice(0, 72)
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const declineRe = /decline|do not (want to )?answer|prefer not|choose not|self[- ]?identify/i;
-  const answerRe = declineRe.test(String(value)) ? declineRe : new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const declineRe = EEOC_DECLINE_OPTION_RE;
+  const raw = String(value).trim();
+  const yesNo = /^(yes|y|true|1)$/i.test(raw) ? "Yes" : /^(no|n|false|0)$/i.test(raw) ? "No" : null;
+  const answerRe = declineRe.test(raw)
+    ? declineRe
+    : yesNo
+      ? new RegExp(`^\\s*${yesNo}\\s*$`, "i")
+      : new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
   try {
     let field = spec.selector ? root.locator(spec.selector).first() : null;
     if (!field || !(await visible(field))) {
       field = root
-        .locator('fieldset, [class*="ashby-application-form-field-entry"]')
+        .locator(
+          'fieldset, [class*="ashby-application-form-field-entry"], .application-question, .custom-question, [data-qa="multiple-choice"]',
+        )
         .filter({ hasText: new RegExp(labelSnippet, "i") })
         .first();
     }
     if (!(await visible(field))) return false;
+
+    if (yesNo && (await clickYesNoInContainer(field, yesNo))) {
+      await humanPause(200, 350);
+      return true;
+    }
 
     const labelOpt = field.locator("label").filter({ hasText: answerRe }).first();
     if (await visible(labelOpt)) {
@@ -767,6 +991,8 @@ async function enrichControlsVisualOrder(page, controls) {
 /** Discover custom controls from snapshot or page heuristics. */
 export function discoverCustomControlsFromSnap(snap) {
   const fromSnap = (snap?.customControls || []).filter((c) => !c.filled);
+  // Prefer snapshot controls (includes EEOC/pronouns from formDiscovery) — do not drop them
+  // when prefs widgets are also present.
   if (fromSnap.length) return fromSnap;
 
   const discovered = [];
@@ -774,13 +1000,23 @@ export function discoverCustomControlsFromSnap(snap) {
   for (const { re, mappedTo, type } of [...LABEL_TO_MAPPED, ...APPLICATION_LABEL_TO_MAPPED]) {
     if (re.test(blob) || (snap?.fields || []).some((f) => re.test(`${f.label} ${f.name}`))) {
       const widgetType =
-        mappedTo === "visasponsorship"
+        mappedTo === "visasponsorship" ||
+        mappedTo === "workauthorization" ||
+        mappedTo === "policyack" ||
+        mappedTo === "formeremployee" ||
+        mappedTo === "employeetenure" ||
+        mappedTo === "volunteer" ||
+        mappedTo === "contractor"
           ? "yesno"
-          : EEOC_MAPPED.has(mappedTo)
-            ? "radio"
-            : /salary|compensation/i.test(type)
-              ? "combobox"
-              : "text";
+          : mappedTo === "employeerelation"
+            ? "text"
+            : mappedTo === "pronouns"
+              ? "checkbox"
+              : EEOC_MAPPED.has(mappedTo)
+                ? "radio"
+                : /salary|compensation/i.test(type)
+                  ? "combobox"
+                  : "text";
       discovered.push({ label: type, mappedTo, type, widgetType, filled: false });
     }
   }
@@ -823,17 +1059,27 @@ export async function replayInteractionRecipe(page, recipe, log, snap = null) {
 /**
  * @param {import('playwright').Page} page
  * @param {object} context
- * @param {{ snap?: object, learnedSkills?: object[], log?: { layer: Function } }} [opts]
+ * @param {{ snap?: object, learnedSkills?: object[], log?: { layer: Function }, pageCtx?: object, deferVoluntary?: boolean }} [opts]
  */
 export async function fillCustomControls(page, context, opts = {}) {
   const log = opts.log || null;
   const snap = opts.snap || null;
+  const pageCtx = {
+    looksLikeApplyForm: true,
+    pageText: snap?.pageText || "",
+    headings: snap?.headings || "",
+    ...(opts.pageCtx || {}),
+  };
+  const deferVoluntary = Boolean(opts.deferVoluntary);
   const skills = opts.learnedSkills || learnedSkillsForContext(context);
   const filled = [];
   const newSkills = [];
   const unfilled = [];
 
-  const controls = discoverCustomControlsFromSnap(snap);
+  let controls = discoverCustomControlsFromSnap(snap);
+  if (deferVoluntary) {
+    controls = controls.filter((c) => !isVoluntaryField(c, pageCtx));
+  }
   const targets = await enrichControlsVisualOrder(
     page,
     controls.length > 0
@@ -845,6 +1091,7 @@ export async function fillCustomControls(page, context, opts = {}) {
           widgetType: mappedTo === "salary" ? "combobox" : "text",
         })),
   );
+  targets.sort((a, b) => compareApplyFillOrder(a, b, pageCtx));
 
   log?.layer("custom_controls", `discovered ${targets.length} control target(s)`, "info");
 
@@ -877,10 +1124,13 @@ export async function fillCustomControls(page, context, opts = {}) {
     select: fillSelectControl,
     typeahead: fillTypeaheadControl,
     radio: (p, spec, val, l, s) =>
-      EEOC_MAPPED.has(spec.mappedTo) || spec.widgetType === "application_radio"
+      EEOC_MAPPED.has(spec.mappedTo) ||
+      APPLICATION_CONTROL_MAPPED.has(spec.mappedTo) ||
+      spec.widgetType === "application_radio"
         ? fillApplicationRadio(p, spec, val, l, s)
         : fillRadioGroup(p, spec.labelRe, val, l, s),
     yesno: fillYesNoControl,
+    checkbox: fillPronounCheckboxGroup,
     date: fillDateControl,
     contenteditable: fillContentEditable,
     text: fillTextControl,
@@ -890,7 +1140,10 @@ export async function fillCustomControls(page, context, opts = {}) {
     const mappedTo = ctrl.mappedTo || ctrl.type;
     if (filledMapped.has(mappedTo)) continue;
     const label = ctrl.label || mappedTo;
-    const mapping = mapLabelToType(label) || { mappedTo, type: mappedTo };
+    const mapping =
+      mapLabelToType(label) ||
+      mapApplicationLabelToMapped(mappedTo) ||
+      { mappedTo, type: mappedTo };
     const value = resolveValueForControl(mapping.mappedTo, label, context);
     const labelRe = new RegExp(
       mapping.mappedTo === "desiredtitle"
@@ -899,19 +1152,39 @@ export async function fillCustomControls(page, context, opts = {}) {
           ? "salary|compensation|pay expect"
           : mapping.mappedTo === "location"
             ? "location|where are you|based in"
-            : label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+            : mapping.mappedTo === "eeocgender"
+              ? "gender|eeo\\[gender\\]"
+              : mapping.mappedTo === "eeocrace"
+                ? "race|ethnic|eeo\\[race\\]"
+                : mapping.mappedTo === "eeocveteran"
+                  ? "veteran|eeo\\[veteran\\]"
+                  : mapping.mappedTo === "eeocdisability"
+                    ? "disabilit|eeo\\[disability\\]"
+                    : mapping.mappedTo === "pronouns"
+                      ? "pronoun"
+                      : label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
       "i",
     );
 
     const widgetType =
       ctrl.widgetType ||
-      (mapping.mappedTo === "visasponsorship"
+      (mapping.mappedTo === "visasponsorship" ||
+      mapping.mappedTo === "workauthorization" ||
+      mapping.mappedTo === "policyack" ||
+      mapping.mappedTo === "formeremployee" ||
+      mapping.mappedTo === "employeetenure" ||
+      mapping.mappedTo === "volunteer" ||
+      mapping.mappedTo === "contractor"
         ? "yesno"
-        : EEOC_MAPPED.has(mapping.mappedTo)
-          ? "radio"
-          : mapping.mappedTo === "salary"
-            ? "combobox"
-            : "text");
+        : mapping.mappedTo === "employeerelation"
+          ? "text"
+          : mapping.mappedTo === "pronouns"
+            ? "checkbox"
+            : EEOC_MAPPED.has(mapping.mappedTo)
+              ? "radio"
+              : mapping.mappedTo === "salary"
+                ? "combobox"
+                : "text");
     const spec = {
       label,
       mappedTo: mapping.mappedTo,

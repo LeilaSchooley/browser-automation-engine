@@ -123,6 +123,41 @@ export async function humanFocus(locator, page) {
   await humanPause(150, 500);
 }
 
+/** True when the locator is a text-entry control (never <select>/checkbox/radio). */
+async function isTextEntryLocator(locator) {
+  try {
+    return await locator.evaluate((el) => {
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      if (tag === "textarea") return true;
+      if (tag === "input") {
+        const t = (el.getAttribute("type") || "text").toLowerCase();
+        return !["button", "submit", "checkbox", "radio", "file", "hidden", "reset", "image", "range", "color"].includes(t);
+      }
+      if (el.isContentEditable) return true;
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Clear value inside the field only — never page-level Ctrl+A (that selects the whole document). */
+async function clearTextEntry(locator) {
+  try {
+    await locator.selectText({ timeout: 800 });
+    await locator.press("Backspace");
+    return;
+  } catch {
+    /* fall through */
+  }
+  try {
+    await locator.fill("");
+  } catch {
+    /* ignore */
+  }
+}
+
 async function typeChars(locator, text) {
   const scale = timingScale();
   const lo = Math.round(getSettings().human_type_delay_min * scale);
@@ -153,19 +188,27 @@ async function typeWords(locator, text) {
 export async function humanType(locator, text, page) {
   if (!text) return;
 
+  // Never type into native selects — callers must use selectOption.
+  const tag = await locator.evaluate((el) => (el?.tagName || "").toLowerCase()).catch(() => "");
+  if (tag === "select") {
+    await locator.selectOption({ label: String(text) }).catch(async () => {
+      await locator.selectOption({ value: String(text) }).catch(() => {});
+    });
+    return;
+  }
+
   if (!getSettings().browser_human_behavior) {
     await locator.fill(text);
     return;
   }
 
   await humanFocus(locator, page);
-  try {
-    await locator.press("Control+A");
-    await humanPause(40, 120);
-    await locator.press("Backspace");
+
+  // Only clear when focus is actually a text entry. Blind Control+A selects the whole page
+  // (seen on Lever when AI fill targeted eeo[*] <select>s or focus missed the input).
+  if (await isTextEntryLocator(locator)) {
+    await clearTextEntry(locator);
     await humanPause(80, 250);
-  } catch {
-    // ignore
   }
 
   if (text.length <= getSettings().human_long_text_threshold) {

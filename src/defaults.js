@@ -1,44 +1,16 @@
-/** Default engine settings — apps override via createEngine({ settings }). */
-export const DEFAULT_SETTINGS = {
-  browser_human_behavior: true,
-  human_type_delay_min: 45,
-  human_type_delay_max: 130,
-  /** Multiplier for pauses between clicks/steps and per-char typing (1 = default). */
-  human_timing_scale: 1.25,
-  human_long_text_threshold: 80,
-  smart_fill_passes: 3,
-  ai_fill_enabled: false,
-  agent_enabled: true,
-  agent_max_steps: 24,
-  /** Stop after this many consecutive no-progress steps (post-recovery). */
-  agent_max_no_progress: 4,
-  agent_ai: false,
-  /** Semantic post-action validator (uses callLlm when available). */
-  action_validator: true,
-  /**
-   * When true, agent may click Submit after the form is filled.
-   * Job-apply products should leave this false (human reviews/submits).
-   */
+import { CORE_DEFAULT_SETTINGS } from "./core/defaults.js";
+
+/**
+ * Compatibility policy for callers that do not choose a profile.
+ * New consumers should prefer createApplyEngine/createDirectoryEngine or pass
+ * an explicit profile to createEngine().
+ */
+export const LEGACY_PROFILE_SETTINGS = Object.freeze({
   auto_submit: false,
-  /**
-   * When true (default), stop after a filled apply form for human review instead of
-   * inventing further actions. Pair with auto_submit=false for job-apply products.
-   */
   review_mode: true,
-  /** Persist lastStallReason / failedActions / suggestedNext into site learnings. */
-  reflection_enabled: true,
-  /** Treat no-op clicks (actor ok, no DOM fingerprint change) as failed progress. */
-  validator_detect_noop: true,
-  objective_mode: true,
-  cloudflare_wait_enabled: true,
-  cloudflare_wait_timeout_sec: 120,
-  site_mappings_path: "",
-  site_learnings_path: "",
-  site_accounts_path: "",
   auto_signup_enabled: true,
   account_email_base: "",
   listing_mode: true,
-  browser_sessions_dir: "",
   email_verify_enabled: true,
   email_verify_timeout_ms: 25000,
   email_verify_manual_timeout_ms: 600000,
@@ -46,37 +18,12 @@ export const DEFAULT_SETTINGS = {
   email_imap_user: "",
   email_imap_pass: "",
   email_imap_port: 993,
-  vision_fallback_enabled: false,
-  vision_include_screenshot: true,
-  layout_context_enabled: true,
-  early_vision_escalation: true,
-  /**
-   * Action brain routing:
-   * - primary: LLM+affordance map decides every non-safety step (default when agent_ai)
-   * - escalate: legacy heuristic-first, AI only when stuck/ambiguous
-   * - off: heuristics only
-   */
-  action_brain_mode: "",
-  /** When true, try deterministic policy before LLM in primary mode. */
-  deterministic_first: true,
-  /** When true, action catalog ranks next moves before step-type deterministic policy. */
-  action_catalog_first: true,
-  /**
-   * Capture mutating XHR/fetch as API skill candidates (directory / repeat hosts).
-   * Also enables optional Unbrowse CLI when unbrowse_enabled is true.
-   */
-  network_skills_enabled: false,
-  api_skills_path: "",
-  /** Optional: shell out to `unbrowse` CLI if installed (directory fast path only). */
-  unbrowse_enabled: false,
-  /** CDP accessibility-tree perception with stable refs and page diff. */
-  page_perception_enabled: true,
-  /** Directory for JSONL event logs and debug screenshots. */
-  event_log_dir: "",
-  debug_screenshots_enabled: false,
-  stagehand_enabled: false,
-  stagehand_model: "",
-  stagehand_cache_enabled: true,
-  captcha_solver_enabled: false,
-  captcha_solver_url: "",
-};
+});
+
+/** Default engine settings — retained for backward compatibility. */
+export const DEFAULT_SETTINGS = Object.freeze({
+  ...CORE_DEFAULT_SETTINGS,
+  ...LEGACY_PROFILE_SETTINGS,
+});
+
+export { CORE_DEFAULT_SETTINGS };

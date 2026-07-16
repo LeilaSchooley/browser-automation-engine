@@ -1,9 +1,15 @@
 /**
  * Tab hygiene for persistent / antidetect profiles (AdsPower, Multilogin).
  * Keeps one working page and closes blanks, ads, and abandoned siblings.
+ * Never closes employer ATS tabs (Lever, Greenhouse, Ashby, Workday, …).
  */
 import { normalizeHost } from "../host.js";
-import { isOauthProviderHost, isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import {
+  isOauthProviderHost,
+  isSuspiciousApplyHost,
+  isEmployerAtsUrl,
+  isBoardOnboardUrl,
+} from "./applyUrlSafety.js";
 
 const AD_POPUP_HOST_RE =
   /doubleclick|googlesyndication|googleads|adservice|adsystem|taboola|outbrain|popads|propeller|onclicka|clickadu|adsterra|adnxs|criteo/i;
@@ -24,6 +30,15 @@ function pageUrlSafe(page) {
   } catch {
     return "";
   }
+}
+
+function closePriority(url) {
+  if (isBlankOrNewTabUrl(url)) return 0;
+  if (AD_POPUP_HOST_RE.test(url) || isSuspiciousApplyHost(normalizeHost(url))) return 1;
+  if (isBoardOnboardUrl(url)) return 2;
+  if (isOauthProviderHost(url)) return 3;
+  if (isEmployerAtsUrl(url)) return 100; // never preferred for close
+  return 50;
 }
 
 /**
@@ -51,11 +66,15 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
 
   async function closePage(page, reason) {
     if (!page || page.isClosed() || page === keepPage) return;
-    const url = pageUrlSafe(page).slice(0, 90);
+    const url = pageUrlSafe(page);
+    if (isEmployerAtsUrl(url)) {
+      log?.layer(layer, `keeping ATS tab (skip close): ${url.slice(0, 90)}`, "info");
+      return;
+    }
     try {
       await page.close({ runBeforeUnload: false });
       closed += 1;
-      log?.layer(layer, `closed tab (${reason}): ${url || "blank"}`, "debug");
+      log?.layer(layer, `closed tab (${reason}): ${url.slice(0, 90) || "blank"}`, "debug");
     } catch {
       /* ignore */
     }
@@ -65,7 +84,6 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
     await closePage(closePrevious, "abandoned after tab switch");
   }
 
-  // Refresh list after previous close.
   try {
     pages = (context.pages() || []).filter((p) => p && !p.isClosed());
   } catch {
@@ -75,16 +93,21 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
   for (const page of pages) {
     if (page === keepPage) continue;
     const url = pageUrlSafe(page);
+    if (isEmployerAtsUrl(url)) continue;
     if (isBlankOrNewTabUrl(url)) {
       await closePage(page, "blank");
       continue;
     }
-    if (
-      AD_POPUP_HOST_RE.test(url) ||
-      isSuspiciousApplyHost(normalizeHost(url)) ||
-      isOauthProviderHost(url)
-    ) {
-      await closePage(page, isOauthProviderHost(url) ? "sso-popup" : "ad/suspicious");
+    if (AD_POPUP_HOST_RE.test(url) || isSuspiciousApplyHost(normalizeHost(url))) {
+      await closePage(page, "ad/suspicious");
+      continue;
+    }
+    if (isOauthProviderHost(url)) {
+      await closePage(page, "sso-popup");
+      continue;
+    }
+    if (isBoardOnboardUrl(url)) {
+      await closePage(page, "board-onboard");
     }
   }
 
@@ -94,13 +117,21 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
     pages = [];
   }
 
-  // Cap total open tabs (keep active + newest extras until under max).
+  // Cap total open tabs — close lowest-value extras first; never ATS.
   if (pages.length > maxPages) {
-    const extras = pages.filter((p) => p !== keepPage);
-    // Close oldest first (pages() order is roughly open order).
-    const overflow = extras.slice(0, Math.max(0, pages.length - maxPages));
-    for (const page of overflow) {
+    const extras = pages
+      .filter((p) => p !== keepPage)
+      .map((p) => ({ page: p, url: pageUrlSafe(p), priority: closePriority(pageUrlSafe(p)) }))
+      .filter((e) => !isEmployerAtsUrl(e.url))
+      .sort((a, b) => a.priority - b.priority || 0);
+
+    let need = pages.length - maxPages;
+    // Prefer closing onboard/ads; if only ATS+keep remain, allow over-cap.
+    for (const { page } of extras) {
+      if (need <= 0) break;
+      const before = closed;
       await closePage(page, "over tab cap");
+      if (closed > before) need -= 1;
     }
   }
 
@@ -119,6 +150,29 @@ export async function pruneExtraPages(context, keepPage, opts = {}) {
 }
 
 /**
+ * Prefer an existing ATS tab as the working page when present.
+ * @param {import('playwright').BrowserContext} context
+ * @param {import('playwright').Page|null} current
+ * @returns {Promise<import('playwright').Page|null>}
+ */
+export async function preferAtsWorkingPage(context, current = null) {
+  let pages = [];
+  try {
+    pages = (context?.pages?.() || []).filter((p) => p && !p.isClosed());
+  } catch {
+    return current;
+  }
+  const ats = [...pages].reverse().find((p) => isEmployerAtsUrl(pageUrlSafe(p)));
+  if (!ats || ats === current) return current || ats || null;
+  try {
+    await ats.bringToFront();
+  } catch {
+    /* ignore */
+  }
+  return ats;
+}
+
+/**
  * Pick a single working page for a CDP/persistent session and close the rest.
  * Prefer an existing blank tab so AdsPower doesn't spawn yet another window.
  * @param {import('playwright').BrowserContext} context
@@ -134,6 +188,7 @@ export async function prepareWorkingPage(context, opts = {}) {
   }
 
   let page =
+    pages.find((p) => isEmployerAtsUrl(pageUrlSafe(p))) ||
     pages.find((p) => isBlankOrNewTabUrl(pageUrlSafe(p))) ||
     pages[0] ||
     null;
@@ -142,7 +197,7 @@ export async function prepareWorkingPage(context, opts = {}) {
     page = await context.newPage();
   }
 
-  await pruneExtraPages(context, page, { log, maxPages: 1, layer: "tabs" });
+  await pruneExtraPages(context, page, { log, maxPages: 2, layer: "tabs" });
 
   try {
     await page.bringToFront();

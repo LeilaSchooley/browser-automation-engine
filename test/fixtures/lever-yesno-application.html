@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Application — Lever-style</title>
+  </head>
+  <body>
+    <form class="application-form">
+      <ul class="application-questions">
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Are you legally authorized to work in the United States for any employer?
+            <span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field5]" value="Yes" /><span>Yes</span></label
+                >
+              </li>
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field5]" value="No" /><span>No</span></label
+                >
+              </li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Will you now or in the future require The Trevor Project to commence ("sponsor") an
+            immigration case in order to employ you (for example, H-1B or other employment-based
+            immigration case)? This is sometimes called "sponsorship" for an employment-based visa
+            status.
+            <span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field6]" value="Yes" /><span>Yes</span></label
+                >
+              </li>
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field6]" value="No" /><span>No</span></label
+                >
+              </li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Do you understand that applicants must be authorized to work for ANY employer in the
+            U.S., and that we are unable to sponsor or take over sponsorship of an employment Visa at
+            this time?
+            <span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <ul data-qa="multiple-choice">
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field7]" value="Yes" /><span>Yes</span></label
+                >
+              </li>
+              <li>
+                <label
+                  ><input type="radio" name="cards[0][field7]" value="No" /><span>No</span></label
+                >
+              </li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="application-question custom-question">
+          <div class="application-label">
+            Given the salary posted for this position, what are your salary expectations? (Please
+            indicate a dollar amount)
+            <span class="required">*</span>
+          </div>
+          <div class="application-field">
+            <input type="text" name="cards[0][field8]" id="salary-expect" />
+          </div>
+        </li>
+      </ul>
+    </form>
+  </body>
+</html>

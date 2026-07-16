@@ -163,7 +163,7 @@ export function looksLikeHardGate(snap) {
       reason: "third-party SSO (Apple/Google/…) — use email Continue on the job site",
     };
   }
-  const blob = `${snap?.title || ""} ${snap?.pageText || ""} ${snap?.headings || ""}`.toLowerCase();
+  const blob = `${snap?.title || ""} ${snap?.pageText || ""} ${snap?.headings || ""} ${snap?.url || ""}`.toLowerCase();
   if (CAPTCHA_TEXT.test(blob)) {
     return { hard: true, reason: "CAPTCHA / human verification" };
   }

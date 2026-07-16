@@ -10,6 +10,9 @@
       "types": "./dist/index.d.ts",
       "import": "./src/index.js",
       "default": "./src/index.js"
+    },
+    "./smart-fill": {
+      "default": "./src/smart_fill.js"
     }
   },
   "files": [

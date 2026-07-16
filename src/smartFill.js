@@ -8,8 +8,16 @@ import { fillCustomControls } from "./fillCustomControls.js";
 import { recordSiteLearning, mergeControlSkills } from "./siteLearnings.js";
 import { normalizeHost } from "./host.js";
 import { hasPreferencesGateFields, getPreferencesFromContext } from "./fillPreferences.js";
-import { hasUnfilledYesNoOrEEOC } from "./fillApplicationAnswers.js";
-import { sortByVisualOrder } from "./fillOrder.js";
+import { hasUnfilledYesNoOrEEOC, hasUnfilledApplicationControls } from "./fillApplicationAnswers.js";
+import {
+  sortByVisualOrder,
+  sortApplyFields,
+  detectRequiredUnfilled,
+  buildRequiredFieldsInstruction,
+  isEarlyCustomControl,
+  isVoluntaryField,
+} from "./fillOrder.js";
+import { canUseStagehand, attemptStagehandAct } from "./layers/stagehandAdapter.js";
 import { SMART_FILL_SALARY_HELPER } from "./primitives/browserControlPatterns.js";
 import { looksLikeJobAlertSignupForm, looksLikeMarketingYesNoModal, looksLikeApplySignupGate, looksLikeGoogleVignetteAd } from "./heuristics.js";
 
@@ -25,16 +33,26 @@ export function splitName(fullName) {
   return [parts[0], parts[1]];
 }
 
-async function evaluateSmartFill(page, config, siteMappings) {
+async function evaluateSmartFill(page, config, siteMappings, options = {}) {
   return page.evaluate(
-    ({ js, helperJs, config: cfg, siteMappings: maps }) => {
+    ({ js, helperJs, config: cfg, siteMappings: maps, options: opts }) => {
       // eslint-disable-next-line no-eval
       eval(helperJs);
       // eslint-disable-next-line no-eval
       eval(js);
-      return runSmartFill(cfg, maps);
+      return runSmartFill(cfg, maps, opts);
     },
-    { js: SMART_FILL_JS, helperJs: SMART_FILL_SALARY_HELPER, config, siteMappings },
+    {
+      js: SMART_FILL_JS,
+      helperJs: SMART_FILL_SALARY_HELPER,
+      config,
+      siteMappings,
+      options: {
+        profile: options.profile || config.profile || "apply",
+        disabledFields: options.disabledFields || config.disabledFields || {},
+        captureUndo: false,
+      },
+    },
   );
 }
 
@@ -43,6 +61,22 @@ async function fillViaPlaywright(page, selector, value, { longText = false } = {
     const loc = page.locator(selector).first();
     if (!(await loc.count()) || !(await loc.isVisible())) {
       return false;
+    }
+    const tag = await loc.evaluate((el) => (el?.tagName || "").toLowerCase()).catch(() => "");
+    if (tag === "select") {
+      const raw = String(value || "").trim();
+      try {
+        await loc.selectOption({ label: raw });
+        return true;
+      } catch {
+        /* try value */
+      }
+      try {
+        await loc.selectOption({ value: raw });
+        return true;
+      } catch {
+        return false;
+      }
     }
     const human = getSettings().browser_human_behavior;
     if (human) {
@@ -85,6 +119,11 @@ function textValueForEntry(entry, config) {
     firstname: config.firstName,
     lastname: config.lastName,
     fullname: config.fullName || [config.firstName, config.lastName].filter(Boolean).join(" "),
+    chosenname:
+      config.preferredName ||
+      config.chosenName ||
+      config.fullName ||
+      [config.firstName, config.lastName].filter(Boolean).join(" "),
     tel: config.phone,
     coverletter: config.coverLetter,
     additionalinfo: config.coverLetter,
@@ -94,8 +133,14 @@ function textValueForEntry(entry, config) {
     address2: config.addressLine2,
     city: config.city,
     state: config.state,
-    zip: config.postalCode,
+    // Host apps send postalCode; older configs used postalCode typo / zip.
+    zip: config.postalCode || config.postalCode || config.zip || "",
     country: config.country,
+    citystatezip:
+      config.cityStateZip ||
+      [config.city, config.state, config.postalCode || config.postalCode || config.zip]
+        .filter(Boolean)
+        .join(", "),
   };
   if (entry.type && byType[entry.type]) return String(byType[entry.type] || "").trim();
   return entry.value || "";
@@ -151,11 +196,18 @@ async function processTextEntry(page, entry, config, seen, allFilled, log) {
   }
 }
 
-async function applyCustomControlsResult(page, context, log, { snap, seen, allFilled, lastUnfilled, hostname }) {
+async function applyCustomControlsResult(
+  page,
+  context,
+  log,
+  { snap, seen, allFilled, lastUnfilled, hostname, pageCtx = null, deferVoluntary = false },
+) {
   const customResult = await fillCustomControls(page, context, {
     snap,
     learnedSkills: context?.siteLearnings?.controlSkills || [],
     log,
+    pageCtx,
+    deferVoluntary,
   });
 
   log?.layer(
@@ -239,19 +291,28 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     };
   }
 
+  const pageCtx = {
+    looksLikeApplyForm: true,
+    pageText: snap?.pageText || "",
+    headings: snap?.headings || "",
+    pageKind: snap?.pageKind,
+  };
+
   const preferCustomFirst =
     snap &&
     (hasPreferencesGateFields(snap) ||
-      (snap.customControls || []).some((c) => !c.filled && c.widgetType === "combobox"));
+      (snap.customControls || []).some((c) => isEarlyCustomControl(c, pageCtx)));
   let customRanEarly = false;
   if (preferCustomFirst) {
-    log?.layer("smart_fill", "custom controls first (modal comboboxes)", "info");
+    log?.layer("smart_fill", "custom controls first (required yes/no / pronouns / company)", "info");
     await applyCustomControlsResult(page, context, log, {
       snap,
       seen,
       allFilled,
       lastUnfilled,
       hostname: snap?.hostname,
+      pageCtx,
+      deferVoluntary: true,
     });
     customRanEarly = true;
   }
@@ -259,7 +320,10 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
   const passes = Math.max(1, getSettings().smart_fill_passes);
   for (let passNum = 0; passNum < passes; passNum++) {
     log?.layer("smart_fill", `pass ${passNum + 1}/${passes}`, "info");
-    lastResult = await evaluateSmartFill(page, config, siteMappings);
+    lastResult = await evaluateSmartFill(page, config, siteMappings, {
+      profile: config.profile || getSettings().smart_fill_profile || "apply",
+      disabledFields: config.disabledFields || {},
+    });
     lastUnfilled = lastResult.unfilled || [];
 
     log?.layer(
@@ -273,13 +337,17 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
       lastResult.fileTargets,
     );
 
-    // 1) Profile / short fields — top-to-bottom on the page
-    for (const entry of sortByVisualOrder(shortText)) {
+    // 1) Profile / short fields — required + logical order (name → pronouns → email → …)
+    const orderedShort = sortApplyFields(shortText, pageCtx);
+    for (const entry of orderedShort) {
+      if (entry.required && !isVoluntaryField(entry, pageCtx)) {
+        log?.layer("smart_fill", `priority required: ${entry.type} ${String(entry.clue || "").slice(0, 40)}`, "debug");
+      }
       await processTextEntry(page, entry, config, seen, allFilled, log);
     }
 
-    // 2) Resume / cover uploads in visual order
-    for (const entry of sortByVisualOrder(files)) {
+    // 2) Resume / cover uploads in apply order
+    for (const entry of sortApplyFields(files, pageCtx)) {
       const sel = entry.selector || "";
       if (!sel || seen.has(sel) || !filePath) continue;
       if (await uploadFile(page, sel, filePath)) {
@@ -336,7 +404,7 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     }
 
     // 3) Cover letter / additional info last (top-to-bottom among long fields)
-    for (const entry of sortByVisualOrder(longText)) {
+    for (const entry of sortApplyFields(longText, pageCtx)) {
       await processTextEntry(page, entry, config, seen, allFilled, log);
     }
 
@@ -357,14 +425,42 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
       allFilled,
       lastUnfilled,
       hostname: lastResult.hostname,
+      pageCtx,
+      deferVoluntary: false,
     });
   }
 
   let aiAnswers = {};
   const answerUnfilled = getRuntime().answerUnfilledFields;
+  lastUnfilled = sortApplyFields(
+    (lastUnfilled || []).map((u) => ({
+      ...u,
+      label: u.label || u.clue || "",
+    })),
+    pageCtx,
+  );
+  if ((lastResult.required_unfilled || 0) > 0) {
+    log?.layer(
+      "smart_fill",
+      `${lastResult.required_unfilled} required field(s) still empty after DOM fill`,
+      "info",
+    );
+  }
   if (getSettings().ai_fill_enabled && lastUnfilled.length && answerUnfilled) {
-    const orderedUnfilled = sortByVisualOrder(lastUnfilled);
-    log?.layer("smart_fill", `AI fallback for ${orderedUnfilled.length} unfilled field(s)`, "info");
+    // Prefer truly required unfilled for the AI budget; voluntary EEOC last.
+    const requiredFirst = [
+      ...detectRequiredUnfilled(lastUnfilled, pageCtx),
+      ...lastUnfilled.filter((u) => !looksRequiredish(u, pageCtx) && !isVoluntaryField(u, pageCtx)),
+      ...lastUnfilled.filter((u) => isVoluntaryField(u, pageCtx)),
+    ];
+    const orderedUnfilled = requiredFirst.filter(
+      (u, i, arr) => arr.findIndex((x) => x.selector === u.selector) === i,
+    );
+    log?.layer(
+      "smart_fill",
+      `AI fallback for ${orderedUnfilled.length} job field(s) (${detectRequiredUnfilled(orderedUnfilled, pageCtx).length} required)`,
+      "info",
+    );
     aiAnswers = await answerUnfilled(context, { unfilled: orderedUnfilled, sessionId });
     for (const entry of orderedUnfilled) {
       const selector = entry.selector || "";
@@ -379,14 +475,32 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     }
   }
 
+  // Leftover required — one Stagehand nudge (apply fields only), never footer noise.
+  const stillRequired = detectRequiredUnfilled(
+    (lastUnfilled || []).filter((u) => !seen.has(u.selector)),
+    pageCtx,
+  );
+  if (stillRequired.length && canUseStagehand(context).ok) {
+    const instruction = buildRequiredFieldsInstruction(stillRequired, pageCtx);
+    if (instruction) {
+      log?.layer("smart_fill", `Stagehand required pass (${stillRequired.length})`, "info");
+      await attemptStagehandAct(page, context, { instruction, log }).catch(() => null);
+    }
+  }
+
   const types = [...new Set(allFilled.map((f) => f.type || "?"))].sort();
   return {
     filled: allFilled,
     filled_types: types,
-    unfilled: lastUnfilled,
-    unfilled_count: Math.max(0, lastUnfilled.length - Object.keys(aiAnswers).length),
+    unfilled: lastUnfilled.filter((u) => !seen.has(u.selector)),
+    unfilled_count: Math.max(0, lastUnfilled.filter((u) => !seen.has(u.selector)).length),
     ai_filled: Object.keys(aiAnswers).length,
     hostname: lastResult.hostname || "",
     site_mapped: lastResult.siteMapped || [],
+    required_unfilled: stillRequired.length,
   };
+}
+
+function looksRequiredish(u, ctx = {}) {
+  return Boolean(u?.required || u?.isRequired) && !isVoluntaryField(u, ctx);
 }

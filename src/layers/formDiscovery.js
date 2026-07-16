@@ -309,13 +309,15 @@ async function scanDom(page, { listingMode = true } = {}) {
       function discoverApplicationControls() {
         const out = [];
         const visited = new Set();
+        // Lever custom cards (.application-question) before bare form — form's first <label> is often Name/Email.
         const roots = queryDeep(
-          '[class*="ashby-application-form-field-entry"], fieldset, [class*="yesno" i], [data-field-id], [class*="application-form"] label, form',
+          '[class*="ashby-application-form-field-entry"], fieldset, [class*="yesno" i], [data-field-id], [class*="application-form"] label, .application-question, .custom-question, [data-qa="multiple-choice"], form',
         );
         for (const root of roots) {
           if (!isVisibleEl(root) || visited.has(root)) continue;
           const questionEl =
             root.querySelector('[class*="question-title"]') ||
+            root.querySelector(".application-label") ||
             root.querySelector("legend") ||
             root.querySelector("label");
           let label = (questionEl?.textContent || "").replace(/\s+/g, " ").trim();
@@ -326,6 +328,17 @@ async function scanDom(page, { listingMode = true } = {}) {
             const parent = yesnoEl.closest('[class*="field-entry"], fieldset, form');
             const parentQ = parent?.querySelector('[class*="question-title"], legend, label');
             label = (parentQ?.textContent || "").replace(/\s+/g, " ").trim();
+          }
+          if (
+            (!label || label.length < 4) &&
+            (root.matches('[data-qa="multiple-choice"]') || root.getAttribute("data-qa") === "multiple-choice")
+          ) {
+            label = (
+              root.closest(".application-question, .custom-question")?.querySelector(".application-label")
+                ?.textContent || ""
+            )
+              .replace(/\s+/g, " ")
+              .trim();
           }
           if (!label || label.length < 4) continue;
 
@@ -377,64 +390,234 @@ async function scanDom(page, { listingMode = true } = {}) {
             continue;
           }
 
-          // Greenhouse-style EEOC / compliance <select>s.
+          // Greenhouse/Lever-style EEOC / compliance <select>s.
+          // Always label from the select itself — never inherit a form-wide question title
+          // (Lever's first .application-label is often "Pronouns", which poisoned eeo[*] selects).
           const selects = [...root.querySelectorAll("select")].filter(isVisibleEl);
           for (const sel of selects) {
             if (visited.has(sel)) continue;
+            const nameAttr = (sel.getAttribute("name") || "").trim();
+            const scopedLabel = (
+              sel.closest(".application-question, .custom-question, [class*='field-entry'], fieldset")
+                ?.querySelector(".application-label, [class*='question-title'], legend")
+                ?.textContent || ""
+            )
+              .replace(/\s+/g, " ")
+              .trim();
             const selLabel =
-              label ||
+              scopedLabel ||
               (sel.getAttribute("aria-label") || "").trim() ||
               nearbyFieldLabel(sel) ||
+              nameAttr ||
               "";
-            const selMap = mapApplicationLabel(selLabel);
+            // Prefer name/id (eeo[gender]) over free-text label so Pronouns never wins.
+            const selMap =
+              mapApplicationLabel(nameAttr) ||
+              (/\beeo\[?gender\]?/i.test(nameAttr) ? { mappedTo: "eeocgender", type: "eeocgender" } : null) ||
+              (/\beeo\[?race\]?/i.test(nameAttr) ? { mappedTo: "eeocrace", type: "eeocrace" } : null) ||
+              (/\beeo\[?veteran\]?/i.test(nameAttr) ? { mappedTo: "eeocveteran", type: "eeocveteran" } : null) ||
+              (/\beeo\[?disabilit/i.test(nameAttr) ? { mappedTo: "eeocdisability", type: "eeocdisability" } : null) ||
+              mapApplicationLabel(selLabel);
             if (!selMap) continue;
+            // Native <select> is never Lever pronouns (those are checkboxes).
+            if (selMap.mappedTo === "pronouns" && !/pronoun/i.test(nameAttr)) continue;
             const opts = [...sel.options].map((o) => (o.textContent || "").trim().toLowerCase());
             const looksCompliance =
               opts.some((o) => /decline|prefer not|do not wish|i do not want|n\/a|male|female|veteran|disabilit/.test(o)) ||
               ["eeocgender", "eeocrace", "eeocveteran", "eeocdisability"].includes(selMap.mappedTo);
-            if (!looksCompliance && !["visasponsorship", "workauthorization"].includes(selMap.mappedTo)) continue;
+            if (
+              !looksCompliance &&
+              !["visasponsorship", "workauthorization", "policyack"].includes(selMap.mappedTo)
+            ) {
+              continue;
+            }
             visited.add(sel);
             const meta = elementMetaWithModal(sel, applyModals);
             out.push({
-              label: selLabel.slice(0, 120),
+              label: (selLabel || selMap.mappedTo).slice(0, 120),
               mappedTo: selMap.mappedTo,
               type: selMap.type,
               widgetType: "select",
               text: "",
               selector: elementSelector(sel, meta),
               triggerSelector: elementSelector(sel, meta),
-              questionLabel: selLabel.slice(0, 120),
+              questionLabel: (selLabel || selMap.mappedTo).slice(0, 120),
               top: meta.top,
               left: Math.round(sel.getBoundingClientRect().left),
               filled: Boolean(sel.value && sel.value !== "" && sel.selectedIndex > 0),
               inModal: meta.inApplyModal || meta.inDialog,
             });
           }
+
+          // Lever-style pronouns checkbox groups.
+          const pronounBoxes = [...root.querySelectorAll('input[type="checkbox"][name*="pronoun"], input[type="checkbox"][name*="Pronoun"], #candidatePronounsCheckboxes input[type="checkbox"], [data-qa="candidatePronounsCheckboxes"] input[type="checkbox"]')].filter(isVisibleEl);
+          if (pronounBoxes.length >= 2) {
+            const group =
+              pronounBoxes[0].closest("#candidatePronounsCheckboxes, [data-qa='candidatePronounsCheckboxes'], ul, fieldset, .application-field") ||
+              pronounBoxes[0].parentElement;
+            if (group && !visited.has(group)) {
+              const pLabel =
+                (group.closest(".application-question")?.querySelector(".application-label")?.textContent || "").replace(/\s+/g, " ").trim() ||
+                label ||
+                "Pronouns";
+              if (/\bpronoun/i.test(pLabel) || pronounBoxes.some((b) => /pronoun/i.test(b.name || ""))) {
+                visited.add(group);
+                const meta = elementMetaWithModal(group, applyModals);
+                out.push({
+                  label: pLabel.slice(0, 120) || "Pronouns",
+                  mappedTo: "pronouns",
+                  type: "pronouns",
+                  widgetType: "checkbox",
+                  text: "",
+                  selector: elementSelector(group, meta),
+                  triggerSelector: elementSelector(group, meta),
+                  questionLabel: pLabel.slice(0, 120) || "Pronouns",
+                  top: meta.top,
+                  left: Math.round(group.getBoundingClientRect().left),
+                  filled: pronounBoxes.some((b) => b.checked),
+                  inModal: meta.inApplyModal || meta.inDialog,
+                });
+              }
+            }
+          }
         }
 
         // Also scan top-level selects with EEOC-ish options (Greenhouse bare forms).
         for (const sel of queryDeep("select")) {
           if (!isVisibleEl(sel) || visited.has(sel)) continue;
+          const nameAttr = (sel.getAttribute("name") || "").trim();
+          const scopedLabel = (
+            sel.closest(".application-question, .custom-question, [class*='field-entry'], fieldset")
+              ?.querySelector(".application-label, [class*='question-title'], legend")
+              ?.textContent || ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
           const selLabel =
+            scopedLabel ||
             (sel.getAttribute("aria-label") || "").trim() ||
             nearbyFieldLabel(sel) ||
+            nameAttr ||
             "";
-          const selMap = mapApplicationLabel(selLabel);
+          const selMap =
+            mapApplicationLabel(nameAttr) ||
+            (/\beeo\[?gender\]?/i.test(nameAttr) ? { mappedTo: "eeocgender", type: "eeocgender" } : null) ||
+            (/\beeo\[?race\]?/i.test(nameAttr) ? { mappedTo: "eeocrace", type: "eeocrace" } : null) ||
+            (/\beeo\[?veteran\]?/i.test(nameAttr) ? { mappedTo: "eeocveteran", type: "eeocveteran" } : null) ||
+            (/\beeo\[?disabilit/i.test(nameAttr) ? { mappedTo: "eeocdisability", type: "eeocdisability" } : null) ||
+            mapApplicationLabel(selLabel);
           if (!selMap) continue;
+          if (selMap.mappedTo === "pronouns" && !/pronoun/i.test(nameAttr)) continue;
           visited.add(sel);
           const meta = elementMetaWithModal(sel, applyModals);
           out.push({
-            label: selLabel.slice(0, 120),
+            label: (selLabel || selMap.mappedTo).slice(0, 120),
             mappedTo: selMap.mappedTo,
             type: selMap.type,
             widgetType: "select",
             text: "",
             selector: elementSelector(sel, meta),
             triggerSelector: elementSelector(sel, meta),
-            questionLabel: selLabel.slice(0, 120),
+            questionLabel: (selLabel || selMap.mappedTo).slice(0, 120),
             top: meta.top,
             left: Math.round(sel.getBoundingClientRect().left),
             filled: Boolean(sel.value && sel.value !== "" && sel.selectedIndex > 0),
+            inModal: meta.inApplyModal || meta.inDialog,
+          });
+        }
+
+        // Top-level Lever pronouns groups (often not wrapped in <label>, so missed above).
+        for (const group of queryDeep("#candidatePronounsCheckboxes, [data-qa='candidatePronounsCheckboxes']")) {
+          if (!isVisibleEl(group) || visited.has(group)) continue;
+          const boxes = [...group.querySelectorAll('input[type="checkbox"]')].filter(isVisibleEl);
+          if (boxes.length < 2) continue;
+          visited.add(group);
+          const pLabel =
+            (group.closest(".application-question")?.querySelector(".application-label")?.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim() || "Pronouns";
+          const meta = elementMetaWithModal(group, applyModals);
+          out.push({
+            label: pLabel.slice(0, 120),
+            mappedTo: "pronouns",
+            type: "pronouns",
+            widgetType: "checkbox",
+            text: "",
+            selector: elementSelector(group, meta),
+            triggerSelector: elementSelector(group, meta),
+            questionLabel: pLabel.slice(0, 120),
+            top: meta.top,
+            left: Math.round(group.getBoundingClientRect().left),
+            filled: boxes.some((b) => b.checked),
+            inModal: meta.inApplyModal || meta.inDialog,
+          });
+        }
+
+        // Lever Yes/No multiple-choice cards (radios under .application-label, no wrapping <label>).
+        for (const group of queryDeep('[data-qa="multiple-choice"], ul[data-qa="multiple-choice"]')) {
+          if (!isVisibleEl(group) || visited.has(group)) continue;
+          const radios = [...group.querySelectorAll('input[type="radio"], [role="radio"]')].filter(isVisibleEl);
+          if (radios.length < 2) continue;
+          const question = group.closest(".application-question, .custom-question") || group.parentElement;
+          const qLabel = (
+            question?.querySelector(".application-label")?.textContent ||
+            question?.querySelector('[class*="question-title"]')?.textContent ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          if (!qLabel) continue;
+          const mapping = mapApplicationLabel(qLabel);
+          if (!mapping) continue;
+          const scope = question && question !== group ? question : group;
+          if (visited.has(scope)) continue;
+          visited.add(scope);
+          visited.add(group);
+          const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+          const meta = elementMetaWithModal(scope, applyModals);
+          out.push({
+            label: qLabel.slice(0, 160),
+            mappedTo: mapping.mappedTo,
+            type: mapping.type,
+            widgetType: "radio",
+            text: "",
+            selector: elementSelector(scope, meta),
+            triggerSelector: elementSelector(group, meta),
+            questionLabel: qLabel.slice(0, 160),
+            top: meta.top,
+            left: Math.round(scope.getBoundingClientRect().left),
+            filled,
+            inModal: meta.inApplyModal || meta.inDialog,
+          });
+        }
+
+        // Lever required textareas for company affiliation (related to employee → "No").
+        for (const ta of queryDeep("textarea.card-field-input, .application-question textarea, textarea[name*='cards']")) {
+          if (!isVisibleEl(ta) || visited.has(ta)) continue;
+          const qLabel = (
+            ta.closest(".application-question, .custom-question")?.querySelector(".application-label")?.textContent ||
+            ta.getAttribute("aria-label") ||
+            nearbyFieldLabel(ta) ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          const mapping = mapApplicationLabel(qLabel);
+          if (!mapping || !["employeerelation"].includes(mapping.mappedTo)) continue;
+          visited.add(ta);
+          const meta = elementMetaWithModal(ta, applyModals);
+          out.push({
+            label: qLabel.slice(0, 160),
+            mappedTo: mapping.mappedTo,
+            type: mapping.type,
+            widgetType: "text",
+            text: "",
+            selector: elementSelector(ta, meta),
+            triggerSelector: elementSelector(ta, meta),
+            questionLabel: qLabel.slice(0, 160),
+            top: meta.top,
+            left: Math.round(ta.getBoundingClientRect().left),
+            filled: Boolean(ta.value && String(ta.value).trim()),
             inModal: meta.inApplyModal || meta.inDialog,
           });
         }
@@ -910,9 +1093,22 @@ async function scanDom(page, { listingMode = true } = {}) {
         };
       });
       for (const ac of discoverApplicationControls()) {
-        if (!customControls.some((c) => c.mappedTo === ac.mappedTo && c.label === ac.label)) {
+        const idx = customControls.findIndex(
+          (c) => c.mappedTo === ac.mappedTo && (c.label === ac.label || c.selector === ac.selector),
+        );
+        if (idx < 0) {
           customControls.push(ac);
+          continue;
         }
+        // Prefer pronouns checkbox group over a mis-tagged select; prefer concrete eeo[name] selects.
+        const prev = customControls[idx];
+        const acBetter =
+          (prev.widgetType === "select" && ac.widgetType === "checkbox" && ac.mappedTo === "pronouns") ||
+          (prev.widgetType === "select" &&
+            ac.widgetType === "select" &&
+            /eeo\[/i.test(String(ac.selector || "")) &&
+            !/eeo\[/i.test(String(prev.selector || "")));
+        if (acBetter) customControls[idx] = ac;
       }
       const customControlCount = customControls.filter((c) => !c.filled).length;
 

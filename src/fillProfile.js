@@ -22,8 +22,12 @@ export function getApplicantProfile(context = {}) {
     linkedinUrl: String(a.linkedinUrl || a.linkedin || "").trim(),
     websiteUrl: String(a.websiteUrl || a.website || "").trim(),
     city: String(a.city || "").trim(),
+    state: String(a.state || "").trim(),
     country: String(a.country || "").trim(),
     addressLine1: String(a.addressLine1 || "").trim(),
+    addressLine2: String(a.addressLine2 || "").trim(),
+    postalCode: String(a.postalCode || a.postalCode || a.zip || "").trim(),
+    pronouns: String(a.pronouns || "").trim(),
   };
 }
 
@@ -41,7 +45,10 @@ export function applicantPromptBlock(context) {
 - LinkedIn: ${p.linkedinUrl || "(none)"}
 - Website: ${p.websiteUrl || "(none)"}
 - City: ${p.city || "(none)"}
-- Country: ${p.country || "(none)"}`;
+- State: ${p.state || "(none)"}
+- Postal code: ${p.postalCode || "(none)"}
+- Country: ${p.country || "(none)"}
+- Address: ${p.addressLine1 || "(none)"}`;
 }
 
 /** Map a field label/target to a profile value. */
@@ -50,16 +57,27 @@ export function resolveIdentityFillValue(targetHint, proposedValue, context) {
   const blob = String(targetHint || "").toLowerCase();
   if (/first\s*name|given\s*name|forename|fname/i.test(blob)) return p.firstName || proposedValue;
   if (/last\s*name|surname|family\s*name|lname/i.test(blob)) return p.lastName || proposedValue;
-  if (/full\s*name|your\s*name|^name$/i.test(blob) && !/user\s*name|company/i.test(blob)) {
+  if (/full\s*name|your\s*name|chosen\s*name|preferred\s*name|^name$/i.test(blob) && !/user\s*name|company/i.test(blob)) {
     return p.fullName || proposedValue;
   }
   if (/\bemail\b|e-mail/i.test(blob)) return p.email || proposedValue;
   if (/\bphone\b|mobile|tel\b/i.test(blob)) return p.phone || proposedValue;
   if (/linkedin/i.test(blob)) return p.linkedinUrl || proposedValue;
   if (/website|portfolio|url/i.test(blob) && !/linkedin/i.test(blob)) return p.websiteUrl || proposedValue;
-  if (/\bcity\b|town/i.test(blob)) return p.city || proposedValue;
+  if (/\bcity\b|town/i.test(blob) && !/state|zip|postal/i.test(blob)) return p.city || proposedValue;
+  if (/\bstate\b|province/i.test(blob) && !/city|zip|postal/i.test(blob)) return p.state || proposedValue;
   if (/\bcountry\b/i.test(blob)) return p.country || proposedValue;
-  if (/address|street/i.test(blob)) return p.addressLine1 || proposedValue;
+  if (/postal|zip\s*code|\bzip\b|postcode/i.test(blob)) return p.postalCode || "";
+  if (/city,\s*state|city\/state|\bzip code\b/i.test(blob)) {
+    return [p.city, p.state, p.postalCode].filter(Boolean).join(", ") || "";
+  }
+  if (/address|street/i.test(blob)) {
+    // Never fall back to email / phone-looking proposed values when street is empty.
+    if (p.addressLine1) return p.addressLine1;
+    if (/@|\.com\b/i.test(String(proposedValue || ""))) return "";
+    return "";
+  }
+  if (/\bpronouns?\b/i.test(blob)) return p.pronouns || proposedValue;
   return proposedValue;
 }
 

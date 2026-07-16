@@ -8,15 +8,26 @@ import { classifyApplyStep, stepToPlan } from "./applyStep.js";
 import { shouldEscalateToAi, shouldAiOverrideHeuristic } from "./semanticRecovery.js";
 import { isStuck, shouldPreferUpload, recentPreferencesSignup, preferencesSignupSubmitted, applyEntrySucceeded, uploadStalled } from "../heuristics.js";
 import { ariaContextBlock, shouldAttachAriaSnapshot } from "./ariaDistill.js";
-import { boostInteractivesWithLearnings, findLearnedAffordanceReplay, isDismissAffordanceSignature, affordanceSignature } from "../siteLearnings.js";
+import { boostInteractivesWithLearnings, findLearnedAffordanceReplay, isDismissAffordanceSignature, affordanceSignature, findRelevantSkills, findSituationMemoryPlan } from "../siteLearnings.js";
 import { buildDeterministicPlan, isDeterministicState, shouldInvokeLlm, smartFillStalledOnStep } from "./deterministicPolicy.js";
 import { buildPageState } from "./pageState.js";
 import { shouldPreferStagehand, buildStagehandPlan } from "./stagehandPolicy.js";
 import { buildActionCatalog } from "./actionCatalog.js";
 import { pickBestAction, topCatalogActions } from "./actionPicker.js";
+import { loadSimilarRuns, trailFingerprint } from "../runHistory.js";
+import { applyApprovedSkillProposals } from "../skillProposals.js";
+import { recordEngineEvent } from "../observability.js";
 
 /** Steps that must stay mechanical — never delegated to the LLM brain. */
 export const SAFETY_STEPS = new Set(["loading", "blocked"]);
+
+/**
+ * Omni decision entry — Observe snap in → plan out.
+ * Alias for decideWithActionBrain with locked precedence.
+ */
+export async function planNextActionOmni(snap, fillResult, history, context, page = null) {
+  return decideWithActionBrain(snap, fillResult, history, context, page);
+}
 
 /**
  * @param {object} settings
@@ -154,6 +165,13 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
   const classification = classifyApplyStep(snap, fillResult, history, context);
   const { planNextAction } = getRuntime();
 
+  // Merge approved skill proposals before retrieval
+  try {
+    applyApprovedSkillProposals(snap?.hostname || context?.targetHost);
+  } catch {
+    /* ignore */
+  }
+
   // Hard safety — mechanical only
   if (SAFETY_STEPS.has(classification.step)) {
     return withDecision(
@@ -167,6 +185,29 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
   // Boost interactives with per-host affordance memory before planning
   if (snap?.interactives?.length && context?.siteLearnings?.affordanceSkills?.length) {
     snap.interactives = boostInteractivesWithLearnings(snap.interactives, context.siteLearnings);
+  }
+
+  // Omni decide order:
+  // 1 safety (done) 2 situation-memory 3 affordance replay 4 catalog 5 det/stagehand 6 LLM 7 classifier
+
+  const catalogEnabled = settings.action_catalog_first !== false;
+  const catalog = catalogEnabled
+    ? buildActionCatalog(snap, fillResult, history, context, classification)
+    : [];
+
+  const situationPlan = findSituationMemoryPlan(snap, context?.siteLearnings, catalog);
+  if (situationPlan && mode === "primary") {
+    recordEngineEvent("skill_replay", {
+      source: "situation-memory",
+      action: situationPlan.type,
+      skillId: situationPlan.situationSkillId,
+    });
+    return withDecision(
+      preferIndexedAct(situationPlan, snap),
+      classification,
+      "situation-memory",
+      situationPlan.reason,
+    );
   }
 
   // Fast replay of a uniquely learned affordance (no LLM) when signature matches
@@ -188,6 +229,7 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
       } else if (classification?.step === "entry" && applyEntrySucceeded(history, fp)) {
         /* blocked — apply entry already succeeded on this page fingerprint */
       } else {
+        recordEngineEvent("skill_replay", { source: "affordance-memory", action: replay.type });
         return withDecision(
           preferIndexedAct(replay, snap),
           classification,
@@ -198,11 +240,9 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
     }
   }
 
-  // Action catalog (Option B) — primary decision layer after safety/replay
-  const catalogEnabled = settings.action_catalog_first !== false;
-  const catalog = buildActionCatalog(snap, fillResult, history, context, classification);
+  // Action catalog — primary decision layer after safety/replay
   let deferredCatalogPlan = null;
-  if (catalogEnabled) {
+  if (catalogEnabled && catalog.length) {
     const catalogPlan = pickBestAction(catalog, {
       classification,
       history,
@@ -211,8 +251,6 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
       context,
     });
     if (catalogPlan) {
-      // Primary brain: let the LLM pick novel dismiss CTAs (e.g. "Continue with basic resume")
-      // instead of always string-matching dismiss_overlay.
       const deferOverlayToLlm =
         mode === "primary" &&
         catalogPlan.type === "dismiss_overlay" &&
@@ -295,10 +333,28 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
     );
   }
 
-  // mode === "primary" — catalog + deterministic tried; LLM for ambiguity or stall
+  // mode === "primary" — LLM for ambiguity or stall (with skill + run RAG)
   if (!isPageUnloaded(snap) && (stalled || shouldInvokeLlm(classification, snap, pageState, history) || deferredCatalogPlan)) {
     const enriched = await enrichContextWithVision(page, context, snap, history, classification);
     enriched.actionCatalog = topCatalogActions(catalog, 6);
+    enriched.relevantSkills = findRelevantSkills(snap, context?.siteLearnings, { limit: 5 }).map((s) => ({
+      signature: s.signature,
+      action: s.action,
+      avoidActions: s.avoidActions,
+      confidence: s.confidence,
+      score: s._retrieveScore,
+    }));
+    enriched.similarRuns = loadSimilarRuns(
+      snap?.hostname || context?.targetHost,
+      snap?.url,
+      trailFingerprint(history).split("→"),
+      { limit: 3 },
+    ).map((r) => ({
+      outcome: r.outcome,
+      filled: r.filled,
+      trail: r.trail,
+      url: r.url,
+    }));
     const aiPlan = await planNextAction(enriched, snap, history, fillResult, classification, page);
     if (aiPlan && !(aiPlan.type === "wait_user" && isPageUnloaded(snap))) {
       plan = preferIndexedAct(aiPlan, snap);
