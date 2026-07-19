@@ -1,6 +1,9 @@
 /**
  * Single source of truth for control label maps, confirm patterns, placeholders, and DOM helpers.
+ * Screening detectors live in patterns/applicationScreening.js — compose here.
  */
+
+import { SCREENING_LABEL_TO_MAPPED } from "../patterns/applicationScreening.js";
 
 export const LABEL_TO_MAPPED = [
   { re: /desired\s*job|job\s*title|target\s*role|position\s*sought/i, mappedTo: "desiredtitle", type: "desiredtitle" },
@@ -9,30 +12,17 @@ export const LABEL_TO_MAPPED = [
     mappedTo: "salary",
     type: "salary",
   },
-  { re: /\blocation\b|where\s*are\s*you|based\s*in|city\s*region/i, mappedTo: "location", type: "location" },
+  {
+    re: /\blocation\b|where\s*are\s*you|based\s*in|city\s*region|what\s*city|which\s*city|city\s*do\s*you\s*live|live\s*in\b|hometown/i,
+    mappedTo: "location",
+    type: "location",
+  },
   { re: /\bcountry\b/i, mappedTo: "country", type: "country" },
 ];
 
-/** Visa / EEOC / work-auth / pronouns / employer-policy application questions. */
-export const APPLICATION_LABEL_TO_MAPPED = [
-  {
-    // Acknowledgments that contain "sponsor" must answer Yes (understand) — before sponsorship.
-    re: /do you understand|unable to sponsor|acknowledge|confirm that you (understand|agree)|agree that applicants must be authorized/i,
-    mappedTo: "policyack",
-    type: "policyack",
-  },
-  {
-    // Future sponsorship need — not the "unable to sponsor" policy ack.
-    re: /will you (now|in the future).*sponsor|require.*(immigrat|sponsor)|need.*sponsor|sponsorship for an employment|H-1B/i,
-    mappedTo: "visasponsorship",
-    type: "visasponsorship",
-  },
-  {
-    re: /legally\s*authorized|authorized\s*to\s*work|work\s*authorization|eligible\s*to\s*work|right\s*to\s*work|authorized to work for any employer/i,
-    mappedTo: "workauthorization",
-    type: "workauthorization",
-  },
-  // Employer conflict-of-interest / affiliation (Trevor-style cards) — default No for external applicants.
+/** Affiliation / EEOC / pronouns — after screening so policy/visa win on overlapping copy. */
+const AFFILIATION_AND_EEOC_LABEL_TO_MAPPED = [
+  // Employer conflict-of-interest / affiliation — default No for external applicants.
   // "related to an employee" before "current…employee" — "currently related" must not match current employee.
   {
     re: /related to an employee|related to .{0,40}\bemployee\b|family member.{0,40}(employ|work)/i,
@@ -65,6 +55,12 @@ export const APPLICATION_LABEL_TO_MAPPED = [
   { re: /\brace\b|ethnic/i, mappedTo: "eeocrace", type: "eeocrace" },
   { re: /veteran/i, mappedTo: "eeocveteran", type: "eeocveteran" },
   { re: /disabilit/i, mappedTo: "eeocdisability", type: "eeocdisability" },
+];
+
+/** Visa / work-auth / remote / relocate / hide-from / EEOC / pronouns / affiliation. */
+export const APPLICATION_LABEL_TO_MAPPED = [
+  ...SCREENING_LABEL_TO_MAPPED,
+  ...AFFILIATION_AND_EEOC_LABEL_TO_MAPPED,
 ];
 
 /** Employer affiliation questions answered "No" for typical external applicants. */
@@ -110,7 +106,33 @@ export const CONFIRM_TEXT =
 export const CONFIRM_TEXT_STRICT =
   /^(save|done|ok|confirm|apply|submit|set|add|select|done selecting|übernehmen|valider)$/i;
 
-export const PLACEHOLDER_RE = /^(salary expectations|select|choose|\?)$/i;
+export const PLACEHOLDER_RE = /^(salary expectations|select|choose|\?|search(?:\s*\.+)?)$/i;
+
+/**
+ * Combobox display text that is still empty (question label + Search… / Required chrome).
+ * @param {string} text
+ * @param {string} [label]
+ */
+export function looksLikeEmptyComboboxText(text, label = "") {
+  const trimmed = String(text || "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return true;
+  if (PLACEHOLDER_RE.test(trimmed)) return true;
+  if (/^search\b/i.test(trimmed)) return true;
+
+  let body = trimmed;
+  const lab = String(label || "").replace(/\s+/g, " ").trim();
+  if (lab) {
+    const esc = lab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    body = body.replace(new RegExp(esc, "ig"), " ");
+  }
+  body = body
+    .replace(/\brequired\b/gi, "")
+    .replace(/\bsearch\s*\.+/gi, "")
+    .replace(/[*\s?]+/g, " ")
+    .trim();
+  if (!body || PLACEHOLDER_RE.test(body) || /^search\b/i.test(body)) return true;
+  return false;
+}
 
 export const SALARY_COMMITTED_RE = /USD|€|£|\$[\d,]+|€[\d,]+|£[\d,]+|negotiable|flexible|\d{2,}[, ]/i;
 
@@ -170,7 +192,7 @@ export async function nearbyLabelText(loc) {
  */
 export function isCommittedValue(value, mappedTo = "") {
   const trimmed = String(value || "").replace(/\s+/g, " ").trim();
-  if (!trimmed || PLACEHOLDER_RE.test(trimmed)) return false;
+  if (!trimmed || PLACEHOLDER_RE.test(trimmed) || looksLikeEmptyComboboxText(trimmed)) return false;
   if (mappedTo === "salary") return SALARY_COMMITTED_RE.test(trimmed);
   return trimmed.length > 0 && !/^select|choose$/i.test(trimmed);
 }

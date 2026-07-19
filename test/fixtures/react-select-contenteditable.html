@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>React Select + contenteditable</title>
+  </head>
+  <body>
+    <h1>Application</h1>
+    <label>Cover letter</label>
+    <div id="cover" contenteditable="true" aria-label="Cover letter" role="textbox"></div>
+
+    <label for="react-select-3-input">Country</label>
+    <div class="Select__control" data-testid="country-select">
+      <div class="Select__value-container">
+        <div class="Select__placeholder">Select…</div>
+        <div class="Select__input">
+          <input id="react-select-3-input" autocomplete="off" />
+        </div>
+      </div>
+    </div>
+    <div class="Select__menu" style="display: none" role="listbox">
+      <div role="option">United States</div>
+      <div role="option">Canada</div>
+    </div>
+  </body>
+</html>

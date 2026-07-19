@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account | Y Combinator</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        background: #f5f0e8;
+        padding: 40px;
+      }
+      .card {
+        background: #fff;
+        max-width: 420px;
+        margin: 0 auto;
+        padding: 32px;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 24px;
+      }
+      .row {
+        display: flex;
+        gap: 16px;
+      }
+      .field {
+        flex: 1;
+        margin-bottom: 20px;
+        position: relative;
+      }
+      /* Floating label — NOT wired via label[for] / input.labels */
+      .field > span.float {
+        display: block;
+        font-size: 12px;
+        color: #666;
+        margin-bottom: 4px;
+      }
+      .field input {
+        width: 100%;
+        border: none;
+        border-bottom: 1px solid #333;
+        padding: 6px 0;
+        font-size: 14px;
+        outline: none;
+      }
+      .err {
+        color: #c00;
+        font-size: 12px;
+        margin-top: 4px;
+      }
+      button {
+        margin-top: 12px;
+        padding: 10px 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Sign up to access Work at a Startup</h1>
+      <form id="signup">
+        <div class="row">
+          <div class="field">
+            <span class="float">First Name</span>
+            <input type="text" autocomplete="given-name" />
+            <div class="err">First name required</div>
+          </div>
+          <div class="field">
+            <span class="float">Last Name</span>
+            <input type="text" autocomplete="family-name" />
+            <div class="err">Last name required</div>
+          </div>
+        </div>
+        <div class="field">
+          <span class="float">Email</span>
+          <input type="email" autocomplete="email" />
+          <div class="err">Valid email required</div>
+        </div>
+        <div class="field">
+          <span class="float">Username</span>
+          <input type="text" autocomplete="username" value="accountycom50fd" />
+        </div>
+        <div class="field">
+          <span class="float">Password</span>
+          <input type="password" autocomplete="new-password" />
+        </div>
+        <button type="submit">Sign Up</button>
+        <a href="/login">Log in</a>
+      </form>
+    </div>
+  </body>
+</html>

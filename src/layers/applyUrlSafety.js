@@ -235,9 +235,14 @@ export function entryHrefScoreDelta(meta = {}, pageHost = "", { hasNativeApplyBu
         delta -= 140;
       }
       if (linkHost && linkHost !== host) {
-        delta -= 40;
-        if (isAggregatorHost(linkHost)) delta -= 80;
-        if (isSuspiciousApplyHost(linkHost)) delta -= 200;
+        // Real employer ATS hops are the apply destination — don't demote them.
+        if (isEmployerAtsHost(linkHost)) {
+          delta += 20;
+        } else {
+          delta -= 40;
+          if (isAggregatorHost(linkHost)) delta -= 80;
+          if (isSuspiciousApplyHost(linkHost)) delta -= 200;
+        }
       }
     } catch {
       /* ignore */

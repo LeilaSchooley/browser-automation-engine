@@ -114,7 +114,18 @@ describe("signup flow", () => {
     await withFixturePage("betalist-login", async (page) => {
       const snap = await inspectPage(page);
       const context = {
-        auth: { email: "founder@testco.example", password: "test-password-123" },
+        auth: {
+          email: "founder@testco.example",
+          password: "test-password-123",
+          fromSiteAccount: true,
+          hostname: snap.hostname,
+        },
+        siteAccount: {
+          email: "founder@testco.example",
+          password: "test-password-123",
+          verified: true,
+          hostname: snap.hostname,
+        },
         profile: { email: "founder@testco.example" },
       };
       const c = classifyApplyStep(snap, { filled: [] }, [], context);

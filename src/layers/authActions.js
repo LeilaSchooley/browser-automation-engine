@@ -68,7 +68,13 @@ export function looksLikePasswordlessLoginSurface(snap) {
   if (!snap) return false;
   if ((snap.passwordFieldCount || 0) > 0) return false;
   if ((snap.fieldCount || 0) > 2) return false;
-  const hasIdentity = (snap.emailFieldCount || 0) > 0 || (snap.usernameFieldCount || 0) > 0;
+  const hasIdentity =
+    (snap.emailFieldCount || 0) > 0 ||
+    (snap.usernameFieldCount || 0) > 0 ||
+    (snap.fields || []).some((f) => {
+      const t = `${f.type || ""} ${f.label || ""} ${f.name || ""}`.toLowerCase();
+      return /email|username|user\s*id|ycid/.test(t);
+    });
   if (!hasIdentity) return false;
   const hasContinue =
     (snap.continueCandidates || []).length > 0 ||
@@ -79,14 +85,26 @@ export function looksLikePasswordlessLoginSurface(snap) {
   const titleBlob = `${snap.title || ""} ${snap.headings || ""}`.toLowerCase();
   if (/\blog\s?in\b|\bsign\s?in\b|verify code|enter the code/.test(titleBlob)) return true;
   // Fallback for SPA login cards whose title is generic ("Account | Y Combinator") and headings
-  // are unrendered: a tiny card with a lone identity field, a Continue, strong passwordless
-  // phrasing, and a "Create an account" switch is a passwordless login surface.
+  // / body text are sparsely captured (YC often reports ~170ch of pageText without the CTA copy).
   const bodyBlob = `${snap.pageText || ""}`.toLowerCase();
+  const fieldBlob = (snap.fields || []).map((f) => `${f.label || ""} ${f.name || ""}`).join(" ").toLowerCase();
   const strongPhrase =
-    /magic link|enter the code|one[- ]time code|log\s?in to|sign\s?in to|passwordless/.test(bodyBlob);
+    /magic link|enter the code|one[- ]time code|log\s?in to|sign\s?in to|passwordless/.test(bodyBlob) ||
+    /username or email|email or username/.test(fieldBlob);
   const hasSignupSwitch =
     (snap.signUpCount || 0) > 0 || /create an account|don'?t have an account/.test(bodyBlob);
-  return strongPhrase && hasSignupSwitch;
+  if (strongPhrase && hasSignupSwitch) return true;
+  // Tiny identity+Continue card on an account.* host (YC Work at a Startup gate).
+  const host = String(snap.hostname || "").toLowerCase();
+  const continueToApply = /continue=.*apply\.|account\./i.test(String(snap.url || ""));
+  if (
+    (host.startsWith("account.") || continueToApply) &&
+    (snap.fieldCount || 0) === 1 &&
+    strongPhrase
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function hasEmailIdentityField(snap) {
@@ -150,8 +168,13 @@ export function looksLikeExistingAccountError(snap) {
 /** Prompt/CTA to switch to sign-in (often next to Sign up). */
 export function looksLikeExistingAccountSignInPrompt(snap) {
   if (!snap) return false;
-  if ((snap.signInCount || 0) > 0 && EXISTING_ACCOUNT_SIGNIN_CTA.test(snapBlob(snap))) return true;
-  if ((snap.signInCount || 0) > 0 && /already (have an )?account|already a member/i.test(snapBlob(snap))) {
+  const blob = snapBlob(snap);
+  // "Don't have an account? Create…" is the opposite — never treat as sign-in prompt.
+  if (/\bdon'?t have an account\b/i.test(blob) && !/\balready (have an )?account\b/i.test(blob)) {
+    return false;
+  }
+  if ((snap.signInCount || 0) > 0 && EXISTING_ACCOUNT_SIGNIN_CTA.test(blob)) return true;
+  if ((snap.signInCount || 0) > 0 && /\balready (have an )?account\b|\balready a member\b/i.test(blob)) {
     return true;
   }
   return false;
@@ -231,21 +254,47 @@ export function looksLikeHardGate(snap) {
   return { hard: false, reason: "" };
 }
 
-export function hasAuthCredentials(context) {
+/**
+ * True when we have host-scoped login credentials for THIS site — not the applicant
+ * profile email alone. Profile identity is for signup/smart_fill; site login requires
+ * context.auth bound to the current host (via attachAccountToContext / ensureAccount)
+ * or an explicit password on context.auth after host attach.
+ */
+export function hasAuthCredentials(context, hostname = "") {
   const auth = context?.auth || {};
-  const profile = context?.profile || {};
-  const identity = auth.email || profile.email || auth.username;
   const password = auth.password;
-  return Boolean(identity && password);
+  if (!password) return false;
+
+  const host = String(hostname || context?.siteAccount?.hostname || "").toLowerCase();
+  const site = context?.siteAccount;
+  if (site && (site.email || site.username) && site.password) {
+    // Reject failed / unverified leftovers when asking "do we already have a login?"
+    if (site.lastLoginFailedAt && !site.verified) return false;
+    if (host) {
+      const siteHost = String(site.hostname || site.host || "").toLowerCase();
+      if (siteHost && siteHost !== host && !host.endsWith(`.${siteHost}`) && !siteHost.endsWith(`.${host}`)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // context.auth only counts when it was attached for a site account (not bare profile).
+  if (auth.provisioned || auth.fromSiteAccount) {
+    return Boolean((auth.email || auth.username) && password);
+  }
+  return false;
 }
 
 export function getAuthCredentials(context) {
   const auth = context?.auth || {};
+  const site = context?.siteAccount || {};
   const profile = context?.profile || {};
+  // Prefer site-scoped identity; fall back to profile email only for fill values, not login gate.
   return {
-    email: auth.email || profile.email || "",
-    username: auth.username || "",
-    password: auth.password || "",
+    email: auth.email || site.email || profile.email || "",
+    username: auth.username || site.username || "",
+    password: auth.password || site.password || "",
   };
 }
 
@@ -289,9 +338,21 @@ export async function attemptAuthLogin(page, snap, context, log) {
   });
 
   let filledIdentity = false;
+  const fieldBlob = (snap?.fields || [])
+    .map((f) => `${f.label || ""} ${f.name || ""} ${f.placeholder || ""}`)
+    .join(" ")
+    .toLowerCase();
+  // YC "Username or email" is counted as usernameField — still prefer a real email.
+  const combinedIdentityField = /username or email|email or username|email\s*\/\s*username|ycid/.test(
+    fieldBlob,
+  );
+  const siteKnowsEmail = Boolean(context?.siteAccount?.existsOnSite && email);
   const preferEmail =
     Boolean(email) &&
-    ((snap?.emailFieldCount || 0) > 0 || (snap?.usernameFieldCount || 0) === 0);
+    ((snap?.emailFieldCount || 0) > 0 ||
+      (snap?.usernameFieldCount || 0) === 0 ||
+      combinedIdentityField ||
+      siteKnowsEmail);
   if (!preferEmail && (username || (snap?.usernameFieldCount || 0) > 0)) {
     if (identityCount > pairIndex) {
       try {
@@ -403,24 +464,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
   return { ok: true, learnings };
 }
 
-export function scoreSignInCandidate(meta) {
-  const blob = `${meta.text} ${meta.testId} ${meta.aria}`.toLowerCase();
-  if (
-    !SIGN_IN_TEXT.test(blob) &&
-    !/\bsign in\b|\blog in\b|^login$|already a member|sign in now/i.test(blob)
-  ) {
-    return 0;
-  }
-  if (OAUTH_PROVIDER_TEXT.test(blob) && !/email/.test(blob)) return 0;
-  let score = 50;
-  if (/sign in with email|log in with email/.test(blob)) score += 80;
-  if (/sign in now|already a member|already have an account|have an account/.test(blob)) score += 55;
-  if (meta.tag === "button" || meta.role === "button" || meta.tag === "input" || meta.tag === "a") {
-    score += 20;
-  }
-  if (/magic link/.test(blob)) score -= 30;
-  return score;
-}
+export { scoreSignInCandidate } from "./perception/candidateScoring.js";
 
 const SIGNIN_ENTRY_PATTERNS = [
   /already have an account/i,
@@ -471,7 +515,11 @@ async function discoverSameSiteSignInUrl(page, currentUrl) {
 
 /** Switch Sign up → Sign in when we already have a verified site account. */
 export async function clickSignInEntry(page, snap, log) {
-  const candidate = snap?.signInCandidates?.[0];
+  // Never follow magic-link CTAs from the passwordless login card — that loops OTP.
+  const candidates = (snap?.signInCandidates || []).filter(
+    (c) => !/magic link|email me a (code|link)|send (me )?(a )?code/i.test(String(c.text || "")),
+  );
+  const candidate = candidates[0] || null;
   log?.layer("auth", `opening sign in: ${candidate?.text || "Sign in"}`, "info");
 
   // Prefer the actual same-site login href. Clicking a nested text node can report success
@@ -509,7 +557,7 @@ export async function clickSignInEntry(page, snap, log) {
   try {
     const byText = safeTextLocator(
       page,
-      /already have an account|already a member|have an account|sign in now/i,
+      /\balready have an account\b|\balready a member\b|\bsign in now\b/i,
     ).first();
     if (await byText.isVisible({ timeout: 800 }).catch(() => false)) {
       await byText.click({ timeout: 8000 });

@@ -3,6 +3,13 @@
  * Apps put real values on context.applicant (or context.profile).
  */
 
+import {
+  looksLikeHideFromCompanies,
+  getHideFromCompaniesValue,
+} from "./patterns/applicationScreening.js";
+
+export { looksLikeHideFromCompanies as isHideCompaniesFieldBlob } from "./patterns/applicationScreening.js";
+
 export function getApplicantProfile(context = {}) {
   const a = context.applicant || context.profile || {};
   const fullName = String(a.fullName || a.name || a.founderName || "").trim();
@@ -28,6 +35,7 @@ export function getApplicantProfile(context = {}) {
     addressLine2: String(a.addressLine2 || "").trim(),
     postalCode: String(a.postalCode || a.postalCode || a.zip || "").trim(),
     pronouns: String(a.pronouns || "").trim(),
+    hideFromCompanies: getHideFromCompaniesValue(context),
   };
 }
 
@@ -55,9 +63,14 @@ export function applicantPromptBlock(context) {
 export function resolveIdentityFillValue(targetHint, proposedValue, context) {
   const p = getApplicantProfile(context);
   const blob = String(targetHint || "").toLowerCase();
+  // Hide-from-employer list — settings value only; never fall back to personal name.
+  if (looksLikeHideFromCompanies(blob)) return p.hideFromCompanies || "";
   if (/first\s*name|given\s*name|forename|fname/i.test(blob)) return p.firstName || proposedValue;
   if (/last\s*name|surname|family\s*name|lname/i.test(blob)) return p.lastName || proposedValue;
-  if (/full\s*name|your\s*name|chosen\s*name|preferred\s*name|^name$/i.test(blob) && !/user\s*name|company/i.test(blob)) {
+  if (
+    /full\s*name|your\s*name|chosen\s*name|preferred\s*name|^name$/i.test(blob) &&
+    !/user\s*name|compan(y|ies)/i.test(blob)
+  ) {
     return p.fullName || proposedValue;
   }
   if (/\bemail\b|e-mail/i.test(blob)) return p.email || proposedValue;

@@ -1,14 +1,26 @@
 /**
- * Application-specific answers (visa, work auth, EEOC) — separate from job-search preferences.
+ * Application screening answers (visa, work auth, remote, relocate, EEOC) —
+ * separate from job-search preferences. Detectors live in patterns/applicationScreening.js.
  */
 
 import { COMPANY_NO_MAPPED } from "./primitives/controlPatterns.js";
+import {
+  SCREENING_MAPPED,
+  REMOTE_ANSWER_BY_PREF,
+  normalizeRemotePreference,
+  looksLikePolicyAck,
+  looksLikeSponsorship,
+  looksLikeWorkAuth,
+  looksLikeRemote,
+  looksLikeRelocate,
+  looksLikeHideFromCompanies,
+  getHideFromCompaniesValue,
+  HIDE_FROM_COMPANIES_PROMPT_RULE,
+} from "./patterns/applicationScreening.js";
 
 export const EEOC_MAPPED = new Set(["eeocgender", "eeocrace", "eeocveteran", "eeocdisability"]);
 export const APPLICATION_CONTROL_MAPPED = new Set([
-  "visasponsorship",
-  "workauthorization",
-  "policyack",
+  ...SCREENING_MAPPED,
   "pronouns",
   ...COMPANY_NO_MAPPED,
   ...EEOC_MAPPED,
@@ -31,37 +43,27 @@ export function getApplicationAnswers(context = {}) {
       ? truthy(p.workAuthorized ?? a.workAuthorized, true)
       : true;
   const pronouns = String(p.pronouns || a.pronouns || process.env.YOUR_PRONOUNS || "He/him").trim();
+  const remotePreference = normalizeRemotePreference(p.remotePreference ?? a.remotePreference);
+  const willingToRelocate = truthy(p.willingToRelocate ?? a.willingToRelocate, false);
+  const hideFromCompanies = getHideFromCompaniesValue(context);
 
   return {
     needsVisaSponsorship: needsVisa,
     visaAnswer: needsVisa ? "Yes" : "No",
     workAuthorized,
     workAuthorizationAnswer: workAuthorized ? "Yes" : "No",
+    remotePreference,
+    remoteAnswer: REMOTE_ANSWER_BY_PREF[remotePreference],
+    willingToRelocate,
+    relocateAnswer: willingToRelocate ? "Yes" : "No",
+    hideFromCompanies,
     eeocDecline,
     eeocDeclineAnswer: "Decline to self-identify",
     pronouns: pronouns || "Use name only",
   };
 }
 
-function looksLikeWorkAuth(blob) {
-  return /legally\s*authorized|authorized\s*to\s*work|work\s*authorization|eligible\s*to\s*work|right\s*to\s*work|authorized to work for any employer/.test(
-    blob,
-  );
-}
-
-function looksLikeSponsorship(blob) {
-  return /will you (now|in the future).*sponsor|require.*(immigrat|sponsor)|need.*sponsor|sponsorship for an employment|H-1B/.test(
-    blob,
-  );
-}
-
-function looksLikePolicyAck(blob) {
-  return /do you understand|unable to sponsor|acknowledge|confirm that you (understand|agree)|agree that applicants must be authorized/.test(
-    blob,
-  );
-}
-
-/** Resolve visa / work-auth / EEOC answers from context preferences. */
+/** Resolve visa / work-auth / remote / EEOC answers from context preferences. */
 export function resolveApplicationAnswer(mappedTo, label, context) {
   const m = String(mappedTo || "").toLowerCase();
   const blob = `${label || ""} ${m}`.toLowerCase();
@@ -76,6 +78,15 @@ export function resolveApplicationAnswer(mappedTo, label, context) {
   }
   if (m === "visasponsorship" || looksLikeSponsorship(blob)) {
     return answers.visaAnswer;
+  }
+  if (m === "remotepreference" || looksLikeRemote(blob)) {
+    return answers.remoteAnswer;
+  }
+  if (m === "willingtorelocate" || looksLikeRelocate(blob)) {
+    return answers.relocateAnswer;
+  }
+  if (m === "hidecompanies" || looksLikeHideFromCompanies(blob)) {
+    return answers.hideFromCompanies || "";
   }
   // Employer affiliation (current/former employee, volunteer, contractor, relation) → No.
   if (COMPANY_NO_MAPPED.has(m) || looksLikeCompanyAffiliation(blob)) {
@@ -105,19 +116,12 @@ function controlLooksApplicationMapped(c) {
   const mapped = String(c.mappedTo || c.type || "").toLowerCase();
   if (APPLICATION_CONTROL_MAPPED.has(mapped)) return true;
   if (c.widgetType === "yesno") return true;
-  if (
-    c.widgetType === "radio" &&
-    (EEOC_MAPPED.has(mapped) ||
-      COMPANY_NO_MAPPED.has(mapped) ||
-      mapped === "visasponsorship" ||
-      mapped === "workauthorization" ||
-      mapped === "policyack")
-  ) {
+  if (c.widgetType === "radio" && (EEOC_MAPPED.has(mapped) || COMPANY_NO_MAPPED.has(mapped) || SCREENING_MAPPED.has(mapped))) {
     return true;
   }
   if (c.widgetType === "select" && APPLICATION_CONTROL_MAPPED.has(mapped)) return true;
   if (c.widgetType === "checkbox" && mapped === "pronouns") return true;
-  if (c.widgetType === "text" && COMPANY_NO_MAPPED.has(mapped)) return true;
+  if (c.widgetType === "text" && (COMPANY_NO_MAPPED.has(mapped) || mapped === "hidecompanies")) return true;
   return false;
 }
 
@@ -132,7 +136,7 @@ export function hasUnfilledApplicationControls(snap) {
   return hasUnfilledYesNoOrEEOC(snap);
 }
 
-/** One-shot Stagehand instruction for visa / EEOC when deterministic fill missed. */
+/** One-shot Stagehand instruction for screening / EEOC when deterministic fill missed. */
 export function buildApplicationControlsStagehandInstruction(context = {}) {
   const answers = getApplicationAnswers(context);
   const parts = [];
@@ -143,6 +147,12 @@ export function buildApplicationControlsStagehandInstruction(context = {}) {
   }
   if (answers.visaAnswer) {
     parts.push(`For visa sponsorship questions, click ${answers.visaAnswer}`);
+  }
+  if (answers.remoteAnswer) {
+    parts.push(`For "open to working remotely" questions, select "${answers.remoteAnswer}"`);
+  }
+  if (answers.relocateAnswer) {
+    parts.push(`For "willing to relocate" questions, click ${answers.relocateAnswer}`);
   }
   parts.push(
     'For "Do you understand… unable to sponsor" / policy acknowledgment questions, click Yes',
@@ -158,6 +168,11 @@ export function buildApplicationControlsStagehandInstruction(context = {}) {
   parts.push(
     'For "current or former employee", volunteer, contractor, and "related to an employee" questions, answer No (external applicant)',
   );
+  if (answers.hideFromCompanies) {
+    parts.push(`For hide-from-employer / companies-hidden-from fields, enter "${answers.hideFromCompanies}"`);
+  } else {
+    parts.push(HIDE_FROM_COMPANIES_PROMPT_RULE);
+  }
   parts.push("Complete every remaining required (*) radio and text field you can");
   parts.push("Do not click Submit Application yet");
   return `${parts.join(". ")}.`;

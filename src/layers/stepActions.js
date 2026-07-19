@@ -1,0 +1,22 @@
+/** Maps step type → default agent action. */
+export const STEP_ACTIONS = {
+  loading: "wait_load",
+  overlay: "dismiss_overlay",
+  consent: "accept_cookies",
+  entry: "click_apply",
+  wizard_choice: "click_modal",
+  upload: "upload_resume",
+  form: "smart_fill",
+  auth: "auth_login",
+  signup: "auth_signup",
+  signup_entry: "click_signup",
+  signin_entry: "click_signin",
+  obstacle: "clear_obstacle",
+  verify_email: "verify_email",
+  enter_otp: "enter_otp",
+  nav_recovery: "nav_recovery",
+  continue: "click_continue",
+  review: "done",
+  blocked: "wait_user",
+  ambiguous: null,
+};

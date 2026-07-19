@@ -10,15 +10,11 @@ import { uploadDiscoveredFile } from "./domActions.js";
 import {
   inspectPage,
   logPageSnapshot,
-  looksLikeApplyForm,
   pageFingerprint,
-  progressScore,
 } from "./formDiscovery.js";
-import { adoptOpenedPage, isPageUnloaded, waitForApplySurface } from "./pageReady.js";
-import { pruneExtraPages, preferAtsWorkingPage } from "./tabHygiene.js";
-import { allowsHostHop, normalizeHost } from "../host.js";
+import { waitForApplySurface } from "./pageReady.js";
+import { allowsHostHop } from "../host.js";
 import {
-  isAggregatorHost,
   looksLikeDeadApplyDestination,
   looksLikeAggregatorTrap,
   shouldBlockApplyNavigation,
@@ -27,18 +23,10 @@ import {
 import { gotoWithCloudflareRetry } from "../cloudflare.js";
 import {
   isStuck,
-  shouldPreferUpload,
   uploadAlreadySucceeded,
-  uploadStalled,
-  hasUnfilledApplicationFields,
-  looksLikeApplySignupGate,
-  dismissLoopStalled,
-  continueLoopStalled,
-  shouldBlockBoardSignupAfterLeave,
   boardLeaveSucceeded,
 } from "../heuristics.js";
-import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding } from "../platformOnboarding.js";
-import { RecoveryTracker } from "../recoveryTracker.js";
+import { RecoveryTracker, runStuckFillRecovery } from "./recovery/index.js";
 import { appendRunHistory, trailFingerprint } from "../runHistory.js";
 import { hasUnfilledApplicationControls } from "../fillApplicationAnswers.js";
 import {
@@ -49,6 +37,11 @@ import {
 import { fillCustomControls } from "../fillCustomControls.js";
 import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
 import { looksLikeSignupForm } from "./signupActions.js";
+import {
+  currentStepIncomplete,
+  looksLikeSteppedForm,
+  planAfterContinue,
+} from "./steppedForm.js";
 import { recordSiteLearning, loadSiteLearnings, affordanceSkillFromAct } from "../siteLearnings.js";
 import { recordCachedPlan } from "./actionPlanCache.js";
 import { recordEngineEvent, captureDebugScreenshot } from "../observability.js";
@@ -70,6 +63,14 @@ import {
 } from "./semanticRecovery.js";
 import { tryAdoptFormIframe } from "./iframeAdopt.js";
 import { decideWithActionBrain } from "./actionBrain.js";
+import { applyLoopBreakers } from "./agent/loopBreakers.js";
+import {
+  scoreStepProgress,
+  filterHallucinatedDone,
+  computeMechanicalProgress,
+  evaluateReadyForReview,
+} from "./agent/progressAndDone.js";
+import { applyTabHygieneAfterClick, applyHostHop } from "./agent/tabAndHop.js";
 
 export async function decideNextAction(snap, fillResult, history, context, page = null) {
   return decideWithActionBrain(snap, fillResult, history, context, page);
@@ -179,6 +180,8 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
   };
   // User stop / CDP disconnect only — do not treat a closed hop tab as stop.
   const stopRequested = () => Boolean(shouldStop?.()) || sessionGone();
+  /** After Continue/Next opens a new wizard panel — force fill before another advance. */
+  let pendingSteppedFill = null;
 
   for (let step = 1; step <= maxSteps; step++) {
     if (sessionGone()) {
@@ -277,75 +280,56 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       consecutiveNoProgress = 0;
     }
 
-    let { plan, classification, decision } = await decideNextAction(snap, fillResult, history, agentContext, page);
+    let plan;
+    let classification;
+    let decision;
+    if (pendingSteppedFill) {
+      plan = pendingSteppedFill;
+      classification = {
+        step: "form",
+        confidence: "high",
+        reason: plan.reason,
+      };
+      decision = { path: "stepped-form", reason: plan.reason };
+      pendingSteppedFill = null;
+      log.layer("agent", plan.reason, "info");
+    } else {
+      ({ plan, classification, decision } = await decideNextAction(
+        snap,
+        fillResult,
+        history,
+        agentContext,
+        page,
+      ));
+    }
     lastClassification = classification;
 
-    // Loop breaker: repeated dismiss without progress while Apply is visible → click Apply.
+    // Stepped form: never Continue while the current panel still has empty fields.
     if (
-      plan?.type === "dismiss_overlay" &&
-      dismissLoopStalled(history, 2) &&
-      (snap.entryCount || 0) > 0
+      plan?.type === "click_continue" &&
+      looksLikeSteppedForm(snap) &&
+      currentStepIncomplete(snap, fillResult)
     ) {
-      const top = snap.entryCandidates?.[0];
       plan = {
-        type: "click_apply",
-        reason: `dismiss loop broken — force ${top?.text || "Apply"}`,
-        source: "loop-breaker",
-        targetCandidate: top || null,
+        type: "smart_fill",
+        reason: "stepped form — fill current step before Continue",
+        source: "stepped-form",
       };
-      decision = { path: "loop-breaker", reason: plan.reason };
-      log.layer("agent", plan.reason, "warn");
+      decision = { path: "stepped-form", reason: plan.reason };
+      log.layer("agent", plan.reason, "info");
     }
 
-    // Loop breaker: Next/Continue thrashing (esp. board onboard wizards) with no fills.
-    if (plan?.type === "click_continue" && continueLoopStalled(history, fillResult, 3)) {
-      if (looksLikeBoardSignupOnboarding(snap)) {
-        plan = {
-          type: "wait_user",
-          reason: "continue loop on board signup onboarding — handoff",
-          source: "loop-breaker",
-        };
-      } else if (hasUnfilledApplicationFields(snap, fillResult)) {
-        plan = {
-          type: "smart_fill",
-          reason: "continue loop broken — fill before Next",
-          source: "loop-breaker",
-        };
-      } else if ((agentContext?.submitUrl || agentContext?.startUrl) && !history.some((h) => h.action === "nav_recovery")) {
-        plan = {
-          type: "nav_recovery",
-          reason: "continue loop broken — recover navigation",
-          source: "loop-breaker",
-        };
-      } else {
-        plan = {
-          type: "wait_user",
-          reason: "continue loop stalled — no application progress",
-          source: "loop-breaker",
-        };
-      }
-      decision = { path: "loop-breaker", reason: plan.reason };
-      log.layer("agent", plan.reason, "warn");
-    }
-
-    // Loop breaker: Sign Up after board leave re-enters onboard.
-    if (plan?.type === "click_signup" && shouldBlockBoardSignupAfterLeave(history, snap)) {
-      if ((snap.entryCount || 0) > 0) {
-        plan = {
-          type: "click_apply",
-          reason: "board leave done — force Apply instead of Sign Up",
-          source: "loop-breaker",
-          targetCandidate: snap.entryCandidates?.[0] || null,
-        };
-      } else {
-        plan = {
-          type: "wait_user",
-          reason: "board leave done — Sign Up would re-enter onboard (handoff)",
-          source: "loop-breaker",
-        };
-      }
-      decision = { path: "loop-breaker", reason: plan.reason };
-      log.layer("agent", plan.reason, "warn");
+    const broken = applyLoopBreakers({
+      plan,
+      snap,
+      history,
+      fillResult,
+      context: agentContext,
+    });
+    if (broken) {
+      plan = broken.plan;
+      decision = { path: "loop-breaker", reason: broken.reason };
+      log.layer("agent", broken.reason, "warn");
     }
 
     // RecoveryTracker — escalate repeating actions
@@ -409,17 +393,16 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     logPageSnapshot(log, snap, "agent", classification);
 
-    const score = progressScore(snap, fillResult);
-    if (score > bestScore) bestScore = score;
+    const scored = scoreStepProgress(snap, fillResult, bestScore);
+    const score = scored.score;
+    bestScore = scored.bestScore;
 
     // "done" must be earned: either the classifier reached review, or we actually
     // filled fields on something that looks like an apply form. An AI plan saying
     // "done" on an untouched listing page is a hallucination — keep working.
     if (plan?.type === "done") {
-      const filledCount = fillResult.filled?.length || 0;
-      const earned =
-        classification.step === "review" || (filledCount >= 1 && looksLikeApplyForm(snap, 1));
-      if (!earned) {
+      const filtered = filterHallucinatedDone(plan, classification, fillResult, snap);
+      if (!filtered) {
         log.layer("agent", `ignoring done (${plan.reason}) — no filled apply form yet, continuing`, "warn");
         plan = null;
       }
@@ -463,8 +446,12 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         continue;
       }
       if (obstacle.action === "needs_auth" || looksLikeAuthForm(snap) || looksLikeSignupForm(snap)) {
+        const preferSignup =
+          looksLikeSignupForm(snap) ||
+          classification?.step === "signup" ||
+          classification?.step === "signup_entry";
         plan = {
-          type: looksLikeSignupForm(snap) ? "auth_signup" : "auth_login",
+          type: preferSignup ? "auth_signup" : "auth_login",
           reason: "recovery — auth wall after empty plan",
           source: "obstacle-recovery",
         };
@@ -565,8 +552,12 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           continue;
         }
         if (looksLikeSignupForm(snap) || looksLikeAuthForm(snap)) {
+          const preferSignup =
+            looksLikeSignupForm(snap) ||
+            classification?.step === "signup" ||
+            classification?.step === "signup_entry";
           plan = {
-            type: looksLikeSignupForm(snap) ? "auth_signup" : "auth_login",
+            type: preferSignup ? "auth_signup" : "auth_login",
             reason: "soft blocked → auth",
             source: "soft-blocked",
           };
@@ -647,42 +638,34 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     // Apply links with target=_blank open the next hop in a new tab — follow it.
     // Only adopt when the current page stayed put; if it navigated, the flow
     // continued here and any stray popup is likely an ad.
-    if (["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "stagehand_act"].includes(plan.type)) {
-      let stayedPut = true;
-      try {
-        stayedPut = page.url() === (snap.url || page.url());
-      } catch {
-        /* ignore */
-      }
-      if (stayedPut) {
-        const adopted = await adoptOpenedPage(page, knownPages, log);
-        if (adopted) {
-          page = adopted;
-          ok = true;
-          await waitForApplySurface(page, log, { timeoutMs: 15000 });
-        }
-      }
-      try {
-        const atsPage = await preferAtsWorkingPage(page.context(), page);
-        if (atsPage && atsPage !== page) {
-          page = atsPage;
-          ok = true;
-          log.layer("agent", "switched working page to employer ATS tab", "info");
-        }
-        knownPages = new Set(page.context().pages());
-        // Periodic hygiene — never closes ATS tabs (see tabHygiene).
-        if (step % 3 === 0 || plan.type === "stagehand_act") {
-          await pruneExtraPages(page.context(), page, { log, maxPages: 2 }).catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
+    {
+      const tabbed = await applyTabHygieneAfterClick({
+        page,
+        plan,
+        snap,
+        knownPages,
+        log,
+        step,
+        ok,
+      });
+      page = tabbed.page;
+      ok = tabbed.ok;
+      knownPages = tabbed.knownPages;
     }
 
     let snapAfter = await refreshSnapIfNeeded(page, snap, inspectPage, {
       force: ["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "smart_fill", "upload_resume"].includes(plan.type),
     });
     lastSnap = snapAfter;
+
+    // Wizard advanced → queue fill of the new step on the next loop iteration.
+    if (ok && (plan.type === "click_continue" || plan.type === "click_modal")) {
+      const follow = planAfterContinue(snap, snapAfter, fillResult);
+      if (follow) {
+        pendingSteppedFill = follow;
+        log.layer("agent", follow.reason, "info");
+      }
+    }
 
     // Failed Continue / CTA with no DOM progress — often an invisible captcha overlay
     // (Playwright: "<div></div> … intercepts pointer events"). Wait for manual solve.
@@ -725,10 +708,14 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       snap._perception && snapAfter._perception
         ? computePageDiff(snap._perception, snapAfter._perception)
         : null;
-    let progressed =
-      pageFingerprint(snapAfter) !== fpBefore ||
-      progressScore(snapAfter, fillResult) > score ||
-      Boolean(perceptionDiff?.changed && ((perceptionDiff.addedRefs || 0) + (perceptionDiff.removedRefs || 0) >= 2));
+    let progressed = computeMechanicalProgress({
+      snapAfter,
+      fpBefore,
+      fillResult,
+      score,
+      perceptionDiff,
+      pageFingerprint,
+    });
 
     // Clicked apply but nothing changed (overlay swallowed the click, JS-guarded
     // link, slow interstitial): navigate straight to the candidate's href.
@@ -763,43 +750,32 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     // Redirect chains legitimately change hosts; retarget so entry ranking and
     // learnings follow the chain instead of fighting it.
-    if (hopAllowed && !isPageUnloaded(snapAfter)) {
-      const newHost = normalizeHost(snapAfter.hostname || snapAfter.url);
-      if (newHost && agentContext.targetHost && newHost !== agentContext.targetHost) {
-        hostHops += 1;
-        if (isAggregatorHost(newHost)) {
-          aggregatorHops += 1;
-          if (aggregatorHops > maxAggregatorHops) {
-            log.layer(
-              "agent",
-              `aggregator mirror chain limit (${aggregatorHops}) — stopping at ${newHost}`,
-              "warn",
-            );
-            history.push({
-              step,
-              action: "wait_user",
-              applyStep: "blocked",
-              ok: true,
-              fingerprint: pageFingerprint(snapAfter),
-              progress: false,
-              reason: "job listing aggregator chain — no real apply form",
-            });
-            break;
-          }
-        }
-        if (hostHops > maxHostHops) {
-          log.layer("agent", `too many host hops (${hostHops}) — stopping chain`, "warn");
-          break;
-        }
-        log.layer("agent", `hop ${hostHops}: redirect chain → ${newHost}`, "info");
-        const rehydrated = enrichContextWithLearnings(
-          { ...agentContext, targetHost: newHost, siteLearnings: undefined, avoidEntryKeys: [] },
-          newHost,
-        );
-        agentContext.targetHost = rehydrated.targetHost;
-        agentContext.siteLearnings = rehydrated.siteLearnings;
-        agentContext.avoidEntryKeys = rehydrated.avoidEntryKeys;
+    {
+      const hop = applyHostHop({
+        hopAllowed,
+        snapAfter,
+        agentContext,
+        hostHops,
+        aggregatorHops,
+        maxHostHops,
+        maxAggregatorHops,
+        log,
+      });
+      hostHops = hop.hostHops;
+      aggregatorHops = hop.aggregatorHops;
+      if (hop.stopReason === "aggregator_chain") {
+        history.push({
+          step,
+          action: "wait_user",
+          applyStep: "blocked",
+          ok: true,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: false,
+          reason: "job listing aggregator chain — no real apply form",
+        });
+        break;
       }
+      if (hop.stop) break;
     }
 
     if (ok && shouldAttemptNavRecovery(plan, snapAfter, agentContext, history)) {
@@ -945,6 +921,8 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       applyStep: classification.step,
       ok,
       entryKey: entryKeyForHistory || undefined,
+      entryText: executed.entryCandidate?.text || plan.targetCandidate?.text || undefined,
+      entryHref: executed.entryCandidate?.href || plan.targetCandidate?.href || undefined,
       fromFingerprint: fpBefore,
       fingerprint: pageFingerprint(snapAfter),
       progress: progressed && ok,
@@ -976,7 +954,13 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
 
     if (ok && progressed && agentContext.targetHost) {
       try {
-        recordCachedPlan(agentContext.targetHost, snap, plan, { ok, progressed });
+        recordCachedPlan(agentContext.targetHost, snap, plan, {
+          ok,
+          progressed,
+          afterSnap: nextSnap || snap,
+          entryKey: entryKeyForHistory || plan.entryKey || "",
+          entryCandidate: executed.entryCandidate || plan.targetCandidate || null,
+        });
         // Harvest Stagehand / indexed act successes into affordance skills.
         if (plan.type === "act" || plan.type === "stagehand_act") {
           const skill =
@@ -999,16 +983,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
-    const filledCount = fillResult.filled?.length || 0;
-    const authSucceeded = history.some(
-      (h) => (h.action === "auth_login" || h.action === "auth_signup") && h.ok,
-    );
-    // Text fields filled but file inputs untouched means the form isn't done —
-    // keep going so the upload step runs before stopping for review.
-    const uploadsPending =
-      (snapAfter.fileInputCount || 0) > 0 &&
-      !uploadAlreadySucceeded(history) &&
-      !(fillResult.filled || []).some((f) => f.uploaded || f.file);
+    // Snapshot fill state for ready criteria (original loop scored filledCount /
+    // uploadsPending before Stagehand may append more fills).
+    const fillResultForReady = fillResult;
 
     if (
       plan.type === "smart_fill" &&
@@ -1046,18 +1023,15 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
-    const appControlsPending = hasUnfilledApplicationControls(snapAfter);
-    const onPlatformSignupGate =
-      looksLikeApplySignupGate(snapAfter) || looksLikeSignupForm(snapAfter) || snapAfter.signupForm;
-    const onPlatformOnboarding = looksLikePlatformOnboarding(snapAfter);
-    const readyForReview =
-      !uploadsPending &&
-      !appControlsPending &&
-      !onPlatformOnboarding &&
-      !(onPlatformSignupGate && !authSucceeded) &&
-      ((filledCount >= 2 && looksLikeApplyForm(snapAfter, 2)) ||
-        (filledCount >= 1 && authSucceeded && looksLikeApplyForm(snapAfter, 1)) ||
-        (filledCount >= 2 && progressed && ok));
+    // Text fields filled but file inputs untouched means the form isn't done —
+    // keep going so the upload step runs before stopping for review.
+    const { readyForReview } = evaluateReadyForReview({
+      snapAfter,
+      fillResult: fillResultForReady,
+      history,
+      progressed,
+      ok,
+    });
 
     if (plan.type === "smart_fill" && readyForReview) {
       if (settings.auto_submit === true && (snapAfter.submitCount || 0) > 0) {
@@ -1109,13 +1083,16 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     if (isStuck(history, snapAfter) || consecutiveNoProgress >= maxNoProgress) {
-      if (uploadStalled(history) && hasUnfilledApplicationFields(snapAfter, fillResult)) {
+      const stuckPlan = runStuckFillRecovery({
+        snap: snapAfter,
+        history,
+        fillResult,
+        force: true,
+        requireUnfilledForSmartFill: true,
+      });
+      if (stuckPlan?.type === "smart_fill") {
         log.layer("agent", "stuck — upload stalled, forcing smart_fill", "warn");
-        const fillExec = await executePlan(page, {
-          type: "smart_fill",
-          reason: "upload stalled — fill application fields",
-          source: "stuck-recovery",
-        }, {
+        const fillExec = await executePlan(page, stuckPlan, {
           snap: snapAfter,
           context: agentContext,
           log,
@@ -1140,7 +1117,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           await humanPause(900, 1600);
           continue;
         }
-      } else if (!uploadAlreadySucceeded(history) && shouldPreferUpload(snapAfter, history, fillResult)) {
+      } else if (stuckPlan?.type === "upload_resume" && !uploadAlreadySucceeded(history)) {
         log.layer("agent", "stuck — forcing upload recovery", "warn");
         const uploadOk = await uploadDiscoveredFile(page, log, "agent", snapAfter, sessionId);
         history.push({

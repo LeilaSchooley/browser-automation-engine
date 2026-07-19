@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <h1>Location &amp; work preferences</h1>
+    <form id="location-form">
+      <div class="field">
+        <label for="city">What city do you live in? *</label>
+        <input
+          id="city"
+          name="city"
+          role="combobox"
+          aria-label="What city do you live in?"
+          aria-autocomplete="list"
+          aria-expanded="false"
+          placeholder="Search ..."
+          value=""
+        />
+        <div id="city-error" style="color: red; display: none">Required</div>
+        <div id="city-list" role="listbox" hidden></div>
+      </div>
+
+      <div class="field">
+        <p class="question">Are you legally authorized to work in the United States? *</p>
+        <p class="hint">
+          You are a US citizen, already have an employment visa (O1, H1B, etc.), or are specifically
+          covered under a TN/H1-B1/E-3.
+        </p>
+        <div role="radiogroup" aria-label="Are you legally authorized to work in the United States?">
+          <label><input type="radio" name="work_auth" value="Yes" /> Yes</label>
+          <label><input type="radio" name="work_auth" value="No" /> No</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <p class="question">
+          Do you require visa sponsorship to work legally in the United States (now or in the
+          future)? *
+        </p>
+        <p class="hint">This includes needing sponsorship for CPT, OPT or other visa types to work in the US.</p>
+        <div
+          role="radiogroup"
+          aria-label="Do you require visa sponsorship to work legally in the United States (now or in the future)?"
+        >
+          <label><input type="radio" name="visa_sponsor" value="Yes" /> Yes</label>
+          <label><input type="radio" name="visa_sponsor" value="No" /> No</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <p class="question">Are you open to working remotely? *</p>
+        <div role="radiogroup" aria-label="Are you open to working remotely?">
+          <label
+            ><input type="radio" name="remote" value="no" /> I don't want to work remotely</label
+          >
+          <label
+            ><input type="radio" name="remote" value="open" /> I'm open to working remotely</label
+          >
+          <label
+            ><input type="radio" name="remote" value="only" /> I only want to work remotely</label
+          >
+        </div>
+      </div>
+
+      <div class="field">
+        <p class="question">Are you willing to relocate? *</p>
+        <div role="radiogroup" aria-label="Are you willing to relocate?">
+          <label><input type="radio" name="relocate" value="No" /> No</label>
+          <label><input type="radio" name="relocate" value="Yes" /> Yes</label>
+        </div>
+      </div>
+
+      <button type="button" id="continue" disabled>Continue</button>
+    </form>
+    <script>
+      const city = document.getElementById("city");
+      const list = document.getElementById("city-list");
+      const err = document.getElementById("city-error");
+      const places = ["London, United Kingdom", "Berlin, Germany", "Paris, France"];
+
+      function sync() {
+        const cityOk = !!city.value && !/search/i.test(city.value);
+        const ok =
+          cityOk &&
+          document.querySelector('input[name="work_auth"]:checked') &&
+          document.querySelector('input[name="visa_sponsor"]:checked') &&
+          document.querySelector('input[name="remote"]:checked') &&
+          document.querySelector('input[name="relocate"]:checked');
+        err.style.display = cityOk ? "none" : "block";
+        document.getElementById("continue").disabled = !ok;
+      }
+
+      function showOptions(q) {
+        const needle = String(q || "").toLowerCase();
+        list.innerHTML = "";
+        places
+          .filter((p) => !needle || p.toLowerCase().includes(needle))
+          .forEach((p) => {
+            const opt = document.createElement("div");
+            opt.setAttribute("role", "option");
+            opt.textContent = p;
+            opt.addEventListener("click", () => {
+              city.value = p;
+              city.setAttribute("aria-expanded", "false");
+              list.hidden = true;
+              sync();
+            });
+            list.appendChild(opt);
+          });
+        list.hidden = list.children.length === 0;
+        city.setAttribute("aria-expanded", list.hidden ? "false" : "true");
+      }
+
+      city.addEventListener("input", () => showOptions(city.value));
+      city.addEventListener("focus", () => showOptions(city.value));
+      document.querySelectorAll('input[type="radio"]').forEach((el) => el.addEventListener("change", sync));
+      sync();
+    </script>
+  </body>
+</html>

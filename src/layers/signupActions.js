@@ -16,7 +16,7 @@ import {
   LOGIN_WALL_TEXT,
   looksLikeAuthFailure,
   looksLikeAuthForm,
-  looksLikeExistingAccount,
+  looksLikeExistingAccountError,
 } from "./authActions.js";
 import {
   SIGNUP_TEXT,
@@ -33,6 +33,7 @@ import { authSelectorsFromSignupFields } from "../learningRecorder.js";
 import { inspectPage } from "./formDiscovery.js";
 import { humanPause } from "../human.js";
 import { getApplicantProfile, hasIdentityRegistrationFields } from "../fillProfile.js";
+import { safeTextLocator } from "../primitives/safeLocator.js";
 import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { shouldBlockAdvance } from "../gateComplete.js";
 import { clickDiscoveredCookie, clickDiscoveredContinue } from "./domActions.js";
@@ -46,7 +47,9 @@ async function confirmSignupSucceeded(page, hostname, log, before = null) {
     log?.layer("signup", `signup landed on error page — ${dead.reason}`, "warn");
     return { ok: false, deadDestination: true, reason: dead.reason };
   }
-  if (looksLikeExistingAccount(after)) {
+  // Only hard server errors ("email already taken") — NOT soft "Already have an account?"
+  // CTAs or bare "Log in" copy (YC signup pages always mention Log in).
+  if (looksLikeExistingAccountError(after)) {
     log?.layer("signup", "site says account already exists — switch to sign in", "warn");
     markAccountExists(hostname);
     return { ok: false, existingAccount: true };
@@ -67,13 +70,11 @@ async function confirmSignupSucceeded(page, hostname, log, before = null) {
     markAccountVerified(hostname);
     return { ok: true };
   }
+  // Still on a login form without a hard "already exists" error → incomplete signup /
+  // validation failure — not proof the email is registered (YC always says "Log in").
   if (looksLikeAuthForm(after) && !looksLikeSignupForm(after)) {
-    // Landed on login after register attempt — often means account exists.
-    if (looksLikeExistingAccount(after) || /sign in|log in/i.test(`${after.title || ""} ${after.pageText || ""}`)) {
-      log?.layer("signup", "landed on login form after signup — treat as existing account", "warn");
-      markAccountExists(hostname);
-      return { ok: false, existingAccount: true };
-    }
+    log?.layer("signup", "still on login form after signup submit — not treating as existing account", "warn");
+    return { ok: false };
   }
   markAccountVerified(hostname);
   return { ok: true };
@@ -111,17 +112,24 @@ export function looksLikeSignupForm(snap) {
   const usernames = snap.usernameFieldCount || 0;
   if (passwords === 0 || (emails === 0 && usernames === 0)) return false;
 
+  const fieldCount = snap.fieldCount || 0;
   const blob = `${snap.title || ""} ${snap.applyModalTitle || ""} ${snap.url || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
 
   if ((snap.confirmPasswordFieldCount || 0) > 0) return true;
   if ((snap.newPasswordFieldCount || 0) > 0) return true;
   if (usernames > 0 && passwords >= 2) return true;
 
+  // Multi-field registration card (YC: First/Last/Email/Username/Password) even when
+  // name labels are opaque ("?") and a "Log in" link keeps signInCount > 0.
+  // Require ≥4 fields so a 2-field login + "Sign up" link is not treated as registration.
+  if (fieldCount >= 4 && passwords >= 1 && (emails > 0 || usernames > 0)) return true;
+
   if (SIGNUP_FORM_TEXT.test(blob)) return true;
   if (APPLY_SIGNUP_GATE_TEXT.test(blob)) return true;
   if (LOGIN_WALL_TEXT.test(blob) && SIGNUP_FORM_TEXT.test(blob)) return true;
   if (usernames > 0 && passwords >= 1 && SIGNUP_FORM_TEXT.test(blob)) return true;
 
+  // Signup submit as the primary CTA on an identity+password form (no competing Log in CTA).
   if ((snap.signUpCount || 0) > 0 && (snap.signInCount || 0) === 0) return true;
 
   return false;
@@ -159,14 +167,32 @@ export function looksLikeOAuthOnlySignup(snap) {
   return OAUTH_PROVIDER_TEXT.test(blob) && SIGNUP_TEXT.test(blob);
 }
 
-export async function clickSignupEntry(page, snap, log) {
-  const candidate = snap?.signUpCandidates?.[0];
-  if (!candidate) {
-    log?.layer("signup", "no signup entry candidate", "warn");
-    return false;
+export async function clickSignupEntry(page, snap, log, targetCandidate = null) {
+  const candidate = targetCandidate || snap?.signUpCandidates?.[0] || { text: "Create an account" };
+  log?.layer("signup", `opening signup: ${candidate.text || "Create an account"}`, "info");
+
+  // Prefer Create / Sign up text before generic submit patterns (avoids "Continue" on login).
+  const CREATE_ACCOUNT_PATTERNS = [
+    /create an account/i,
+    /don'?t have an account/i,
+    /^sign up$/i,
+    /^register$/i,
+    /create account/i,
+  ];
+  if (await clickRoleMatching(page, CREATE_ACCOUNT_PATTERNS, { log, layer: "signup", roles: ["link", "button"] })) {
+    return true;
   }
 
-  log?.layer("signup", `opening signup: ${candidate.text}`, "info");
+  try {
+    const byText = safeTextLocator(page, /create an account|don'?t have an account|sign up/i).first();
+    if (await byText.isVisible({ timeout: 800 }).catch(() => false)) {
+      await byText.click({ timeout: 8000 });
+      log?.layer("signup", "clicked create-account text", "info");
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
 
   if (await clickRoleMatching(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup" })) {
     return true;
@@ -184,6 +210,19 @@ export async function clickSignupEntry(page, snap, log) {
     }
   }
 
+  if (candidate.text) {
+    try {
+      const loc = safeTextLocator(page, candidate.text).first();
+      if (await loc.isVisible({ timeout: 800 }).catch(() => false)) {
+        await loc.click({ timeout: 8000 });
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  log?.layer("signup", "no signup entry candidate", "warn");
   return false;
 }
 
@@ -383,15 +422,4 @@ export async function attemptAuthSignup(page, snap, context, log) {
   return { ok: false, filled: fillResult.complete };
 }
 
-export function scoreSignUpCandidate(meta) {
-  const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
-  if (!SIGNUP_TEXT.test(blob) && !/\b(signup|sign-up|register|join)\b/.test(blob)) return 0;
-  if (OAUTH_PROVIDER_TEXT.test(blob) && !/email/.test(blob)) return 0;
-  let score = 55;
-  if (/sign up with email|create account/.test(blob)) score += 75;
-  if (/^sign up$|create account|^register$/i.test((meta.text || "").trim())) score += 45;
-  if (meta.tag === "a" && /signup|register|join/.test(meta.href || "")) score += 55;
-  if (meta.tag === "button" || meta.role === "button" || meta.tag === "input") score += 20;
-  if (/\bsign in\b|\blog in\b/.test(blob) && !/sign up/.test(blob)) score -= 40;
-  return score;
-}
+export { scoreSignUpCandidate } from "./perception/candidateScoring.js";

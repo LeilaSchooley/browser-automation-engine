@@ -118,7 +118,12 @@ export async function executePlan(page, plan, {
     }
     case "click_apply": {
       const tried = getTriedEntryKeys(history);
-      const clickResult = await clickRankedEntry(page, snap, log, "agent", context, { skipKeys: tried });
+      // Always rank live candidates (avoid keys, role-apply boost). Bound plan targets are a
+      // soft preference only — never skip ranking for a stale catalog [0].
+      const clickResult = await clickRankedEntry(page, snap, log, "agent", context, {
+        skipKeys: tried,
+        preferCandidate: plan.targetCandidate || null,
+      });
       if (clickResult.blocked) {
         ok = false;
         log?.layer("agent", `click_apply blocked — ${clickResult.reason || "toxic apply link"}`, "warn");
@@ -465,7 +470,7 @@ export async function executePlan(page, plan, {
         ok = false;
         break;
       }
-      ok = await clickSignupEntry(page, snap, log);
+      ok = await clickSignupEntry(page, snap, log, plan?.targetCandidate || null);
       if (ok) {
         await waitAfterClickTransition(page);
         await humanPause(1000, 1800);
@@ -473,6 +478,21 @@ export async function executePlan(page, plan, {
       break;
     }
     case "click_signin": {
+      // Already on a password login form — fill credentials instead of re-clicking Log in.
+      if (looksLikeAuthForm(snap) || (snap.passwordFieldCount || 0) > 0) {
+        const login = unwrapActionResult(await attemptAuthLogin(page, snap, context, log));
+        ok = login.ok;
+        learnings = login.learnings || learnings;
+        if (ok) {
+          await waitAfterClickTransition(page);
+          try {
+            await saveStorageState(page.context(), snap.hostname || context?.targetHost);
+          } catch {
+            /* ignore */
+          }
+        }
+        break;
+      }
       ok = await clickSignInEntry(page, snap, log);
       if (ok) {
         await waitAfterClickTransition(page);

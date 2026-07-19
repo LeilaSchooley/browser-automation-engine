@@ -43,9 +43,19 @@ function hostOf(snap) {
 
 function looksLikeAuthOrOtpSurface(snap) {
   if (!snap) return false;
-  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
+  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""} ${snap.url || ""}`.toLowerCase();
   if ((snap.passwordFieldCount || 0) > 0) return true;
+  if (/^account\.|\/(login|signin|sign-in|auth|session|account)\b/i.test(String(snap.url || snap.hostname || ""))) {
+    return true;
+  }
   return /\b(log\s?in|sign\s?in|verify code|enter the code|one[- ]time|otp|create an account)\b/.test(blob);
+}
+
+/** Entry/apply click that landed on a login/OTP/signup wall is not apply progress. */
+function entryLandedOnAuthWall(plan, signals, snapAfter) {
+  if (!["click_apply", "stagehand_act", "act"].includes(plan?.type)) return false;
+  if (!signals?.hostChanged && !signals?.urlChanged) return false;
+  return looksLikeAuthOrOtpSurface(snapAfter) || /ycombinator\.com\/apply\/?(\?|$)/i.test(String(snapAfter?.url || ""));
 }
 
 export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore = 0, filledAfter = 0, uiPhaseBefore = "idle", uiPhaseAfter = "idle" } = {}) {
@@ -69,13 +79,14 @@ export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore =
     pickerClosed: Boolean(snapBefore?.pickerOpen) && !snapAfter?.pickerOpen,
     commitCompleted,
     stillOnAuthOrOtp: looksLikeAuthOrOtpSurface(snapAfter),
+    landedOnAuthWall: looksLikeAuthOrOtpSurface(snapAfter) && hostBefore !== hostAfter,
     uiPhaseBefore,
     uiPhaseAfter,
   };
 }
 
 /** Strong DOM signals — safe to trust without an LLM call. */
-export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan = null) {
+export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan = null, snapAfter = null) {
   if (!actorOk || !mechanicalProgress) return false;
   const customFill = plan?.type === "smart_fill" || plan?.type === "act";
   if (customFill && signals.filledDelta > 0 && !signals.commitCompleted && !signals.salaryCommittedDelta && !signals.pickerClosed) {
@@ -92,14 +103,17 @@ export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk,
   ) {
     return false;
   }
+  // Entry/apply that hopped onto a login/OTP/batch-apply wall is NOT strong progress.
+  if (entryLandedOnAuthWall(plan, signals, snapAfter) || (signals.landedOnAuthWall && plan?.type === "click_apply")) {
+    return false;
+  }
   // Fingerprint-only churn on a login/OTP wall is not apply progress (e.g. YC magic-link).
   if (
     signals.stillOnAuthOrOtp &&
-    !signals.hostChanged &&
     !(signals.fieldCountDelta > 0) &&
     !(signals.fileInputDelta > 0) &&
     !signals.modalAppeared &&
-    ["click_continue", "smart_fill", "auth_login", "stagehand_act"].includes(plan?.type)
+    ["click_apply", "click_continue", "smart_fill", "auth_login", "stagehand_act", "act"].includes(plan?.type)
   ) {
     return false;
   }
@@ -131,12 +145,12 @@ export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk,
   );
 }
 
-export function shouldRunValidator({ actorOk, mechanicalProgress, signals }) {
+export function shouldRunValidator({ actorOk, mechanicalProgress, signals, plan = null, snapAfter = null }) {
   const settings = getSettings();
   const { callLlm } = getRuntime();
   if (settings.action_validator === false || typeof callLlm !== "function") return false;
   if (!actorOk && !mechanicalProgress) return false;
-  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk)) return false;
+  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan, snapAfter)) return false;
   return true;
 }
 
@@ -359,11 +373,10 @@ export async function validateActionOutcome({
     };
   }
 
-  // Stuck on passwordless/OTP login after Continue / fill — do not treat as form progress.
+  // Stuck on passwordless/OTP login after Continue / fill / apply click — do not treat as form progress.
   if (
     signals.stillOnAuthOrOtp &&
-    !signals.hostChanged &&
-    ["click_continue", "smart_fill", "auth_login", "stagehand_act"].includes(plan?.type)
+    ["click_apply", "click_continue", "smart_fill", "auth_login", "stagehand_act", "act"].includes(plan?.type)
   ) {
     const afterBlob = `${snapAfter?.title || ""} ${snapAfter?.pageText || ""}`.toLowerCase();
     const wantsOtp = /enter the code|verify code|from your email|one[- ]time|otp/.test(afterBlob);
@@ -378,7 +391,7 @@ export async function validateActionOutcome({
     };
   }
 
-  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan)) {
+  if (isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan, snapAfter)) {
     return {
       progressed: true,
       reason: "strong mechanical progress (url, fields, modal, or fill)",
@@ -386,7 +399,7 @@ export async function validateActionOutcome({
     };
   }
 
-  if (!shouldRunValidator({ actorOk, mechanicalProgress, signals })) {
+  if (!shouldRunValidator({ actorOk, mechanicalProgress, signals, plan, snapAfter })) {
     return {
       progressed: Boolean(mechanicalProgress && actorOk),
       reason: mechanicalProgress ? "mechanical DOM change" : "no DOM change",

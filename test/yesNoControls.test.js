@@ -178,6 +178,71 @@ describe("application yes/no controls", () => {
     });
   });
 
+  it("resolves remote preference and relocate from settings", () => {
+    assert.equal(
+      resolveApplicationAnswer("remotepreference", "Are you open to working remotely?", {
+        preferences: { remotePreference: "only" },
+      }),
+      "I only want to work remotely",
+    );
+    assert.equal(
+      resolveApplicationAnswer(
+        "",
+        "Do you require visa sponsorship to work legally in the United States (now or in the future)?",
+        { preferences: { needsVisaSponsorship: false } },
+      ),
+      "No",
+    );
+    assert.equal(
+      resolveApplicationAnswer("willingtorelocate", "Are you willing to relocate?", {
+        preferences: { willingToRelocate: false },
+      }),
+      "No",
+    );
+  });
+
+  it("inspectPage discovers YC location city + screening radios", async () => {
+    await withFixturePage("yc-location-screening", async (page) => {
+      const snap = await inspectPage(page);
+      const byMapped = Object.fromEntries((snap.customControls || []).map((c) => [c.mappedTo, c]));
+      assert.ok(byMapped.location, `mapped=${Object.keys(byMapped)}`);
+      assert.equal(byMapped.location.filled, false);
+      assert.ok(byMapped.workauthorization, `mapped=${Object.keys(byMapped)}`);
+      assert.ok(byMapped.visasponsorship, "expected visasponsorship");
+      assert.ok(byMapped.remotepreference, "expected remotepreference");
+      assert.ok(byMapped.willingtorelocate, "expected willingtorelocate");
+    });
+  });
+
+  it("fillCustomControls answers YC location screening from preferences", async () => {
+    await withFixturePage("yc-location-screening", async (page) => {
+      initRuntime({ settings: { browser_human_behavior: false } });
+      const snap = await inspectPage(page);
+      const result = await fillCustomControls(
+        page,
+        {
+          preferences: {
+            city: "London",
+            location: "London, gb",
+            workAuthorized: true,
+            needsVisaSponsorship: false,
+            remotePreference: "open",
+            willingToRelocate: false,
+          },
+        },
+        { snap, log: null },
+      );
+      assert.ok(result.filled.some((f) => f.mappedTo === "location"), `filled=${result.filled.map((f) => f.mappedTo).join(",")}`);
+      assert.ok(result.filled.length >= 5, `filled=${result.filled.map((f) => f.mappedTo).join(",")}`);
+      assert.match(await page.locator("#city").inputValue(), /London/i);
+      assert.equal(await page.locator('input[name="work_auth"][value="Yes"]').isChecked(), true);
+      assert.equal(await page.locator('input[name="visa_sponsor"][value="No"]').isChecked(), true);
+      assert.equal(await page.locator('input[name="remote"][value="open"]').isChecked(), true);
+      assert.equal(await page.locator('input[name="relocate"][value="No"]').isChecked(), true);
+      assert.equal(await page.locator("#continue").isDisabled(), false);
+    });
+  });
+
   it("answers Trevor-style employee/volunteer/contractor radios No + relation text", async () => {
     assert.equal(
       resolveApplicationAnswer(

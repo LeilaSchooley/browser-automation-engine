@@ -44,8 +44,12 @@ export function resolvePreferenceFillValue(targetHint, proposedValue, context) {
   if (/desired\s*job|job\s*title|role\s*you|position\s*sought|target\s*role/i.test(blob)) {
     return p.desiredTitle || proposedValue;
   }
-  if (/\blocation\b|where\s*are\s*you|based\s*in|city\s*region/i.test(blob)) {
-    return p.location || proposedValue;
+  if (
+    /\blocation\b|where\s*are\s*you|based\s*in|city\s*region|what\s*city|which\s*city|city\s*do\s*you\s*live|live\s*in\b|hometown/i.test(
+      blob,
+    )
+  ) {
+    return p.city || p.location || proposedValue;
   }
   if (/salary|compensation|pay\s*expect|expected\s*pay/i.test(blob)) {
     return p.salary || proposedValue;
@@ -57,7 +61,7 @@ export function resolvePreferenceFillValue(targetHint, proposedValue, context) {
 }
 
 const PREF_FIELD_RE =
-  /desired\s*job|job\s*title|salary|compensation|pay\s*expect|\blocation\b|where\s*are\s*you|based\s*in/i;
+  /desired\s*job|job\s*title|salary|compensation|pay\s*expect|\blocation\b|where\s*are\s*you|based\s*in|what\s*city|city\s*do\s*you\s*live|live\s*in\b/i;
 
 const PREF_CUSTOM_MAPPED = new Set(["salary", "location", "desiredtitle", "country"]);
 

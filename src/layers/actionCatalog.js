@@ -5,6 +5,10 @@
 import { isPageUnloaded } from "./pageReady.js";
 import { looksLikeAuthForm } from "./authActions.js";
 import { looksLikeSignupForm, looksLikeSignupEntry } from "./signupActions.js";
+import {
+  resolveAuthPreference,
+  shouldEnterOtp,
+} from "./authFlowPolicy.js";
 import { hasPreferencesGateFields, preferencesGateIncomplete } from "../fillPreferences.js";
 import { hasIdentityRegistrationFields } from "../fillProfile.js";
 import { shouldNeverDismiss } from "../workflowGates.js";
@@ -37,6 +41,8 @@ import { findRelevantSkills } from "../siteLearnings.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
 import { isOauthProviderHost, looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
+import { rankEntryCandidates } from "./pageIntent.js";
+import { currentStepIncomplete, looksLikeSteppedForm, shouldAutoAdvance } from "./steppedForm.js";
 
 /**
  * @typedef {{ id: string, type: string, score: number, reason: string, targetCandidate?: object, instruction?: string, step?: string }} CatalogAction
@@ -59,12 +65,13 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   const filled = fillResult?.filled?.length || 0;
   const fp = classification?.fingerprint || "";
   const oauthProvider = isOauthProviderHost(snap.url || snap.hostname || "");
+  const rankedEntries = rankEntryCandidates(snap.entryCandidates || [], context);
 
   if (classification?.step === "blocked" || classification?.hardStop) {
     return [{ id: "wait_user", type: "wait_user", score: 100, reason: classification?.reason || "blocked" }];
   }
 
-  if (classification?.step === "enter_otp") {
+  if (classification?.step === "enter_otp" || shouldEnterOtp(snap, history, context)) {
     return [
       {
         id: "enter_otp",
@@ -136,7 +143,7 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       step: "entry",
       mappedTo: "board_nav",
     });
-    for (const c of (snap.entryCandidates || []).slice(0, 2)) {
+    for (const c of rankedEntries.slice(0, 2)) {
       actions.push({
         id: `click_apply_${c.text || "entry"}`,
         type: "click_apply",
@@ -146,8 +153,8 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
         step: "entry",
       });
     }
-  } else if ((snap.entryCount || 0) > 0 && !applyEntrySucceeded(history, fp)) {
-    const top = snap.entryCandidates?.[0];
+  } else if ((rankedEntries.length || snap.entryCount || 0) > 0 && !applyEntrySucceeded(history, fp)) {
+    const top = rankedEntries[0] || snap.entryCandidates?.[0];
     const loopingDismiss = dismissLoopStalled(history, 2);
     actions.push({
       id: "click_apply",
@@ -161,18 +168,65 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     });
   }
 
+  const authPref = resolveAuthPreference(snap, history, context);
+  const preferSignup =
+    authPref.prefer === "signup" ||
+    classification?.step === "signup_entry" ||
+    classification?.step === "signup";
+  const preferSignin =
+    (!preferSignup && (authPref.prefer === "signin" || authPref.prefer === "auth")) ||
+    classification?.step === "signin_entry" ||
+    (classification?.step === "auth" && !preferSignup);
+
   if (looksLikeAuthForm(snap) && !isOauthProviderHost(snap.url || snap.hostname || "")) {
-    actions.push({ id: "auth_login", type: "auth_login", score: 88, reason: "auth login form", step: "auth" });
+    const loginScore = preferSignin ? 92 : preferSignup ? 70 : 88;
+    actions.push({
+      id: "auth_login",
+      type: "auth_login",
+      score: loginScore,
+      reason: preferSignup ? "auth login form (signup preferred)" : "auth login form",
+      step: "auth",
+    });
   }
   if (
     (looksLikeSignupForm(snap) || hasIdentityRegistrationFields(snap)) &&
     !isOauthProviderHost(snap.url || snap.hostname || "")
   ) {
-    actions.push({ id: "auth_signup", type: "auth_signup", score: 86, reason: "registration form", step: "signup" });
-    actions.push({ id: "smart_fill_signup", type: "smart_fill", score: 84, reason: "fill registration fields", step: "signup" });
+    const signupScore = preferSignup ? 92 : preferSignin ? 70 : 86;
+    actions.push({
+      id: "auth_signup",
+      type: "auth_signup",
+      score: signupScore,
+      reason: preferSignup ? "registration form — signup preferred" : "registration form",
+      step: "signup",
+    });
+    actions.push({
+      id: "smart_fill_signup",
+      type: "smart_fill",
+      score: preferSignup ? 90 : 84,
+      reason: "fill registration fields",
+      step: "signup",
+    });
   }
-  if (looksLikeSignupEntry(snap) && !oauthProvider && !shouldBlockBoardSignupAfterLeave(history, snap)) {
-    actions.push({ id: "click_signup", type: "click_signup", score: 72, reason: "signup entry CTA", step: "signup_entry" });
+  if (
+    (looksLikeSignupEntry(snap) || classification?.step === "signup_entry" || authPref.step === "signup_entry") &&
+    !oauthProvider &&
+    !shouldBlockBoardSignupAfterLeave(history, snap) &&
+    (preferSignup || classification?.step === "signup_entry" || authPref.step === "signup_entry" || !preferSignin)
+  ) {
+    const signupScore =
+      classification?.step === "signup_entry" || authPref.step === "signup_entry" ? 96 : preferSignup ? 80 : 72;
+    actions.push({
+      id: "click_signup",
+      type: "click_signup",
+      score: signupScore,
+      reason:
+        classification?.step === "signup_entry" || authPref.step === "signup_entry"
+          ? "classified signup entry — Create an account"
+          : "signup entry CTA",
+      targetCandidate: snap.signUpCandidates?.[0] || null,
+      step: "signup_entry",
+    });
   } else if (shouldBlockBoardSignupAfterLeave(history, snap)) {
     actions.push({
       id: "skip_board_signup",
@@ -195,16 +249,37 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   }
   if (
     !oauthProvider &&
-    (classification?.step === "signin_entry" || ((snap.signInCount || 0) > 0 && classification?.step === "auth"))
+    classification?.step !== "signup_entry" &&
+    authPref.step !== "signup_entry" &&
+    !preferSignup &&
+    (classification?.step === "signin_entry" ||
+      authPref.step === "signin_entry" ||
+      ((snap.signInCount || 0) > 0 && (classification?.step === "auth" || authPref.prefer === "auth")))
   ) {
-    actions.push({
-      id: "click_signin",
-      type: "click_signin",
-      score: classification?.step === "signin_entry" ? 95 : 74,
-      reason: "open sign in for saved site account",
-      targetCandidate: snap.signInCandidates?.[0] || null,
-      step: "signin_entry",
-    });
+    // Password form already open — catalog auth_login, don't keep offering click_signin.
+    if (looksLikeAuthForm(snap) || (snap.passwordFieldCount || 0) > 0) {
+      if (!actions.some((a) => a.type === "auth_login")) {
+        actions.push({
+          id: "auth_login_from_signin",
+          type: "auth_login",
+          score: classification?.step === "signin_entry" || authPref.step === "signin_entry" ? 96 : 88,
+          reason: "login form already open — fill credentials",
+          step: "auth",
+        });
+      }
+    } else {
+      const signInTarget = (snap.signInCandidates || []).find(
+        (c) => !/magic link|email me a (code|link)|send (me )?(a )?code/i.test(String(c.text || "")),
+      );
+      actions.push({
+        id: "click_signin",
+        type: "click_signin",
+        score: classification?.step === "signin_entry" || authPref.step === "signin_entry" ? 95 : 74,
+        reason: "open sign in for saved site account",
+        targetCandidate: signInTarget || null,
+        step: "signin_entry",
+      });
+    }
   }
 
   if (looksLikeJobBoardWelcomeConfirm(snap)) {
@@ -293,6 +368,8 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       if (uploadFailed) fillScore += 25;
       if (unfilledYesNo) fillScore += 15;
       if (filled === 0) fillScore += 10;
+      // Multi-step ATS: keep filling the current panel before Continue can win.
+      if (looksLikeSteppedForm(snap) && currentStepIncomplete(snap, fillResult)) fillScore += 22;
       actions.push({
         id: "smart_fill",
         type: "smart_fill",
@@ -347,11 +424,16 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   if ((snap.continueCount || 0) > 0 && filled >= 1) {
     const top = snap.continueCandidates?.[0];
     if (top && (top.text || "").length <= 80) {
+      let continueScore = 58;
+      if (shouldAutoAdvance(snap, fillResult)) continueScore = 88;
+      if (looksLikeSteppedForm(snap) && currentStepIncomplete(snap, fillResult)) continueScore = 35;
       actions.push({
         id: "click_continue",
         type: "click_continue",
-        score: 58,
-        reason: `continue: ${top.text || "Next"}`,
+        score: continueScore,
+        reason: shouldAutoAdvance(snap, fillResult)
+          ? `step complete — ${top.text || "Next"}`
+          : `continue: ${top.text || "Next"}`,
         targetCandidate: top,
         step: "continue",
       });

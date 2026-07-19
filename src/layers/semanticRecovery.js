@@ -26,6 +26,12 @@ import { canUseStagehand } from "./stagehandAdapter.js";
 import { buildStagehandPlan, shouldPreferStagehand } from "./stagehandPolicy.js";
 import { looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 import { normalizeRecoveryAction } from "./actionValidator.js";
+import {
+  validatorRecentlyRejected,
+  repeatedActionWithoutProgress,
+} from "./recovery/stallPredicates.js";
+
+export { validatorRecentlyRejected, repeatedActionWithoutProgress };
 
 const RECOVERY_ACTIONS = new Set([
   "dismiss_overlay",
@@ -45,18 +51,6 @@ export function recoveryToPlanType(recovery) {
   const normalized = normalizeRecoveryAction(recovery);
   if (!normalized || normalized === "ai_replan") return null;
   return RECOVERY_ACTIONS.has(normalized) ? normalized : null;
-}
-
-export function validatorRecentlyRejected(history, n = 2) {
-  return (history || []).slice(-n).some((h) => h.progressSource === "validator" && !h.progress && h.ok);
-}
-
-export function repeatedActionWithoutProgress(history, n = 2) {
-  if (!history?.length || history.length < n) return false;
-  const recent = history.slice(-n);
-  const action = recent[0]?.action;
-  if (!action) return false;
-  return recent.every((h) => h.action === action && !h.progress);
 }
 
 export function modalHasDismissControl(snap) {

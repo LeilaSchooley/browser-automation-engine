@@ -9,6 +9,7 @@ import {
   consentFailedTwice,
   looksLikeRealCookieConsent,
 } from "../consentDetection.js";
+import { STEP_ACTIONS } from "./stepActions.js";
 
 /** True when recent smart_fill steps made no progress (same step or preferences gate). */
 export function smartFillStalledOnStep(history = [], classification = null) {
@@ -116,27 +117,7 @@ export function buildDeterministicPlan(classification, snap, pageState = null) {
     };
   }
 
-  const actionMap = {
-    loading: "wait_load",
-    overlay: "dismiss_overlay",
-    consent: "accept_cookies",
-    entry: "click_apply",
-    wizard_choice: "click_modal",
-    upload: "upload_resume",
-    continue: "click_continue",
-    form: "smart_fill",
-    auth: "auth_login",
-    signup: "auth_signup",
-    signup_entry: "click_signup",
-    signin_entry: "click_signin",
-    obstacle: "clear_obstacle",
-    verify_email: "verify_email",
-    nav_recovery: "nav_recovery",
-    review: "done",
-    blocked: "wait_user",
-  };
-
-  const type = actionMap[step];
+  const type = STEP_ACTIONS[step];
   if (!type) return null;
 
   return {

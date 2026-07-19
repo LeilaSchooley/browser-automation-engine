@@ -75,6 +75,56 @@ describe("field mapping (Lever-style)", () => {
     });
   });
 
+  it("does not put applicant name into YC hide-from-companies field", async () => {
+    await withFixturePage("yc-hide-companies", async (page) => {
+      const result = await runSmartFillOnPage(page, {
+        firstName: "Isaac",
+        lastName: "Boadi",
+        fullName: "Isaac Boadi",
+        email: "isaacb@tutanota.com",
+        companyName: "Isaac Boadi",
+      });
+      const filledTypes = (result.filled || []).map((f) => f.type);
+      assert.ok(!filledTypes.includes("companyname"), `filled=${filledTypes}`);
+      assert.ok(!filledTypes.includes("fullname"), `filled=${filledTypes}`);
+      assert.equal(await page.inputValue('input[name="hide_companies"]'), "");
+      assert.equal(await page.inputValue('input[name="first"]'), "Isaac");
+      assert.equal(await page.inputValue('input[name="last"]'), "Boadi");
+    });
+
+    assert.equal(
+      resolveIdentityFillValue(
+        "Are there YC companies you want to be hidden from? Company name",
+        "Isaac Boadi",
+        { applicant: { fullName: "Isaac Boadi" } },
+      ),
+      "",
+    );
+  });
+
+  it("fills YC hide-from-companies from hideFromCompanies setting", async () => {
+    await withFixturePage("yc-hide-companies", async (page) => {
+      await runSmartFillOnPage(page, {
+        firstName: "Isaac",
+        lastName: "Boadi",
+        fullName: "Isaac Boadi",
+        email: "isaacb@tutanota.com",
+        hideFromCompanies: "Acme Corp",
+      });
+      assert.equal(await page.inputValue('input[name="hide_companies"]'), "Acme Corp");
+      assert.notEqual(await page.inputValue('input[name="hide_companies"]'), "Isaac Boadi");
+    });
+
+    assert.equal(
+      resolveIdentityFillValue(
+        "Are there YC companies you want to be hidden from?",
+        "Isaac Boadi",
+        { applicant: { fullName: "Isaac Boadi", hideFromCompanies: "Acme Corp" } },
+      ),
+      "Acme Corp",
+    );
+  });
+
   it("never falls back address to email-looking values", () => {
     const ctx = { applicant: { email: "isaacb@tutanota.com" } };
     assert.equal(resolveIdentityFillValue("Complete Street Address", "isaacb@tutanota.com", ctx), "");

@@ -26,7 +26,7 @@ import { canUseStagehand, attemptStagehandAct } from "./stagehandAdapter.js";
 import { smartFillStalledOnStep } from "./deterministicPolicy.js";
 import { isOauthProviderHost, looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
 
-const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp", "verify_email"]);
+const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp", "verify_email", "signup_entry"]);
 
 function jobContext(context = {}) {
   const job = context.job || context.listing || {};

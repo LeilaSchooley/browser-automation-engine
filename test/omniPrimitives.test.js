@@ -20,6 +20,7 @@ describe("controlPatterns", () => {
   it("mapLabelToMapped resolves salary and location", () => {
     assert.equal(mapLabelToMapped("Salary expectations")?.mappedTo, "salary");
     assert.equal(mapLabelToMapped("Where are you based?")?.mappedTo, "location");
+    assert.equal(mapLabelToMapped("What city do you live in? * Required")?.mappedTo, "location");
   });
 
   it("isCommittedValue rejects placeholders", () => {

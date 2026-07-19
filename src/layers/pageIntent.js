@@ -158,8 +158,14 @@ export function rankEntryCandidates(candidates, context = {}) {
       if (/ycombinator\.com\/apply\/?$/i.test(href) || /apply (for|to) (fall|winter|spring|summer|yc)\b/i.test(blob)) {
         bonus -= 140;
       }
-      if (preferredText && blob.includes(preferredText)) bonus += 60;
-      if (preferredHref && href.includes(preferredHref)) bonus += 80;
+      // Boost role-specific apply phrasing (must stay ABOVE bare "Apply").
+      if (/\bapply to (this )?role\b|\bapply for (this|the) (role|job|position)\b/i.test(blob)) {
+        bonus += 90;
+      }
+      if (preferredText && blob.includes(preferredText) && preferredText.length >= 8) bonus += 60;
+      if (preferredHref && href && (href === preferredHref || href.includes(preferredHref)) && preferredHref.length >= 12) {
+        bonus += 80;
+      }
       if (targetHost && href && !allowsHostHop(context)) {
         try {
           const linkHost = normalizeHost(new URL(href, `https://${targetHost}`).hostname);
@@ -168,7 +174,6 @@ export function rankEntryCandidates(candidates, context = {}) {
           /* ignore */
         }
       }
-      if (/apply to\b/i.test(blob)) bonus -= 90;
       return { ...c, score: (c.score || 0) + bonus, entryKey: key };
     })
     .sort((a, b) => (b.score || 0) - (a.score || 0));

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shadow signup</title>
+  </head>
+  <body>
+    <h1>Host page</h1>
+    <div id="host"></div>
+    <script>
+      const host = document.getElementById("host");
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = `
+        <form>
+          <label>Email <input type="email" id="email" /></label>
+          <label>Password <input type="password" id="password" /></label>
+          <button type="submit">Sign Up</button>
+        </form>
+      `;
+    </script>
+  </body>
+</html>

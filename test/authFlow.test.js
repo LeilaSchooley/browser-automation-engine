@@ -8,13 +8,29 @@ import {
   hasEmailAuthPath,
   resolveSameSiteSignInUrl,
   looksLikePasswordlessLoginSurface,
+  looksLikeExistingAccountSignInPrompt,
+  scoreSignInCandidate,
 } from "../src/layers/authActions.js";
+import { EXISTING_ACCOUNT_TEXT } from "../src/patterns/auth.js";
+import { SAFETY_STEPS } from "../src/layers/actionBrain.js";
+import { buildActionCatalog } from "../src/layers/actionCatalog.js";
 import { inspectPage } from "../src/layers/formDiscovery.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { initTestRuntime } from "./helpers/runtime.js";
 
 const credentials = {
-  auth: { email: "founder@testco.example", password: "test-password-123" },
+  auth: {
+    email: "founder@testco.example",
+    password: "test-password-123",
+    fromSiteAccount: true,
+    hostname: "betalist.com",
+  },
+  siteAccount: {
+    email: "founder@testco.example",
+    password: "test-password-123",
+    verified: true,
+    hostname: "betalist.com",
+  },
   profile: { email: "founder@testco.example" },
 };
 
@@ -122,6 +138,111 @@ describe("passwordless login surface (YC magic-link / OTP)", () => {
     const c = classifyApplyStep(ycSnap, { filled: [] }, [], provisionCtx);
     assert.equal(c.step, "signup_entry");
     assert.match(c.reason, /create an account|passwordless login/i);
+  });
+
+  it("pending/unverified leftover account still opens Create an account", () => {
+    initTestRuntime({ settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" } });
+    const ctx = {
+      profile: { email: "founder@agency.example", startupName: "TestCo" },
+      siteAccount: {
+        email: "founder@agency.example",
+        password: "leftover-pass",
+        pending: true,
+        verified: false,
+        hostname: "account.ycombinator.com",
+      },
+      siteAccounts: {
+        "account.ycombinator.com": {
+          email: "founder@agency.example",
+          password: "leftover-pass",
+          pending: true,
+          verified: false,
+          hostname: "account.ycombinator.com",
+        },
+      },
+    };
+    const snap = {
+      ...ycSnap,
+      pageText:
+        "Log in to access the YC Application Don't have an account? Create an account Log in with email magic link",
+      signInCount: 1,
+      signInCandidates: [{ text: "Log in with email magic link", score: 150 }],
+    };
+    const c = classifyApplyStep(snap, { filled: [] }, [], ctx);
+    assert.equal(c.step, "signup_entry");
+    assert.equal(stepToPlan(c, snap, [])?.type, "click_signup");
+  });
+
+  it("Don't have an account? is not an existing-account sign-in prompt", () => {
+    const snap = {
+      pageText: "Don't have an account? Create an account Log in with email magic link",
+      signInCount: 1,
+      signInCandidates: [{ text: "Log in with email magic link" }],
+      signUpCount: 1,
+      signUpCandidates: [{ text: "Create an account" }],
+    };
+    assert.equal(looksLikeExistingAccountSignInPrompt(snap), false);
+    assert.equal(EXISTING_ACCOUNT_TEXT.test(snap.pageText), false);
+  });
+
+  it("magic-link CTAs score 0 for sign-in ranking", () => {
+    assert.equal(scoreSignInCandidate({ text: "Log in with email magic link", tag: "button" }), 0);
+    assert.ok(scoreSignInCandidate({ text: "Sign in with email", tag: "button" }) > 100);
+  });
+
+  it("signup_entry is a safety step and catalog ranks click_signup first", () => {
+    assert.equal(SAFETY_STEPS.has("signup_entry"), true);
+    const snap = {
+      ...ycSnap,
+      pageText: "Log in Don't have an account? Create an account",
+      signInCount: 1,
+      signInCandidates: [{ text: "Log in with email magic link", score: 150 }],
+    };
+    const catalog = buildActionCatalog(
+      snap,
+      { filled: [] },
+      [],
+      { profile: { email: "founder@agency.example" } },
+      { step: "signup_entry", confidence: "high" },
+    );
+    const top = [...catalog].sort((a, b) => b.score - a.score)[0];
+    assert.equal(top?.type, "click_signup");
+    assert.ok(top.score >= 96);
+    assert.equal(catalog.some((a) => a.type === "click_signin"), false);
+  });
+
+  it("existing-account + open login form classifies auth (not click_signin loop)", () => {
+    initTestRuntime({ settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" } });
+    const snap = {
+      title: "Account | Y Combinator",
+      hostname: "account.ycombinator.com",
+      fieldCount: 2,
+      passwordFieldCount: 1,
+      emailFieldCount: 0,
+      usernameFieldCount: 1,
+      signInCount: 1,
+      signInCandidates: [{ text: "Log In" }],
+      fields: [
+        { type: "text", label: "Username or email", name: "ycid" },
+        { type: "password", label: "Password", name: "password" },
+      ],
+    };
+    const history = [{ action: "auth_signup", ok: false, existingAccount: true }];
+    const cls = classifyApplyStep(snap, { filled: [] }, history, {
+      profile: { email: "founder@agency.example" },
+      siteAccount: {
+        email: "founder@agency.example",
+        password: "x",
+        existsOnSite: true,
+        verified: false,
+        hostname: "account.ycombinator.com",
+      },
+    });
+    assert.equal(cls.step, "auth");
+    assert.equal(stepToPlan(cls, snap, history)?.type, "auth_login");
+    const catalog = buildActionCatalog(snap, { filled: [] }, history, {}, cls);
+    assert.ok(catalog.some((a) => a.type === "auth_login"));
+    assert.equal(catalog.some((a) => a.type === "click_signin"), false);
   });
 });
 

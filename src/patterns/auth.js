@@ -38,11 +38,11 @@ export const AUTH_FAILURE_TEXT =
  * Covers error toasts and "Already have an account? Sign in" prompts.
  */
 export const EXISTING_ACCOUNT_TEXT =
-  /\b(already have an account|have an account\??|account already exists|email (is )?(already )?(taken|registered|in use)|user already exists|already registered|already a member|already signed up|an account with (this|that) email)\b/i;
+  /\b(already have an account|account already exists|email (is )?(already )?(taken|registered|in use)|user already exists|already registered|already a member|already signed up|an account with (this|that) email)\b/i;
 
-/** CTA language inviting sign-in for existing members. */
+/** CTA language inviting sign-in for existing members (must not match "Don't have an account?"). */
 export const EXISTING_ACCOUNT_SIGNIN_CTA =
-  /\b(already (have an )?account|already a member|have an account)\b.*\b(sign in|log in)\b|\b(sign in|log in)\b.*\b(already have|existing account)\b/i;
+  /\b(already (have an )?account|already a member)\b.*\b(sign in|log in)\b|\b(sign in|log in)\b.*\b(already have|existing account)\b/i;
 
 /** Browser-evaluate source for username field detection (no module imports in page). */
 export const USERNAME_FIELD_PATTERN_SOURCE =

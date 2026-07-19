@@ -156,10 +156,11 @@ export function markAccountVerified(hostname) {
 export function markAccountExists(hostname) {
   const existing = loadAccountForHost(hostname);
   if (!existing) return null;
+  // Email is taken on this host — prefer login next. Do NOT mark verified: the
+  // provisioned password may not be the user's real site password (YC, etc.).
   return saveAccountForHost(hostname, {
     ...existing,
     pending: false,
-    verified: true,
     existsOnSite: true,
     lastExistingAccountAt: new Date().toISOString(),
   });
@@ -186,6 +187,8 @@ export function attachAccountToContext(context, account) {
     password: account.password,
     totpSecret: account.totpSecret || account.totp_secret || context.auth?.totpSecret || "",
     provisioned: account.isNew || account.pending,
+    fromSiteAccount: true,
+    hostname: account.hostname || account.host || "",
   };
   context.siteAccount = account;
   return context;

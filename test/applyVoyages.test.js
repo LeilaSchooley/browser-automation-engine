@@ -145,6 +145,16 @@ describe("apply voyages — findwork / YC / WWR / Ashby style", () => {
     assert.doesNotMatch("Apply", re);
   });
 
+  it("rankEntryCandidates: Apply to role stays above bare Apply (no apply-to penalty)", async () => {
+    const { rankEntryCandidates } = await import("../src/layers/pageIntent.js");
+    const ranked = rankEntryCandidates([
+      { text: "Apply to role ›", href: "/companies/x/jobs/y", score: 113, tag: "a" },
+      { text: "Apply", href: "/apply", score: 60, tag: "a" },
+    ]);
+    assert.equal(ranked[0].text, "Apply to role ›");
+    assert.ok(ranked[0].score > ranked[1].score);
+  });
+
   it("YC login card with generic title still detects passwordless (pageText fallback)", () => {
     // Real YC surface: title="Account | Y Combinator", headings unrendered, tiny card body.
     const snap = {
@@ -165,6 +175,32 @@ describe("apply voyages — findwork / YC / WWR / Ashby style", () => {
     initTestRuntime({
       settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" },
     });
+    const cls = classifyApplyStep(snap, { filled: [] }, [], {
+      profile: { email: "founder@agency.example", startupName: "TestCo" },
+    });
+    assert.equal(cls.step, "signup_entry");
+  });
+
+  it("YC sparse login card (172ch body, no signup candidate) still opens Create account", () => {
+    initTestRuntime({
+      settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" },
+    });
+    const snap = {
+      title: "Account | Y Combinator",
+      headings: "",
+      pageText: "Account Username or email Continue",
+      url: "https://account.ycombinator.com/?continue=https%3A%2F%2Fapply.ycombinator.com%2Fhome",
+      hostname: "account.ycombinator.com",
+      fieldCount: 1,
+      passwordFieldCount: 0,
+      emailFieldCount: 0,
+      usernameFieldCount: 1,
+      fields: [{ type: "text", label: "Username or email", name: "ycid" }],
+      continueCandidates: [{ text: "Continue" }],
+      signUpCount: 0,
+      signUpCandidates: [],
+    };
+    assert.equal(looksLikePasswordlessLoginSurface(snap), true);
     const cls = classifyApplyStep(snap, { filled: [] }, [], {
       profile: { email: "founder@agency.example", startupName: "TestCo" },
     });
@@ -198,6 +234,168 @@ describe("apply voyages — findwork / YC / WWR / Ashby style", () => {
       profile: { email: "founder@agency.example", fullName: "Isaac Boadi", startupName: "TestCo" },
     });
     assert.equal(cls.step, "signup");
+  });
+
+  it("YC signup form with opaque labels + Log in link still fills (not click_signup loop)", () => {
+    initTestRuntime({
+      settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" },
+    });
+    // Real inspectPage shape after Create an account: title stays generic, labels "?".
+    const snap = {
+      title: "Account | Y Combinator",
+      headings: "",
+      pageText: "Account Sign Up Log in",
+      hostname: "account.ycombinator.com",
+      fieldCount: 5,
+      passwordFieldCount: 1,
+      emailFieldCount: 1,
+      usernameFieldCount: 1,
+      signUpCount: 1,
+      signInCount: 1,
+      signUpCandidates: [{ text: "Sign Up" }],
+      signInCandidates: [{ text: "Log in" }],
+      fields: [
+        { type: "text", label: "?", name: "" },
+        { type: "text", label: "?", name: "" },
+        { type: "email", label: "?", name: "" },
+        { type: "text", label: "Username", name: "username" },
+        { type: "password", label: "Password", name: "password" },
+      ],
+    };
+    const cls = classifyApplyStep(snap, { filled: [] }, [], {
+      profile: { email: "founder@agency.example", fullName: "Isaac Boadi", startupName: "TestCo" },
+      siteAccount: {
+        email: "founder@agency.example",
+        password: "x",
+        pending: true,
+        verified: false,
+        hostname: "account.ycombinator.com",
+      },
+    });
+    assert.equal(cls.step, "signup");
+    assert.notEqual(cls.step, "signup_entry");
+  });
+
+  it("profile email alone is not site login credentials", async () => {
+    const { hasAuthCredentials } = await import("../src/layers/authActions.js");
+    assert.equal(
+      hasAuthCredentials({ auth: { password: "x" }, profile: { email: "a@b.com" } }),
+      false,
+    );
+    assert.equal(
+      hasAuthCredentials(
+        {
+          auth: { email: "a@b.com", password: "x", fromSiteAccount: true },
+          siteAccount: { email: "a@b.com", password: "x", verified: true, hostname: "account.ycombinator.com" },
+        },
+        "account.ycombinator.com",
+      ),
+      true,
+    );
+  });
+
+  it("entry hop onto YC account wall is not strong progress", () => {
+    const before = {
+      url: "https://www.ycombinator.com/companies/x/jobs/y",
+      hostname: "ycombinator.com",
+      title: "Job",
+      pageText: "Apply to role",
+    };
+    const after = {
+      url: "https://account.ycombinator.com/?continue=x",
+      hostname: "account.ycombinator.com",
+      title: "Account | Y Combinator",
+      pageText: "Log in Username or email Continue",
+    };
+    const signals = computeMechanicalSignals(before, after, {});
+    assert.equal(signals.hostChanged, true);
+    assert.equal(
+      isStrongMechanicalProgress(signals, true, true, { type: "click_apply" }, after),
+      false,
+    );
+  });
+
+  it("plan-cache: bare click_apply ignored; target-bound only when still top-ranked", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { lookupCachedPlan, recordCachedPlan } = await import("../src/layers/actionPlanCache.js");
+    const { initTestRuntime } = await import("./helpers/runtime.js");
+    const tmp = path.join(os.tmpdir(), `plan-cache-test-${Date.now()}.json`);
+    fs.writeFileSync(tmp, JSON.stringify({ hosts: {} }));
+    initTestRuntime({ settings: { site_learnings_path: tmp } });
+
+    const role = {
+      text: "Apply to role ›",
+      href: "/companies/x/jobs/y",
+      score: 113,
+      tag: "a",
+      testId: "",
+      selector: "",
+    };
+    const generic = { text: "Apply", href: "/apply", score: 60, tag: "a", testId: "", selector: "" };
+    const snap = {
+      hostname: "ycombinator.com",
+      url: "https://www.ycombinator.com/companies/x/jobs/y",
+      pageKind: "listing",
+      entryCount: 2,
+      entryCandidates: [role, generic],
+      fieldCount: 0,
+      passwordFieldCount: 0,
+      fileInputCount: 0,
+      modalCount: 0,
+      continueCount: 0,
+      submitCount: 0,
+      signUpCount: 0,
+      signInCount: 0,
+    };
+
+    // Bare click_apply (no target) must not cache / must not replay.
+    recordCachedPlan(
+      "ycombinator.com",
+      snap,
+      { type: "click_apply" },
+      { ok: true, progressed: true, afterSnap: { url: "https://www.ycombinator.com/companies/x/jobs/y/apply" } },
+    );
+    assert.equal(lookupCachedPlan("ycombinator.com", snap, {}), null);
+
+    // Generic Apply is not top-ranked → do not cache it.
+    recordCachedPlan(
+      "ycombinator.com",
+      snap,
+      { type: "click_apply", targetCandidate: generic },
+      {
+        ok: true,
+        progressed: true,
+        afterSnap: { url: "https://www.ycombinator.com/companies/x/jobs/y/apply" },
+        entryCandidate: generic,
+      },
+    );
+    assert.equal(lookupCachedPlan("ycombinator.com", snap, {}), null);
+
+    // Proven role apply that is still #1 → replay with bound target after 2 successes.
+    for (let i = 0; i < 2; i++) {
+      recordCachedPlan(
+        "ycombinator.com",
+        snap,
+        { type: "click_apply", targetCandidate: role },
+        {
+          ok: true,
+          progressed: true,
+          afterSnap: { url: "https://www.ycombinator.com/companies/x/jobs/y/apply" },
+          entryCandidate: role,
+        },
+      );
+    }
+    const hit = lookupCachedPlan("ycombinator.com", snap, {});
+    assert.ok(hit);
+    assert.equal(hit.type, "click_apply");
+    assert.match(hit.targetCandidate?.text || "", /Apply to role/);
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
   });
 
   it("TOTP generates 6-digit codes; OTP normalize strips junk", () => {

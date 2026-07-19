@@ -210,6 +210,35 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
     });
   }
 
+  // Prefer href navigation for role-specific Apply links before flaky a11y-name matching.
+  // YC's "Apply to role ›" often fails role match (decorative glyph) while its href is correct;
+  // waiting until last-resort lets the weaker bare "Apply" candidate win first.
+  const rawHrefEarly = String(candidate.href || "").trim();
+  const roleApplyHref =
+    rawHrefEarly &&
+    !/^(mailto:|tel:|javascript:|#)/i.test(rawHrefEarly) &&
+    /\bapply to (this )?role\b|\bapply for (this|the) (role|job|position)\b/i.test(
+      String(candidate.text || candidate.aria || ""),
+    );
+  if (roleApplyHref) {
+    attempts.push(async () => {
+      let dest = "";
+      try {
+        dest = new URL(rawHrefEarly, page.url()).href;
+      } catch {
+        return false;
+      }
+      if (!/^https?:\/\//i.test(dest)) return false;
+      await page.goto(dest, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      log.layer(
+        layer,
+        `${label}: navigated to role-apply href ${dest.slice(0, 90)} "${(candidate.text || "").slice(0, 40)}"`,
+        "info",
+      );
+      return true;
+    });
+  }
+
   if (candidate.text) {
     const nameRe = roleNameMatcher(candidate.text);
     if (nameRe) {

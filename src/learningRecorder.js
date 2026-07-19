@@ -249,11 +249,15 @@ export function synthesizeLearningsFromRun({
     lastProgressSteps: progressSteps,
   };
 
-  if (snap?.entryCandidates?.[0]?.text) {
-    patch.entryText = snap.entryCandidates[0].text;
-  }
-  if (snap?.url) {
-    patch.entryHref = snap.url;
+  // Persist only the clicked apply entry (validated progress), never unranked DOM [0] / page URL.
+  const successfulEntry = [...(history || [])]
+    .reverse()
+    .find((h) => h.action === "click_apply" && h.ok && h.progress && (h.entryKey || h.entryText || h.entryHref));
+  if (successfulEntry) {
+    if (successfulEntry.entryText) patch.entryText = String(successfulEntry.entryText).slice(0, 120);
+    if (successfulEntry.entryHref && !/ycombinator\.com\/apply\/?$/i.test(successfulEntry.entryHref)) {
+      patch.entryHref = String(successfulEntry.entryHref).slice(0, 240);
+    }
   }
 
   const { hints: fieldHints, controlSkills } = fieldHintsFromFilled(fillResult.filled || []);

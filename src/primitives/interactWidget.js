@@ -43,7 +43,7 @@ export async function interactWidget(page, spec, value, handlers, opts = {}) {
   } else if (widgetType === "checkbox") {
     ok = await (handlers.checkbox || handlers.radio)(page, spec, value, log, snap);
   } else if (widgetType === "typeahead") {
-    ok = await handlers.typeahead(page, spec.labelRe, value, log, snap);
+    ok = await handlers.typeahead(page, spec.labelRe, value, log, snap, spec);
   } else if (widgetType === "radio") {
     ok = await handlers.radio(page, spec, value, log, snap);
   } else if (widgetType === "yesno") {

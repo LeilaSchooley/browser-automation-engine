@@ -69,7 +69,7 @@ export async function probeSubmitPaths(page, targetHost, log, context = {}) {
   return { ok: false };
 }
 
-export async function clickRankedEntry(page, snap, log, layer, context = {}, { skipKeys = new Set() } = {}) {
+export async function clickRankedEntry(page, snap, log, layer, context = {}, { skipKeys = new Set(), preferCandidate = null } = {}) {
   const pageUrl = snap?.url || "";
   const safeEntries = filterSafeEntryCandidates(snap.entryCandidates, pageUrl);
   if ((snap.entryCandidates || []).length && !safeEntries.length) {
@@ -77,9 +77,29 @@ export async function clickRankedEntry(page, snap, log, layer, context = {}, { s
     log.layer(layer, `entry: all candidates blocked — ${blocked.reason || "toxic apply href"}`, "warn");
     return { ok: false, blocked: true, reason: blocked.reason || "toxic apply href" };
   }
-  const ranked = rankEntryCandidates(safeEntries, context).filter(
+  let ranked = rankEntryCandidates(safeEntries, context).filter(
     (c) => !skipKeys.has(c.entryKey || entryCandidateKey(c)),
   );
+
+  // Soft preference: boost a bound target only if it still survives ranking filters.
+  if (preferCandidate && ranked.length) {
+    const preferKey = entryCandidateKey(preferCandidate).toLowerCase();
+    const preferHref = String(preferCandidate.href || "").toLowerCase();
+    ranked = [...ranked].sort((a, b) => {
+      const aKey = (a.entryKey || entryCandidateKey(a)).toLowerCase();
+      const bKey = (b.entryKey || entryCandidateKey(b)).toLowerCase();
+      const aHit = aKey === preferKey || (preferHref && String(a.href || "").toLowerCase() === preferHref);
+      const bHit = bKey === preferKey || (preferHref && String(b.href || "").toLowerCase() === preferHref);
+      if (aHit === bHit) return (b.score || 0) - (a.score || 0);
+      return aHit ? -1 : 1;
+    });
+    // If preferred is not top after score sort would disagree by a lot, keep score order.
+    if (ranked.length >= 2 && (ranked[0].score || 0) + 40 < (ranked[1].score || 0)) {
+      ranked = rankEntryCandidates(safeEntries, context).filter(
+        (c) => !skipKeys.has(c.entryKey || entryCandidateKey(c)),
+      );
+    }
+  }
 
   if (!ranked.length) {
     log.layer(layer, "entry: no untried candidates", "debug");

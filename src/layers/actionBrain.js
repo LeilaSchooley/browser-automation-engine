@@ -6,7 +6,8 @@ import { getRuntime, getSettings } from "../runtime.js";
 import { isPageUnloaded } from "./pageReady.js";
 import { classifyApplyStep, stepToPlan } from "./applyStep.js";
 import { shouldEscalateToAi, shouldAiOverrideHeuristic } from "./semanticRecovery.js";
-import { isStuck, shouldPreferUpload, recentPreferencesSignup, preferencesSignupSubmitted, applyEntrySucceeded, uploadStalled } from "../heuristics.js";
+import { runStuckFillRecovery } from "./recovery/stallPredicates.js";
+import { isStuck, recentPreferencesSignup, preferencesSignupSubmitted, applyEntrySucceeded } from "../heuristics.js";
 import { ariaContextBlock, shouldAttachAriaSnapshot } from "./ariaDistill.js";
 import { boostInteractivesWithLearnings, findLearnedAffordanceReplay, isDismissAffordanceSignature, affordanceSignature, findRelevantSkills, findSituationMemoryPlan } from "../siteLearnings.js";
 import { buildDeterministicPlan, isDeterministicState, shouldInvokeLlm, smartFillStalledOnStep } from "./deterministicPolicy.js";
@@ -21,7 +22,7 @@ import { applyApprovedSkillProposals } from "../skillProposals.js";
 import { recordEngineEvent } from "../observability.js";
 
 /** Steps that must stay mechanical — never delegated to the LLM brain. */
-export const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp"]);
+export const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp", "signup_entry"]);
 
 /**
  * Omni decision entry — Observe snap in → plan out.
@@ -131,22 +132,7 @@ export function preferIndexedAct(plan, snap) {
 }
 
 function stuckUploadFallback(history, snap, fillResult = null) {
-  if (!isStuck(history, snap)) return null;
-  if (uploadStalled(history)) {
-    return {
-      type: "smart_fill",
-      reason: "upload stalled — fill application fields",
-      source: "stuck-recovery",
-      step: "form",
-    };
-  }
-  if (!shouldPreferUpload(snap, history, fillResult)) return null;
-  return {
-    type: "upload_resume",
-    reason: "stuck — force file upload attempt",
-    source: "stuck-recovery",
-    step: "upload",
-  };
+  return runStuckFillRecovery({ snap, history, fillResult });
 }
 
 function withDecision(plan, classification, path, reason = "") {
@@ -191,8 +177,9 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
     /* ignore */
   }
 
-  // Fingerprint → plan cache (after ≥2 successes on same page shape).
-  const cached = lookupCachedPlan(snap?.hostname || context?.targetHost, snap);
+  // Fingerprint → plan cache (after ≥2 successes). click_apply only if a proven
+  // target is still the top-ranked entry candidate — otherwise stay dynamic.
+  const cached = lookupCachedPlan(snap?.hostname || context?.targetHost, snap, context);
   if (cached && mode === "primary") {
     recordEngineEvent("skill_replay", { source: "plan-cache", action: cached.type });
     return withDecision(cached, classification, "plan-cache", cached.reason);
@@ -242,8 +229,10 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
     catalog.sort((a, b) => b.score - a.score);
   }
 
+  // Situation / affordance replay: never short-circuit multi-CTA entry (always re-rank).
+  const multiEntry = (snap?.entryCount || 0) > 1 || (snap?.entryCandidates || []).length > 1;
   const situationPlan = findSituationMemoryPlan(snap, context?.siteLearnings, catalog);
-  if (situationPlan && mode === "primary") {
+  if (situationPlan && mode === "primary" && !(classification?.step === "entry" && multiEntry)) {
     recordEngineEvent("skill_replay", {
       source: "situation-memory",
       action: situationPlan.type,
@@ -273,8 +262,8 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
         isDismissAffordanceSignature(replaySig)
       ) {
         /* blocked — post-preferences signup; closing modal resets funnel */
-      } else if (classification?.step === "entry" && applyEntrySucceeded(history, fp)) {
-        /* blocked — apply entry already succeeded on this page fingerprint */
+      } else if (classification?.step === "entry" && (multiEntry || applyEntrySucceeded(history, fp))) {
+        /* blocked — multi-CTA entry stays dynamic; or apply already succeeded */
       } else {
         recordEngineEvent("skill_replay", { source: "affordance-memory", action: replay.type });
         return withDecision(

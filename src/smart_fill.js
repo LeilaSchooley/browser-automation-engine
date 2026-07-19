@@ -17,7 +17,7 @@ function runSmartFill(config, siteMappings, options) {
   // - all: union (extension one-click + hosted engine)
   const APPLY_ONLY = new Set([
     "coverletter", "additionalinfo", "resume", "desiredtitle", "salary",
-    "employeerelation", "chosenname",
+    "employeerelation", "chosenname", "hidecompanies",
   ]);
   const DIRECTORY_ONLY = new Set([
     "password", "confirmpassword", "companyname", "username",
@@ -236,6 +236,9 @@ function runSmartFill(config, siteMappings, options) {
       antiKeywords: [
         "username",
         "company",
+        "companies",
+        "hidden from",
+        "hidden",
         "email",
         "phone",
         "first name",
@@ -248,7 +251,7 @@ function runSmartFill(config, siteMappings, options) {
     },
     chosenname: {
       keywords: ["chosen name", "preferred name", "preferred full name", "name you go by"],
-      antiKeywords: ["username", "company", "legal name", "pronoun", "first name", "last name"],
+      antiKeywords: ["username", "company", "companies", "hidden", "legal name", "pronoun", "first name", "last name"],
       points: { keyword: 75 },
     },
     employeerelation: {
@@ -375,7 +378,18 @@ function runSmartFill(config, siteMappings, options) {
     },
     location: {
       autocomplete: ["address-level2"],
-      keywords: ["location", "where are you", "based in", "your location", "city region"],
+      keywords: [
+        "location",
+        "where are you",
+        "based in",
+        "your location",
+        "city region",
+        "what city",
+        "which city",
+        "city do you live",
+        "live in",
+        "hometown",
+      ],
       antiKeywords: ["job location", "office location", "company location"],
       points: { autocomplete: 80, keyword: 65 },
     },
@@ -416,8 +430,31 @@ function runSmartFill(config, siteMappings, options) {
         "company", "company name", "companyname", "organisation", "organization",
         "employer", "business name", "firm name",
       ],
-      antiKeywords: ["firstname", "lastname", "email", "phone", "postcode"],
+      // Hide-from-employer fields often use placeholder "Company name" — never map as employer.
+      antiKeywords: [
+        "firstname",
+        "lastname",
+        "email",
+        "phone",
+        "postcode",
+        "hidden from",
+        "hidden",
+        "hide my",
+        "hide from",
+      ],
       points: { autocomplete: 100, keyword: 60 },
+    },
+    // Keep keywords in sync with patterns/applicationScreening.js HIDE_COMPANIES_*
+    hidecompanies: {
+      keywords: [
+        "hidden from",
+        "companies you want to be hidden",
+        "hide my profile",
+        "hide from",
+        "current employer",
+      ],
+      antiKeywords: ["first name", "last name", "email", "phone", "linkedin"],
+      points: { keyword: 85 },
     },
     username: {
       autocomplete: ["username"],
@@ -832,6 +869,7 @@ function runSmartFill(config, siteMappings, options) {
     password: config.password,
     confirmpassword: config.password,
     companyname: config.companyName,
+    hidecompanies: config.hideFromCompanies || "",
     username: config.username,
     dob: [config.dobDay, config.dobMonth, config.dobYear].filter(Boolean).join("/") || config.dob || "",
     productname: config.productName,
@@ -852,7 +890,7 @@ function runSmartFill(config, siteMappings, options) {
     coverletter: 50, additionalinfo: 55, linkedinurl: 60, website: 50, resume: 70, description: 40,
     address1: 55, address2: 60, city: 50, state: 50, zip: 55, country: 50, citystatezip: 60,
     location: 55, desiredtitle: 55, salary: 55,
-    password: 60, confirmpassword: 70, companyname: 50, username: 60, dob: 60,
+    password: 60, confirmpassword: 70, companyname: 50, hidecompanies: 70, username: 60, dob: 60,
     productname: 60, tagline: 60, launchyear: 60, launchdate: 60,
     twitterurl: 60, githuburl: 60, facebookurl: 60, logourl: 60, pricing: 60, foundername: 60,
   };
