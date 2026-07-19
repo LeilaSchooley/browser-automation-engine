@@ -36,7 +36,7 @@ import {
 import { findRelevantSkills } from "../siteLearnings.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
-import { isOauthProviderHost } from "./applyUrlSafety.js";
+import { isOauthProviderHost, looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
 
 /**
  * @typedef {{ id: string, type: string, score: number, reason: string, targetCandidate?: object, instruction?: string, step?: string }} CatalogAction
@@ -58,9 +58,22 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
   const actions = [];
   const filled = fillResult?.filled?.length || 0;
   const fp = classification?.fingerprint || "";
+  const oauthProvider = isOauthProviderHost(snap.url || snap.hostname || "");
 
   if (classification?.step === "blocked" || classification?.hardStop) {
     return [{ id: "wait_user", type: "wait_user", score: 100, reason: classification?.reason || "blocked" }];
+  }
+
+  if (classification?.step === "enter_otp") {
+    return [
+      {
+        id: "enter_otp",
+        type: "enter_otp",
+        score: 98,
+        reason: classification?.reason || "enter verification code",
+        step: "enter_otp",
+      },
+    ];
   }
 
   if (snap.cookieBanner && looksLikeRealCookieConsent(snap)) {
@@ -113,7 +126,7 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     }
   }
 
-  if (looksLikeJobBoardIndex(snap)) {
+  if (looksLikeJobBoardIndex(snap) && canUseStagehand(context).ok) {
     actions.push({
       id: "stagehand_job_board",
       type: "stagehand_act",
@@ -121,6 +134,7 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       reason: "navigate job board — pick matching listing",
       instruction: buildStagehandInstruction(snap, classification || { step: "entry" }, history, context),
       step: "entry",
+      mappedTo: "board_nav",
     });
     for (const c of (snap.entryCandidates || []).slice(0, 2)) {
       actions.push({
@@ -157,7 +171,7 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     actions.push({ id: "auth_signup", type: "auth_signup", score: 86, reason: "registration form", step: "signup" });
     actions.push({ id: "smart_fill_signup", type: "smart_fill", score: 84, reason: "fill registration fields", step: "signup" });
   }
-  if (looksLikeSignupEntry(snap) && !shouldBlockBoardSignupAfterLeave(history, snap)) {
+  if (looksLikeSignupEntry(snap) && !oauthProvider && !shouldBlockBoardSignupAfterLeave(history, snap)) {
     actions.push({ id: "click_signup", type: "click_signup", score: 72, reason: "signup entry CTA", step: "signup_entry" });
   } else if (shouldBlockBoardSignupAfterLeave(history, snap)) {
     actions.push({
@@ -179,7 +193,10 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       });
     }
   }
-  if (classification?.step === "signin_entry" || ((snap.signInCount || 0) > 0 && classification?.step === "auth")) {
+  if (
+    !oauthProvider &&
+    (classification?.step === "signin_entry" || ((snap.signInCount || 0) > 0 && classification?.step === "auth"))
+  ) {
     actions.push({
       id: "click_signin",
       type: "click_signin",
@@ -341,7 +358,11 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     }
   }
 
-  if (classification?.step === "ambiguous" && canUseStagehand(context).ok) {
+  if (
+    classification?.step === "ambiguous" &&
+    canUseStagehand(context).ok &&
+    !looksLikeDeadApplyDestination(snap).dead
+  ) {
     actions.push({
       id: "stagehand_ambiguous",
       type: "stagehand_act",
@@ -359,7 +380,8 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
     (snap.fieldCount || 0) < 2 &&
     (snap.continueCount || 0) === 0 &&
     !looksLikeAuthForm(snap) &&
-    classification?.step !== "blocked"
+    classification?.step !== "blocked" &&
+    !looksLikeDeadApplyDestination(snap).dead
   ) {
     actions.push({
       id: "stagehand_sparse_dom",

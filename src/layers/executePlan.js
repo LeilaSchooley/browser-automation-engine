@@ -5,6 +5,7 @@ import { humanPause } from "../human.js";
 import { runSmartFill } from "../smartFill.js";
 import { saveStorageState } from "../sessionStore.js";
 import { attemptEmailVerify } from "../inboxVerify.js";
+import { attemptOtpEntry } from "../inboxOtp.js";
 import { runPagePrepRound } from "./pagePrep.js";
 import {
   clickCandidate,
@@ -132,7 +133,9 @@ export async function executePlan(page, plan, {
       if (!ok && canUseStagehand(context).ok) {
         const instruction =
           plan.instruction ||
-          buildStagehandInstruction(snap, classification || { step: "entry" }, history, context);
+          buildStagehandInstruction(snap, classification || { step: "entry" }, history, context, {
+            forceApply: true,
+          });
         log?.layer("agent", `click_apply failed — Stagehand: ${instruction.slice(0, 90)}`, "warn");
         const sh = await attemptStagehandAct(page, context, { instruction, log });
         ok = sh.ok;
@@ -385,6 +388,12 @@ export async function executePlan(page, plan, {
     }
     case "verify_email": {
       ok = await attemptEmailVerify(page, snap, log, { sessionId });
+      if (ok) await waitAfterClickTransition(page);
+      break;
+    }
+    case "enter_otp":
+    case "wait_otp": {
+      ok = await attemptOtpEntry(page, snap, log, { sessionId, context });
       if (ok) await waitAfterClickTransition(page);
       break;
     }

@@ -13,8 +13,9 @@ import {
   isResumeReviewUpsell,
   isExpertReviewGate,
   looksLikeGoogleVignetteAd,
+  pathLooksLikeJobDetail,
 } from "../heuristics.js";
-import { JOB_BOARD_HOST_RE, JOB_BOARD_PAGE_BODY } from "../patterns/listing.js";
+import { JOB_BOARD_HOST_RE, JOB_BOARD_PAGE_BODY, APPLY_CTA_PHRASE_RE } from "../patterns/listing.js";
 import { hasPreferencesGateFields, getPreferencesFromContext } from "../fillPreferences.js";
 import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding, looksLikeJobBoardWelcomeConfirm, looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 import {
@@ -23,8 +24,9 @@ import {
 } from "../fillApplicationAnswers.js";
 import { canUseStagehand, attemptStagehandAct } from "./stagehandAdapter.js";
 import { smartFillStalledOnStep } from "./deterministicPolicy.js";
+import { isOauthProviderHost, looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
 
-const SAFETY_STEPS = new Set(["loading", "blocked"]);
+const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp", "verify_email"]);
 
 function jobContext(context = {}) {
   const job = context.job || context.listing || {};
@@ -42,16 +44,75 @@ function urlHost(snap) {
   }
 }
 
-/** Soft board signal for instruction routing when classification is ambiguous. */
+function candidateTextBlob(snap) {
+  const parts = [];
+  for (const list of [
+    snap?.entryCandidates,
+    snap?.submitCandidates,
+    snap?.continueCandidates,
+    snap?.interactives,
+  ]) {
+    for (const c of list || []) {
+      parts.push(c.text || "", c.aria || "", c.value || "");
+    }
+  }
+  return parts.join(" ").toLowerCase();
+}
+
+/** Apply-ish control visible even when entry scoring missed it. */
+export function hasApplyishDomSignal(snap) {
+  if ((snap?.entryCount || 0) > 0) return true;
+  const blob = candidateTextBlob(snap);
+  if (APPLY_CTA_PHRASE_RE.test(blob)) return true;
+  if (/\bapply\b/i.test(blob) && !/sign in|log in|register/i.test(blob)) return true;
+  return false;
+}
+
+/**
+ * Soft board signal for instruction routing when classification is ambiguous.
+ * Must NOT fire on job-detail URLs (nav "All jobs" / ATS host alone is not enough).
+ */
 export function looksBoardIsh(snap) {
   if (!snap) return false;
   if (looksLikeJobBoardIndex(snap)) return true;
+  // Detail / deep job paths are never soft board indexes.
+  if (pathLooksLikeJobDetail(snap)) return false;
+  if (hasApplyishDomSignal(snap)) return false;
+
   const pageBlob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
-  if (JOB_BOARD_PAGE_BODY.test(pageBlob) && (snap.fileInputCount || 0) === 0) return true;
-  if (JOB_BOARD_HOST_RE.test(urlHost(snap)) && (snap.fileInputCount || 0) === 0 && (snap.passwordFieldCount || 0) === 0) {
+  const noFile = (snap.fileInputCount || 0) === 0;
+  const noPassword = (snap.passwordFieldCount || 0) === 0;
+
+  // Body copy alone is weak (footer "All jobs" / "Careers at X" on JDs) — require empty-ish surface.
+  if (JOB_BOARD_PAGE_BODY.test(pageBlob) && noFile && (snap.fieldCount || 0) === 0 && (snap.entryCount || 0) === 0) {
+    return true;
+  }
+  // ATS host at company root only (deep paths already excluded above).
+  if (JOB_BOARD_HOST_RE.test(urlHost(snap)) && noFile && noPassword && (snap.entryCount || 0) === 0) {
     return true;
   }
   return false;
+}
+
+function topEntryLabel(snap) {
+  const top = snap?.entryCandidates?.[0];
+  const text = String(top?.text || top?.aria || top?.value || "").trim();
+  return text ? text.slice(0, 80) : "";
+}
+
+function buildApplyInstruction(jobRef, companyRef, snap = null) {
+  const named = topEntryLabel(snap);
+  if (named) {
+    return (
+      `On this job page, click the control labeled exactly "${named}" to start applying for ${jobRef}${companyRef}. ` +
+      `Do not click mailto/email links, generic site-wide "Apply" (e.g. YC batch), or other job listings.`
+    );
+  }
+  return (
+    `On this job page, click the main role-specific Apply button or link to start applying for ${jobRef}${companyRef}. ` +
+    `Prefer labels like "Apply to role", "Apply for the job", "Apply for this job", or "I'm interested". ` +
+    `Do not click mailto links, generic "Apply" that leaves the job, or other job listings.`
+  );
 }
 
 /**
@@ -64,8 +125,13 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
   const gate = canUseStagehand(context);
   if (!gate.ok) return false;
   if (SAFETY_STEPS.has(classification?.step)) return false;
+  if (looksLikeDeadApplyDestination(snap).dead) return false;
 
-  if (classification?.step === "signup" || classification?.step === "signup_entry" || classification?.step === "signin_entry") {
+  if (
+    ["auth", "signup", "signup_entry", "signin_entry"].includes(classification?.step) ||
+    (snap?.passwordFieldCount || 0) > 0 ||
+    isOauthProviderHost(snap?.url || snap?.hostname || "")
+  ) {
     return false;
   }
   if (looksLikeApplySignupGate(snap)) return false;
@@ -78,7 +144,8 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
 
   const fp = classification?.fingerprint || pageFingerprintFromSnap(snap);
 
-  if (looksLikeJobBoardIndex(snap) || looksBoardIsh(snap)) return true;
+  // Strict board index only — soft board-ish must not short-circuit Apply on detail pages.
+  if (looksLikeJobBoardIndex(snap)) return true;
 
   if (uploadStalled(history) && (snap?.fileInputCount || 0) > 0) return true;
 
@@ -125,17 +192,36 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
  * @param {object} classification
  * @param {object[]} history
  * @param {object} context
+ * @param {{ forceApply?: boolean }} [opts]
  */
-export function buildStagehandInstruction(snap, classification, history = [], context = {}) {
+export function buildStagehandInstruction(snap, classification, history = [], context = {}, opts = {}) {
   const { title, company } = jobContext(context);
   const jobRef = title ? `"${title}"` : "the target job";
   const companyRef = company ? ` at ${company}` : "";
 
-  if (looksLikeJobBoardIndex(snap) || looksBoardIsh(snap)) {
-    if (title) {
-      return `On this job board, click the job listing that best matches ${jobRef}${companyRef}. Do not change filter dropdowns unless necessary.`;
+  if (classification?.step === "enter_otp") {
+    return (
+      "Enter the verification / one-time code from the applicant's email into the code field, then click Verify or Continue. " +
+      "Do not navigate away or click social login."
+    );
+  }
+
+  if (
+    ["auth", "signup", "signup_entry", "signin_entry"].includes(classification?.step) ||
+    (snap?.passwordFieldCount || 0) > 0
+  ) {
+    const signupLabel = String(snap?.signUpCandidates?.[0]?.text || "Create an account").trim().slice(0, 60);
+    if (classification?.step === "signup_entry") {
+      return (
+        `Click "${signupLabel}" to open account creation. ` +
+        "Never click Google, LinkedIn, Apple, Facebook, Microsoft, GitHub, or any other social/OAuth option."
+      );
     }
-    return "On this job board page, click the most relevant job listing to open its application. Do not fill filter dropdowns.";
+    return (
+      "Use the site's email and password form to continue. " +
+      'Prefer the plain Email, Password, "Continue", "Sign in", or "Create account" controls. ' +
+      "Never click Google, LinkedIn, Apple, Facebook, Microsoft, GitHub, or any other social/OAuth option."
+    );
   }
 
   if (uploadStalled(history) && (snap?.fileInputCount || 0) > 0) {
@@ -152,8 +238,32 @@ export function buildStagehandInstruction(snap, classification, history = [], co
     return `${parts.join("; ")}.`;
   }
 
-  if (classification?.step === "entry" || countRecentAction(history, "click_apply", 4) >= 2) {
-    return `Click the Apply button or link to start applying for ${jobRef}${companyRef}.`;
+  const boardIndex = looksLikeJobBoardIndex(snap);
+  const detailPath = pathLooksLikeJobDetail(snap);
+  const forceApply = Boolean(opts.forceApply || classification?.forceApply);
+  const applyish = hasApplyishDomSignal(snap);
+  const wantsApply =
+    forceApply ||
+    detailPath ||
+    applyish ||
+    (!boardIndex &&
+      (classification?.step === "entry" || countRecentAction(history, "click_apply", 4) >= 2));
+
+  // Listing picker only on true board indexes — never on job-detail / Apply surfaces.
+  if (boardIndex && !forceApply && !detailPath && !applyish) {
+    if (title) {
+      return `On this job board, click the job listing that best matches ${jobRef}${companyRef}. Do not change filter dropdowns unless necessary.`;
+    }
+    return "On this job board page, click the most relevant job listing to open its application. Do not fill filter dropdowns.";
+  }
+
+  if (wantsApply) {
+    return buildApplyInstruction(jobRef, companyRef, snap);
+  }
+
+  // Also block Stagehand on soft OTP steps
+  if (classification?.step === "enter_otp") {
+    return "Enter the email verification code into the OTP field and submit.";
   }
 
   if (hasPreferencesGateFields(snap)) {
@@ -178,13 +288,15 @@ export function buildStagehandInstruction(snap, classification, history = [], co
  */
 export function buildStagehandPlan(snap, classification, history = [], context = {}) {
   const instruction = buildStagehandInstruction(snap, classification, history, context);
+  const boardIndex = looksLikeJobBoardIndex(snap);
   return {
     type: "stagehand_act",
     instruction,
     reason: classification?.reason || instruction.slice(0, 100),
     source: "stagehand-policy",
     step: classification?.step,
-    mappedTo: looksBoardIsh(snap) ? "board_nav" : undefined,
+    // Only persist board_nav after a verified index page — soft board-ish must not poison skills.
+    mappedTo: boardIndex ? "board_nav" : undefined,
   };
 }
 

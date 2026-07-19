@@ -7,6 +7,8 @@ import { looksLikeDeadApplyDestination, looksLikeAggregatorTrap, isOauthProvider
 import {
   hasAuthCredentials,
   looksLikeAuthForm,
+  looksLikePasswordlessLoginSurface,
+  looksLikeSoftOtpGate,
   looksLikeOAuthOnly,
   looksLikeHardGate,
   looksLikeExistingAccount,
@@ -80,6 +82,7 @@ export const STEP_ACTIONS = {
   signin_entry: "click_signin",
   obstacle: "clear_obstacle",
   verify_email: "verify_email",
+  enter_otp: "enter_otp",
   nav_recovery: "nav_recovery",
   continue: "click_continue",
   review: "done",
@@ -300,7 +303,9 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
   const forceSignIn =
     signupSaidExists ||
     looksLikeExistingAccountError(snap) ||
-    (looksLikeExistingAccountSignInPrompt(snap) && (hasStoredCreds || stored?.existsOnSite || stored?.verified));
+    (looksLikeExistingAccountSignInPrompt(snap) &&
+      !isRegistrationSurface(snap) &&
+      (hasStoredCreds || stored?.existsOnSite || stored?.verified));
 
   if (forceSignIn) {
     if (hostname) ensureAccount(context, hostname);
@@ -320,6 +325,40 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
         confidence: "high",
         reason: "site says account already exists — log in",
         target: snap.signInCandidates?.[0] || null,
+        affordances,
+        fingerprint: fp,
+      };
+    }
+  }
+
+  // Soft OTP / email-code wall — must win over passwordless "Create account" once a code field is shown.
+  if (looksLikeSoftOtpGate(snap)) {
+    return {
+      step: "enter_otp",
+      confidence: "high",
+      reason: "OTP / email verification code — poll inbox or wait for paste",
+      target: null,
+      affordances,
+      fingerprint: fp,
+    };
+  }
+
+  // Passwordless magic-link/OTP login (e.g. YC): with no verified account, submitting the
+  // email just triggers an email-code wall for an account that doesn't exist. Prefer the
+  // "Create an account" path instead of filling the login form.
+  if (looksLikePasswordlessLoginSurface(snap) && !looksLikeAuthForm(snap)) {
+    const hostname = snap.hostname || "";
+    const stored = resolveAccountForHost(context, hostname, { provision: false });
+    const hasVerifiedCreds =
+      hasAuthCredentials(context) ||
+      (stored && stored.verified && !shouldPreferSignupForAccount(stored));
+    if (!hasVerifiedCreds && (snap.signUpCount || 0) > 0 && canProvisionAccounts(context)) {
+      ensureAccount(context, hostname);
+      return {
+        step: "signup_entry",
+        confidence: "high",
+        reason: "passwordless login wall, no saved account — open Create an account",
+        target: snap.signUpCandidates?.[0] || null,
         affordances,
         fingerprint: fp,
       };
@@ -685,7 +724,15 @@ export function classifyApplyStep(snap, fillResult, history = [], context = null
 
   // Registration with personal name fields — fill from applicant profile via smart_fill
   // even when auto-signup provisioning is off (job-apply uses real Settings identity).
-  if (hasIdentityRegistrationFields(snap) && (snap.fieldCount || 0) >= 2) {
+  // BUT a real create-account surface (password field present) with provisioning enabled must
+  // use the signup path: the profile matcher mis-maps identity fields (e.g. email → username),
+  // while fillSignupFormFromDom assigns a proper username, generated password, and clears any
+  // value the site pre-filled into the wrong field (YC carries the login email into Username).
+  const provisionableRegistration =
+    isRegistrationSurface(snap) &&
+    (snap.passwordFieldCount || 0) > 0 &&
+    canProvisionAccounts(context);
+  if (hasIdentityRegistrationFields(snap) && (snap.fieldCount || 0) >= 2 && !provisionableRegistration) {
     return {
       step: "form",
       confidence: "high",

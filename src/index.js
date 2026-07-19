@@ -61,6 +61,15 @@ import {
   isImapConfigured,
   normalizeVerifyLink,
 } from "./manualVerifyLink.js";
+import {
+  provideManualVerifyCode,
+  cancelManualVerifyCode,
+  hasPendingManualVerifyCode,
+  normalizeVerifyCode,
+  waitForManualVerifyCode,
+} from "./manualVerifyCode.js";
+import { looksLikeOtpWall, pollVerifyCode, attemptOtpEntry } from "./inboxOtp.js";
+import { generateTotpCode, resolveTotpCode } from "./totp.js";
 import { gotoWithCloudflareRetry, isCloudflarePage, waitForCloudflareClear } from "./cloudflare.js";
 import {
   detectCaptcha,
@@ -242,6 +251,10 @@ export function createEngine(options = {}) {
     hasPendingManualVerifyLink,
     isImapConfigured,
     normalizeVerifyLink,
+    provideManualVerifyCode,
+    cancelManualVerifyCode,
+    hasPendingManualVerifyCode,
+    normalizeVerifyCode,
   };
 }
 
@@ -340,6 +353,16 @@ export {
   hasPendingManualVerifyLink,
   isImapConfigured,
   normalizeVerifyLink,
+  provideManualVerifyCode,
+  cancelManualVerifyCode,
+  hasPendingManualVerifyCode,
+  normalizeVerifyCode,
+  waitForManualVerifyCode,
+  looksLikeOtpWall,
+  pollVerifyCode,
+  attemptOtpEntry,
+  generateTotpCode,
+  resolveTotpCode,
   buildReadyMessage,
   gotoWithCloudflareRetry,
   isCloudflarePage,

@@ -23,7 +23,7 @@ import { looksLikeRealCookieConsent } from "../consentDetection.js";
 import { hasEmptyRequiredControls } from "../controlState.js";
 import { pageStateSummary } from "./pageState.js";
 import { canUseStagehand } from "./stagehandAdapter.js";
-import { buildStagehandPlan } from "./stagehandPolicy.js";
+import { buildStagehandPlan, shouldPreferStagehand } from "./stagehandPolicy.js";
 import { looksLikeDidYouApplyPrompt } from "../platformOnboarding.js";
 import { normalizeRecoveryAction } from "./actionValidator.js";
 
@@ -415,10 +415,18 @@ export async function attemptFinalRecovery(
   }
 
   if (planNextAction && getSettings().agent_ai) {
-    if (canUseStagehand(context || {}).ok) {
+    const finalClassification = {
+      step: "ambiguous",
+      confidence: "low",
+      reason: "final recovery before manual handoff",
+    };
+    if (
+      canUseStagehand(context || {}).ok &&
+      shouldPreferStagehand(snap, finalClassification, history, context || {}, fillResult)
+    ) {
       const shPlan = buildStagehandPlan(
         snap,
-        { step: "ambiguous", confidence: "low", reason: "final recovery before manual handoff" },
+        finalClassification,
         history,
         context || {},
       );
@@ -431,7 +439,7 @@ export async function attemptFinalRecovery(
         sessionId,
         fillResult,
         history,
-        classification: { step: "ambiguous", confidence: "low" },
+        classification: finalClassification,
       });
       if (executed.ok) {
         return {

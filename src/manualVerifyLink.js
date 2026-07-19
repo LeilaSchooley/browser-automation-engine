@@ -5,6 +5,8 @@ import { getRuntime, getSettings } from "./runtime.js";
 
 /** @type {Map<string, { resolve: (link: string) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout> }>} */
 const pending = new Map();
+/** Verification links pasted before the engine starts waiting (for example from Bulk Apply). */
+const queued = new Map();
 
 export function isImapConfigured() {
   const settings = getSettings();
@@ -20,6 +22,7 @@ export function hasPendingManualVerifyLink(sessionId) {
 
 export function cancelManualVerifyLink(sessionId, reason = "cancelled") {
   const key = String(sessionId);
+  queued.delete(key);
   const entry = pending.get(key);
   if (!entry) return false;
   clearTimeout(entry.timer);
@@ -34,6 +37,11 @@ export function cancelManualVerifyLink(sessionId, reason = "cancelled") {
  */
 export function waitForManualVerifyLink(sessionId, { timeoutMs = 600000, message = "", imapFailed = false } = {}) {
   const key = String(sessionId);
+  const queuedLink = queued.get(key);
+  if (queuedLink) {
+    queued.delete(key);
+    return Promise.resolve(queuedLink);
+  }
   cancelManualVerifyLink(key, "replaced");
 
   const { onStatus } = getRuntime();
@@ -85,11 +93,14 @@ export function waitForManualVerifyLink(sessionId, { timeoutMs = 600000, message
 /** @returns {boolean} whether a pending waiter was resolved */
 export function provideManualVerifyLink(sessionId, link) {
   const key = String(sessionId);
-  const entry = pending.get(key);
-  if (!entry) return false;
-
   const clean = normalizeVerifyLink(link);
   if (!clean) return false;
+
+  const entry = pending.get(key);
+  if (!entry) {
+    queued.set(key, clean);
+    return true;
+  }
 
   entry.resolve(clean);
   return true;

@@ -153,6 +153,11 @@ export function rankEntryCandidates(candidates, context = {}) {
       const blob = `${c.text || ""} ${c.testId || ""}`.toLowerCase();
       const href = (c.href || "").toLowerCase();
       if (avoid.has(key)) bonus -= 200;
+      // Permanent negative priors (mailto / YC batch apply) even before learnings land.
+      if (/^\s*(mailto:|tel:)/i.test(c.href || "")) bonus -= 300;
+      if (/ycombinator\.com\/apply\/?$/i.test(href) || /apply (for|to) (fall|winter|spring|summer|yc)\b/i.test(blob)) {
+        bonus -= 140;
+      }
       if (preferredText && blob.includes(preferredText)) bonus += 60;
       if (preferredHref && href.includes(preferredHref)) bonus += 80;
       if (targetHost && href && !allowsHostHop(context)) {

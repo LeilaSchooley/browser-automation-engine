@@ -41,11 +41,22 @@ const profileContext = {
 };
 
 describe("account store", () => {
-  it("generates plus-addressed credentials per host", () => {
+  it("uses the exact email by default", () => {
     const creds = generateAccountCredentials({
       emailBase: "founder@agency.example",
       hostname: "betalist.com",
       label: "acme",
+    });
+    assert.equal(creds.email, "founder@agency.example");
+    assert.ok(creds.password.length >= 12);
+  });
+
+  it("generates plus-addressed credentials when aliases are enabled", () => {
+    const creds = generateAccountCredentials({
+      emailBase: "founder@agency.example",
+      hostname: "betalist.com",
+      label: "acme",
+      useEmailAlias: true,
     });
     assert.match(creds.email, /^founder\+ql-betalist-com-/);
     assert.ok(creds.password.length >= 12);

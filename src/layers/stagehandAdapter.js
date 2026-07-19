@@ -84,7 +84,10 @@ async function getStagehand(context) {
     },
   };
   if (settings.stagehand_cache_enabled !== false) {
-    opts.cacheDir = context?.stagehandCacheDir || undefined;
+    opts.cacheDir =
+      context?.stagehandCacheDir ||
+      settings.stagehand_cache_dir ||
+      undefined;
   }
 
   try {

@@ -42,7 +42,7 @@ function buildReadyMessage({ fillResult, snap, prep, agentSteps, agentHistory = 
     if (/closed|unavailable|similar jobs only|recommended substitutes/i.test(blocked.reason)) {
       return `Skipped — ${blocked.reason}. Not applying to substitute listings.`;
     }
-    if (/aggregator|mirror|unreachable|suspicious|dead/i.test(blocked.reason)) {
+    if (/404|not found|error page|hosting 404|dead listing|unreachable|aggregator|mirror|suspicious|dead apply/i.test(blocked.reason)) {
       return `Blocked — ${blocked.reason}. This listing is not a real employer apply page.`;
     }
     return `Stopped — ${blocked.reason}. Complete manually only if this is a real apply site.`;

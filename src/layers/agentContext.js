@@ -149,6 +149,36 @@ export function renderPerceptionRefs(snap, limit = 12) {
 }
 
 /**
+ * Browser-use-style distilled observation for Stagehand/LLM — top CTAs + refs + step.
+ * Avoids dumping full page body into prompts.
+ */
+export function renderCompressedObservation(snap, classification = null, limit = 8) {
+  if (!snap) return "";
+  const lines = [
+    `URL: ${snap.url || "?"}`,
+    `step=${classification?.step || "?"} conf=${classification?.confidence || "?"}`,
+    `pageKind=${snap.pageKind || "?"} fields=${snap.fieldCount || 0}`,
+  ];
+  const push = (label, list) => {
+    const items = (list || []).slice(0, 3).map((c) => `"${String(c.text || c.aria || c.testId || "?").slice(0, 48)}"`);
+    if (items.length) lines.push(`${label}: ${items.join(", ")}`);
+  };
+  push("entry", snap.entryCandidates);
+  push("continue", snap.continueCandidates);
+  push("signin", snap.signInCandidates);
+  push("signup", snap.signUpCandidates);
+  push("modal", snap.modalCandidates);
+  const refs = (snap._perception?.refs || []).slice(0, limit);
+  if (refs.length) {
+    lines.push(
+      "refs: " +
+        refs.map((r) => `${r.refId}=${r.role}:"${String(r.label || "").slice(0, 32)}"`).join("; "),
+    );
+  }
+  return `\nCOMPRESSED OBSERVATION:\n${lines.join("\n")}\n`;
+}
+
+/**
  * @param {object} snap
  * @param {object} [fillResult]
  * @param {import('playwright').Page} [page]
@@ -171,6 +201,7 @@ export async function buildAgentContext(snap, fillResult = null, page = null) {
       interactivesBlock: renderInteractivesForPrompt(snap),
       softHintsBlock: renderSoftHints(snap),
       perceptionRefsBlock: renderPerceptionRefs(snap),
+      compressedObservationBlock: renderCompressedObservation(snap),
     };
   }
   const pageState = await buildPageState(snap, page, fillResult);
@@ -181,5 +212,6 @@ export async function buildAgentContext(snap, fillResult = null, page = null) {
     interactivesBlock: renderInteractivesForPrompt(snap),
     softHintsBlock: renderSoftHints(snap),
     perceptionRefsBlock: renderPerceptionRefs(snap),
+    compressedObservationBlock: renderCompressedObservation(snap),
   };
 }

@@ -41,13 +41,18 @@ import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding } from "../
 import { RecoveryTracker } from "../recoveryTracker.js";
 import { appendRunHistory, trailFingerprint } from "../runHistory.js";
 import { hasUnfilledApplicationControls } from "../fillApplicationAnswers.js";
-import { attemptApplicationControlsStagehand } from "./stagehandPolicy.js";
+import {
+  attemptApplicationControlsStagehand,
+  buildStagehandInstruction,
+  shouldPreferStagehand,
+} from "./stagehandPolicy.js";
 import { fillCustomControls } from "../fillCustomControls.js";
 import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
 import { looksLikeSignupForm } from "./signupActions.js";
-import { recordSiteLearning, loadSiteLearnings } from "../siteLearnings.js";
+import { recordSiteLearning, loadSiteLearnings, affordanceSkillFromAct } from "../siteLearnings.js";
+import { recordCachedPlan } from "./actionPlanCache.js";
 import { recordEngineEvent, captureDebugScreenshot } from "../observability.js";
-import { buildPagePerception, refreshSnapIfNeeded } from "./pagePerception.js";
+import { buildPagePerception, refreshSnapIfNeeded, computePageDiff } from "./pagePerception.js";
 import { recordLearningsFromRun } from "../learningRecorder.js";
 import { isBrowserSessionGone, raceUntilGone, isBrowserClosedError } from "../pageAlive.js";
 import {
@@ -349,12 +354,35 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       recoveryTracker.record(plan.type, fp);
       if (plan.type === "stagehand_act") hasUsedStagehand = true;
       const esc = recoveryTracker.escalate(plan.type, fp, { hasUsedStagehand });
-      if (esc === "stagehand" && plan.type !== "stagehand_act" && plan.type !== "wait_user") {
+      const stagehandAllowed = shouldPreferStagehand(
+        snap,
+        classification || { step: "ambiguous", confidence: "low" },
+        history,
+        agentContext,
+        fillResult,
+      );
+      if (
+        esc === "stagehand" &&
+        stagehandAllowed &&
+        plan.type !== "stagehand_act" &&
+        plan.type !== "wait_user"
+      ) {
         plan = {
           type: "stagehand_act",
           reason: `recovery: ${plan.type} looping — Stagehand escalate`,
           source: "recovery-tracker",
-          instruction: `Previous ${plan.type} failed repeatedly. Try a different approach to progress the application.`,
+          instruction: buildStagehandInstruction(snap, classification || { step: plan.type === "click_apply" ? "entry" : classification?.step }, history, context, {
+            forceApply: plan.type === "click_apply" || classification?.step === "entry",
+          }),
+        };
+        hasUsedStagehand = true;
+        decision = { path: "recovery-tracker", reason: plan.reason };
+        log.layer("agent", plan.reason, "warn");
+      } else if (esc === "stagehand" && !stagehandAllowed && plan.type !== "wait_user") {
+        plan = {
+          type: "wait_user",
+          reason: `recovery: ${plan.type} looping on protected auth/signup flow — handoff`,
+          source: "recovery-tracker",
         };
         decision = { path: "recovery-tracker", reason: plan.reason };
         log.layer("agent", plan.reason, "warn");
@@ -693,7 +721,14 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       }
     }
 
-    let progressed = pageFingerprint(snapAfter) !== fpBefore || progressScore(snapAfter, fillResult) > score;
+    const perceptionDiff =
+      snap._perception && snapAfter._perception
+        ? computePageDiff(snap._perception, snapAfter._perception)
+        : null;
+    let progressed =
+      pageFingerprint(snapAfter) !== fpBefore ||
+      progressScore(snapAfter, fillResult) > score ||
+      Boolean(perceptionDiff?.changed && ((perceptionDiff.addedRefs || 0) + (perceptionDiff.removedRefs || 0) >= 2));
 
     // Clicked apply but nothing changed (overlay swallowed the click, JS-guarded
     // link, slow interstitial): navigate straight to the candidate's href.
@@ -933,6 +968,31 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         }
         if (Object.keys(patch).length) {
           recordSiteLearning(agentContext.targetHost, patch);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (ok && progressed && agentContext.targetHost) {
+      try {
+        recordCachedPlan(agentContext.targetHost, snap, plan, { ok, progressed });
+        // Harvest Stagehand / indexed act successes into affordance skills.
+        if (plan.type === "act" || plan.type === "stagehand_act") {
+          const skill =
+            plan.type === "act"
+              ? affordanceSkillFromAct(plan, snap, { stage: classification.step, classification })
+              : {
+                  stage: classification.step || "any",
+                  action: "click",
+                  signature: `stagehand:${String(plan.instruction || "").slice(0, 80)}`,
+                  intent: "entry_apply",
+                  successCount: 1,
+                  stagehandAction: plan.stagehandAction || null,
+                };
+          if (skill) {
+            recordSiteLearning(agentContext.targetHost, { affordanceSkills: [skill] });
+          }
         }
       } catch {
         /* ignore */

@@ -100,7 +100,7 @@ URL: ${snap.url}
 Title: ${snap.title || "?"} | pageKind=${snap.pageKind}
 ${classInfo}
 Affordances: ${JSON.stringify(afford)}
-${agentCtx.layoutBlock}
+${agentCtx.compressedObservationBlock || agentCtx.layoutBlock}
 ${agentCtx.perceptionRefsBlock || ""}
 ${agentCtx.fieldsBlock}
 Filled so far: ${fillResult?.filled?.length || 0}

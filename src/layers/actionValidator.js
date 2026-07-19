@@ -33,6 +33,21 @@ function salaryUnfilledCount(snap) {
   ).length;
 }
 
+function hostOf(snap) {
+  try {
+    return new URL(snap?.url || `https://${snap?.hostname || ""}`).hostname.replace(/^www\./, "");
+  } catch {
+    return String(snap?.hostname || "").replace(/^www\./, "");
+  }
+}
+
+function looksLikeAuthOrOtpSurface(snap) {
+  if (!snap) return false;
+  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
+  if ((snap.passwordFieldCount || 0) > 0) return true;
+  return /\b(log\s?in|sign\s?in|verify code|enter the code|one[- ]time|otp|create an account)\b/.test(blob);
+}
+
 export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore = 0, filledAfter = 0, uiPhaseBefore = "idle", uiPhaseAfter = "idle" } = {}) {
   const salaryBefore = salaryUnfilledCount(snapBefore);
   const salaryAfter = salaryUnfilledCount(snapAfter);
@@ -40,9 +55,12 @@ export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore =
     uiPhaseBefore === "option_selected_uncommitted" &&
     (uiPhaseAfter === "ready_to_continue" || uiPhaseAfter === "idle") &&
     !snapAfter?.pickerOpen;
+  const hostBefore = hostOf(snapBefore);
+  const hostAfter = hostOf(snapAfter);
   return {
     fingerprintChanged: pageFingerprint(snapBefore) !== pageFingerprint(snapAfter),
     urlChanged: String(snapBefore?.url || "") !== String(snapAfter?.url || ""),
+    hostChanged: Boolean(hostBefore && hostAfter && hostBefore !== hostAfter),
     fieldCountDelta: (snapAfter?.fieldCount || 0) - (snapBefore?.fieldCount || 0),
     fileInputDelta: (snapAfter?.fileInputCount || 0) - (snapBefore?.fileInputCount || 0),
     modalAppeared: !snapBefore?.hasApplyModal && Boolean(snapAfter?.hasApplyModal),
@@ -50,6 +68,7 @@ export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore =
     salaryCommittedDelta: salaryBefore - salaryAfter,
     pickerClosed: Boolean(snapBefore?.pickerOpen) && !snapAfter?.pickerOpen,
     commitCompleted,
+    stillOnAuthOrOtp: looksLikeAuthOrOtpSurface(snapAfter),
     uiPhaseBefore,
     uiPhaseAfter,
   };
@@ -73,8 +92,35 @@ export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk,
   ) {
     return false;
   }
+  // Fingerprint-only churn on a login/OTP wall is not apply progress (e.g. YC magic-link).
+  if (
+    signals.stillOnAuthOrOtp &&
+    !signals.hostChanged &&
+    !(signals.fieldCountDelta > 0) &&
+    !(signals.fileInputDelta > 0) &&
+    !signals.modalAppeared &&
+    ["click_continue", "smart_fill", "auth_login", "stagehand_act"].includes(plan?.type)
+  ) {
+    return false;
+  }
+  // Cosmetic fingerprint change alone is not strong progress.
+  if (
+    signals.fingerprintChanged &&
+    !signals.urlChanged &&
+    !signals.hostChanged &&
+    !(signals.fieldCountDelta > 0) &&
+    !(signals.fileInputDelta > 0) &&
+    !signals.modalAppeared &&
+    !(signals.filledDelta > 0) &&
+    !signals.salaryCommittedDelta &&
+    !signals.pickerClosed &&
+    !signals.commitCompleted
+  ) {
+    return false;
+  }
   return (
     signals.urlChanged ||
+    signals.hostChanged ||
     signals.fieldCountDelta > 0 ||
     signals.fileInputDelta > 0 ||
     signals.modalAppeared ||
@@ -149,6 +195,11 @@ export function normalizeRecoveryAction(recovery) {
     auth_signup: "auth_signup",
     login: "auth_login",
     auth_login: "auth_login",
+    otp: "enter_otp",
+    enter_otp: "enter_otp",
+    wait_otp: "enter_otp",
+    click_signup: "click_signup",
+    create_account: "click_signup",
   };
   return aliases[raw] || (raw.includes("dismiss") ? "dismiss_overlay" : null);
 }
@@ -305,6 +356,25 @@ export async function validateActionOutcome({
       reason: "noop click — page fingerprint unchanged after actor success",
       recovery: plan?.type === "smart_fill" ? "dismiss_overlay" : "ai_replan",
       source: "noop-detect",
+    };
+  }
+
+  // Stuck on passwordless/OTP login after Continue / fill — do not treat as form progress.
+  if (
+    signals.stillOnAuthOrOtp &&
+    !signals.hostChanged &&
+    ["click_continue", "smart_fill", "auth_login", "stagehand_act"].includes(plan?.type)
+  ) {
+    const afterBlob = `${snapAfter?.title || ""} ${snapAfter?.pageText || ""}`.toLowerCase();
+    const wantsOtp = /enter the code|verify code|from your email|one[- ]time|otp/.test(afterBlob);
+    const hasSignup = (snapAfter?.signUpCount || 0) > 0;
+    return {
+      progressed: false,
+      reason: wantsOtp
+        ? "still on OTP / email-code wall — not apply form progress"
+        : "still on login wall — not apply form progress",
+      recovery: wantsOtp ? "enter_otp" : hasSignup ? "click_signup" : "ai_replan",
+      source: "auth-intent-gate",
     };
   }
 

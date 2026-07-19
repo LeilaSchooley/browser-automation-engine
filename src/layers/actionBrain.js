@@ -13,13 +13,15 @@ import { buildDeterministicPlan, isDeterministicState, shouldInvokeLlm, smartFil
 import { buildPageState } from "./pageState.js";
 import { shouldPreferStagehand, buildStagehandPlan } from "./stagehandPolicy.js";
 import { buildActionCatalog } from "./actionCatalog.js";
+import { enrichCatalogWithStagehandObserve } from "./stagehandObserveCatalog.js";
 import { pickBestAction, topCatalogActions } from "./actionPicker.js";
+import { lookupCachedPlan, recordNegativeEntryKeys } from "./actionPlanCache.js";
 import { loadSimilarRuns, trailFingerprint } from "../runHistory.js";
 import { applyApprovedSkillProposals } from "../skillProposals.js";
 import { recordEngineEvent } from "../observability.js";
 
 /** Steps that must stay mechanical — never delegated to the LLM brain. */
-export const SAFETY_STEPS = new Set(["loading", "blocked"]);
+export const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp"]);
 
 /**
  * Omni decision entry — Observe snap in → plan out.
@@ -182,6 +184,20 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
     );
   }
 
+  // Persist negative entry keys (mailto / YC batch / SSO) for this host.
+  try {
+    recordNegativeEntryKeys(snap?.hostname || context?.targetHost, snap?.entryCandidates || []);
+  } catch {
+    /* ignore */
+  }
+
+  // Fingerprint → plan cache (after ≥2 successes on same page shape).
+  const cached = lookupCachedPlan(snap?.hostname || context?.targetHost, snap);
+  if (cached && mode === "primary") {
+    recordEngineEvent("skill_replay", { source: "plan-cache", action: cached.type });
+    return withDecision(cached, classification, "plan-cache", cached.reason);
+  }
+
   // Boost interactives with per-host affordance memory before planning
   if (snap?.interactives?.length && context?.siteLearnings?.affordanceSkills?.length) {
     snap.interactives = boostInteractivesWithLearnings(snap.interactives, context.siteLearnings);
@@ -191,9 +207,40 @@ export async function decideWithActionBrain(snap, fillResult, history, context, 
   // 1 safety (done) 2 situation-memory 3 affordance replay 4 catalog 5 det/stagehand 6 LLM 7 classifier
 
   const catalogEnabled = settings.action_catalog_first !== false;
-  const catalog = catalogEnabled
+  let catalog = catalogEnabled
     ? buildActionCatalog(snap, fillResult, history, context, classification)
     : [];
+  if (catalogEnabled && page) {
+    catalog = await enrichCatalogWithStagehandObserve(
+      catalog,
+      page,
+      snap,
+      classification,
+      history,
+      context,
+      context?.log,
+    );
+  }
+
+  // Tie-break: attach perception refId to top click_apply when labels match.
+  if (snap?._perception?.refs?.length && catalog.length) {
+    for (const action of catalog) {
+      if (action.type !== "click_apply" || !action.targetCandidate) continue;
+      const label = String(action.targetCandidate.text || action.targetCandidate.aria || "")
+        .trim()
+        .toLowerCase();
+      if (!label) continue;
+      const ref = snap._perception.refs.find((r) => {
+        const rl = String(r.label || "").trim().toLowerCase();
+        return rl && (rl.includes(label.slice(0, 24)) || label.includes(rl.slice(0, 24)));
+      });
+      if (ref) {
+        action.perceptionRef = ref.refId;
+        action.score += 6;
+      }
+    }
+    catalog.sort((a, b) => b.score - a.score);
+  }
 
   const situationPlan = findSituationMemoryPlan(snap, context?.siteLearnings, catalog);
   if (situationPlan && mode === "primary") {

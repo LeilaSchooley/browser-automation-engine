@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classifyApplyStep, stepToPlan } from "../src/layers/applyStep.js";
-import { looksLikeAuthFailure, looksLikeHardGate, looksLikeOAuthOnly, hasEmailAuthPath } from "../src/layers/authActions.js";
+import {
+  looksLikeAuthFailure,
+  looksLikeHardGate,
+  looksLikeOAuthOnly,
+  hasEmailAuthPath,
+  resolveSameSiteSignInUrl,
+  looksLikePasswordlessLoginSurface,
+} from "../src/layers/authActions.js";
 import { inspectPage } from "../src/layers/formDiscovery.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { initTestRuntime } from "./helpers/runtime.js";
@@ -17,6 +24,19 @@ const pendingStoredAccount = {
 };
 
 describe("auth flow (BetaList-style login)", () => {
+  it("resolves same-site login links but rejects social and unrelated destinations", () => {
+    const current = "https://weworkremotely.com/job-seekers/account/register";
+    assert.equal(
+      resolveSameSiteSignInUrl("/job-seekers/account/login", current),
+      "https://weworkremotely.com/job-seekers/account/login",
+    );
+    assert.equal(
+      resolveSameSiteSignInUrl("https://www.linkedin.com/uas/login", current),
+      "",
+    );
+    assert.equal(resolveSameSiteSignInUrl("/jobs", current), "");
+  });
+
   it("detects auth form from HTML snapshot", async () => {
     await withFixturePage("betalist-login", async (page) => {
       const snap = await inspectPage(page);
@@ -65,6 +85,43 @@ describe("auth flow (BetaList-style login)", () => {
       assert.equal(c.step, "signup_entry");
       assert.equal(stepToPlan(c, snap, history)?.type, "click_signup");
     });
+  });
+});
+
+describe("passwordless login surface (YC magic-link / OTP)", () => {
+  const ycSnap = {
+    title: "Log in to access the YC Application",
+    headings: "Log in to access the YC Application",
+    hostname: "account.ycombinator.com",
+    fieldCount: 1,
+    passwordFieldCount: 0,
+    emailFieldCount: 0,
+    usernameFieldCount: 1,
+    continueCandidates: [{ text: "Continue" }],
+    signInCount: 0,
+    signUpCount: 1,
+    signUpCandidates: [{ text: "Create an account" }],
+  };
+
+  it("detects a passwordless login wall (no password, login title, identity field)", () => {
+    assert.equal(looksLikePasswordlessLoginSurface(ycSnap), true);
+  });
+
+  it("ignores multi-field application forms and password logins", () => {
+    assert.equal(looksLikePasswordlessLoginSurface({ ...ycSnap, passwordFieldCount: 1 }), false);
+    assert.equal(looksLikePasswordlessLoginSurface({ ...ycSnap, fieldCount: 6 }), false);
+    assert.equal(
+      looksLikePasswordlessLoginSurface({ ...ycSnap, title: "Apply", headings: "Apply" }),
+      false,
+    );
+  });
+
+  it("prefers Create an account when no saved account and provisioning is on", () => {
+    initTestRuntime({ settings: { auto_signup_enabled: true, account_email_base: "founder@agency.example" } });
+    const provisionCtx = { profile: { email: "founder@agency.example", startupName: "TestCo" } };
+    const c = classifyApplyStep(ycSnap, { filled: [] }, [], provisionCtx);
+    assert.equal(c.step, "signup_entry");
+    assert.match(c.reason, /create an account|passwordless login/i);
   });
 });
 

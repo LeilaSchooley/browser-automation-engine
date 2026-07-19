@@ -1,5 +1,6 @@
 import { normalizeHost } from "../host.js";
 import { isAggregatorHost, isSuspiciousApplyHost } from "./applyUrlSafety.js";
+import { isDeadListingPage } from "./deadListing.js";
 import { CLOSED_JOB_URL_RE } from "../patterns/listing.js";
 import { looksLikeClosedJobListing } from "../heuristics.js";
 
@@ -77,6 +78,9 @@ export async function probeApplyUrlReachability(url = "", { timeoutMs = 8000, fe
     if (res.status >= 500) {
       return { reachable: false, reason: `server error HTTP ${res.status}`, status: res.status };
     }
+    if (res.status === 404 || res.status === 410) {
+      return { reachable: false, reason: `HTTP ${res.status} — listing gone`, status: res.status };
+    }
     return { reachable: true, reason: "", status: res.status };
   } catch (err) {
     return { reachable: false, reason: unreachableReason(err), status: 0 };
@@ -138,20 +142,58 @@ export async function probeClosedJobListing(url = "", { timeoutMs = 10000, fetch
 
     const html = await res.text().catch(() => "");
     const pageText = stripHtmlToText(html).slice(0, 20000);
+    const titleMatch = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = titleMatch ? stripHtmlToText(titleMatch[1]).slice(0, 200) : "";
     const snap = {
       url: finalUrl,
       hostname,
-      title: "",
+      title,
       pageText: pageText || html.slice(0, 20000),
       headings: "",
+      bodyTextLength: (pageText || "").length,
+      fieldCount: 0,
+      entryCount: 0,
+      pageKind: "unknown",
     };
+    const bodyTextLength = (pageText || "").length;
+    if (res.status === 404 || res.status === 410) {
+      return {
+        closed: true,
+        reason: `HTTP ${res.status} — listing gone / not found`,
+        source: "http-status",
+        status: res.status,
+        bodyTextLength,
+      };
+    }
+    const dead = isDeadListingPage(snap);
+    if (dead.dead) {
+      return {
+        closed: true,
+        reason: dead.reason,
+        source: "dead-page",
+        status: res.status,
+        bodyTextLength,
+      };
+    }
     const hit = looksLikeClosedJobListing(snap);
     if (hit.closed) {
-      return { closed: true, reason: hit.reason, source: "page-text", status: res.status };
+      return {
+        closed: true,
+        reason: hit.reason,
+        source: "page-text",
+        status: res.status,
+        bodyTextLength,
+      };
     }
-    return { closed: false, reason: "", source: "probe-ok", status: res.status };
+    return {
+      closed: false,
+      reason: "",
+      source: "probe-ok",
+      status: res.status,
+      bodyTextLength,
+    };
   } catch (err) {
-    return { closed: false, reason: unreachableReason(err), source: "probe-error" };
+    return { closed: false, reason: unreachableReason(err), source: "probe-error", bodyTextLength: 0 };
   }
 }
 

@@ -59,6 +59,36 @@ export function looksLikeAuthForm(snap) {
   return passwords > 0 && LOGIN_WALL_TEXT.test(blob);
 }
 
+/**
+ * Passwordless login surface (magic-link / email-code): a "Log in" / "Sign in" titled
+ * page with a single email/username field and a Continue/Verify button, no password.
+ * e.g. account.ycombinator.com. Must not be a full registration form.
+ */
+export function looksLikePasswordlessLoginSurface(snap) {
+  if (!snap) return false;
+  if ((snap.passwordFieldCount || 0) > 0) return false;
+  if ((snap.fieldCount || 0) > 2) return false;
+  const hasIdentity = (snap.emailFieldCount || 0) > 0 || (snap.usernameFieldCount || 0) > 0;
+  if (!hasIdentity) return false;
+  const hasContinue =
+    (snap.continueCandidates || []).length > 0 ||
+    (snap.signInCount || 0) > 0 ||
+    (snap.submitCandidates || []).length > 0;
+  if (!hasContinue) return false;
+  // Prefer title/headings for the login signal — page nav can mention "sign in".
+  const titleBlob = `${snap.title || ""} ${snap.headings || ""}`.toLowerCase();
+  if (/\blog\s?in\b|\bsign\s?in\b|verify code|enter the code/.test(titleBlob)) return true;
+  // Fallback for SPA login cards whose title is generic ("Account | Y Combinator") and headings
+  // are unrendered: a tiny card with a lone identity field, a Continue, strong passwordless
+  // phrasing, and a "Create an account" switch is a passwordless login surface.
+  const bodyBlob = `${snap.pageText || ""}`.toLowerCase();
+  const strongPhrase =
+    /magic link|enter the code|one[- ]time code|log\s?in to|sign\s?in to|passwordless/.test(bodyBlob);
+  const hasSignupSwitch =
+    (snap.signUpCount || 0) > 0 || /create an account|don'?t have an account/.test(bodyBlob);
+  return strongPhrase && hasSignupSwitch;
+}
+
 function hasEmailIdentityField(snap) {
   if ((snap.emailFieldCount || 0) > 0) return true;
   return (snap.fields || []).some((f) => {
@@ -156,6 +186,27 @@ export function looksLikeOAuthOnly(snap) {
   return OAUTH_PROVIDER_TEXT.test(blob) && /\b(sign in|log in)\b/i.test(blob);
 }
 
+/** Soft OTP: on-page code field present — do not hard-stop (enter_otp handles it). */
+export function looksLikeSoftOtpGate(snap) {
+  if (!snap) return false;
+  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
+  if (!TWO_FACTOR_TEXT.test(blob) && !/enter the code|verify code|from your email|one[- ]time/.test(blob)) {
+    return false;
+  }
+  const fields = snap.fields || [];
+  const hasCodeish = fields.some((f) => {
+    const t = `${f.type || ""} ${f.label || ""} ${f.name || ""} ${f.autocomplete || ""}`.toLowerCase();
+    return /otp|one[-_]?time|totp|verification|security.?code|passcode/.test(t) || /code/.test(t);
+  });
+  if (hasCodeish) return true;
+  return (
+    (snap.fieldCount || 0) >= 1 &&
+    (snap.fieldCount || 0) <= 2 &&
+    (snap.passwordFieldCount || 0) === 0 &&
+    /enter the code|verify code|from your email|one[- ]time|otp/.test(blob)
+  );
+}
+
 export function looksLikeHardGate(snap) {
   if (isOauthProviderHost(snap?.url || snap?.hostname || "")) {
     return {
@@ -167,7 +218,11 @@ export function looksLikeHardGate(snap) {
   if (CAPTCHA_TEXT.test(blob)) {
     return { hard: true, reason: "CAPTCHA / human verification" };
   }
+  // Soft OTP walls (fillable code field) → enter_otp; hard-stop only when no field.
   if (TWO_FACTOR_TEXT.test(blob)) {
+    if (looksLikeSoftOtpGate(snap)) {
+      return { hard: false, reason: "OTP wall — soft enter_otp path", softOtp: true };
+    }
     return { hard: true, reason: "2FA / OTP required" };
   }
   if (looksLikeOAuthOnly(snap) && (snap.passwordFieldCount || 0) === 0) {
@@ -179,7 +234,7 @@ export function looksLikeHardGate(snap) {
 export function hasAuthCredentials(context) {
   const auth = context?.auth || {};
   const profile = context?.profile || {};
-  const identity = auth.username || auth.email || profile.email;
+  const identity = auth.email || profile.email || auth.username;
   const password = auth.password;
   return Boolean(identity && password);
 }
@@ -215,7 +270,7 @@ export async function attemptAuthLogin(page, snap, context, log) {
   }
 
   const { email, username, password } = getAuthCredentials(context);
-  const identity = username || email;
+  const identity = email || username;
   if (!identity || !password) {
     log?.layer("auth", "no credentials configured", "warn");
     return { ok: false };
@@ -234,7 +289,10 @@ export async function attemptAuthLogin(page, snap, context, log) {
   });
 
   let filledIdentity = false;
-  if (username || (snap?.usernameFieldCount || 0) > 0) {
+  const preferEmail =
+    Boolean(email) &&
+    ((snap?.emailFieldCount || 0) > 0 || (snap?.usernameFieldCount || 0) === 0);
+  if (!preferEmail && (username || (snap?.usernameFieldCount || 0) > 0)) {
     if (identityCount > pairIndex) {
       try {
         await identityLoc.nth(pairIndex).fill(username || identity, { timeout: 5000 });
@@ -374,13 +432,62 @@ const SIGNIN_ENTRY_PATTERNS = [
   /sign in with email/i,
 ];
 
+/** Resolve only a same-site, non-SSO login destination. */
+export function resolveSameSiteSignInUrl(rawHref, currentUrl) {
+  if (!rawHref || !currentUrl) return "";
+  try {
+    const current = new URL(String(currentUrl));
+    const target = new URL(String(rawHref), current);
+    if (target.origin !== current.origin) return "";
+    if (isOauthProviderHost(target.href)) return "";
+    if (!/\/(?:login|log-in|signin|sign-in|session)(?:\/|$)/i.test(target.pathname)) return "";
+    return target.href;
+  } catch {
+    return "";
+  }
+}
+
+async function discoverSameSiteSignInUrl(page, currentUrl) {
+  try {
+    const href = await page.locator("a[href]").evaluateAll((links) => {
+      const match = links.find((link) => {
+        const text = String(link.textContent || link.getAttribute("aria-label") || "").trim();
+        const hrefValue = String(link.getAttribute("href") || "");
+        return (
+          /sign in|log in|login/i.test(text) &&
+          /\/(?:login|log-in|signin|sign-in|session)(?:\/|$|\?)/i.test(hrefValue) &&
+          !/linkedin|google|apple|facebook|github|microsoft|twitter|oauth/i.test(
+            `${text} ${hrefValue}`,
+          )
+        );
+      });
+      return match?.getAttribute("href") || "";
+    });
+    return resolveSameSiteSignInUrl(href, currentUrl);
+  } catch {
+    return "";
+  }
+}
+
 /** Switch Sign up → Sign in when we already have a verified site account. */
 export async function clickSignInEntry(page, snap, log) {
   const candidate = snap?.signInCandidates?.[0];
   log?.layer("auth", `opening sign in: ${candidate?.text || "Sign in"}`, "info");
 
-  if (await clickRoleMatching(page, SIGNIN_ENTRY_PATTERNS, { log, layer: "auth", roles: ["button", "link"] })) {
-    return true;
+  // Prefer the actual same-site login href. Clicking a nested text node can report success
+  // while leaving registration open (WWR), which otherwise creates a click_signin loop.
+  const currentUrl = page.url();
+  const directUrl =
+    resolveSameSiteSignInUrl(candidate?.href, currentUrl) ||
+    (await discoverSameSiteSignInUrl(page, currentUrl));
+  if (directUrl && directUrl !== currentUrl) {
+    try {
+      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      log?.layer("auth", `opened same-site login URL: ${new URL(directUrl).pathname}`, "info");
+      return true;
+    } catch (err) {
+      log?.layer("auth", `login URL navigation failed: ${err?.message || err}`, "warn");
+    }
   }
 
   if (candidate?.selector) {
@@ -393,6 +500,10 @@ export async function clickSignInEntry(page, snap, log) {
     } catch {
       /* ignore */
     }
+  }
+
+  if (await clickRoleMatching(page, SIGNIN_ENTRY_PATTERNS, { log, layer: "auth", roles: ["button", "link"] })) {
+    return true;
   }
 
   try {

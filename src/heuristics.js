@@ -637,7 +637,19 @@ export function looksLikeJobBoardIndex(snap) {
   const filterFields = JOB_BOARD_FILTER_FIELD_RE.test(fieldBlob);
   const openPositions = JOB_BOARD_PAGE_BODY.test(pageBlob);
   const atsBoardHost = JOB_BOARD_HOST_RE.test(host);
-  const deepJobPath = JOB_BOARD_JOB_PATH_RE.test(pathAndQuery);
+  const pathParts = (() => {
+    try {
+      return new URL(url).pathname.split("/").filter(Boolean);
+    } catch {
+      return String(pathAndQuery || "")
+        .split(/[?#]/)[0]
+        .split("/")
+        .filter(Boolean);
+    }
+  })();
+  // ATS company roots are 1 segment; job pages are 2+ (Ashby/Lever/Greenhouse).
+  const deepJobPath =
+    JOB_BOARD_JOB_PATH_RE.test(pathAndQuery) || (atsBoardHost && pathParts.length >= 2);
 
   const hasApplyFields =
     fields.some((f) => {
@@ -662,6 +674,33 @@ export function looksLikeJobBoardIndex(snap) {
   if (openPositions && allSelects && fields.length >= 2 && noFileInput) return true;
   if (openPositions && selectFields.length >= 2 && noFileInput && !hasApplyFields) return true;
 
+  return false;
+}
+
+/**
+ * Job detail / deep application URL — not a company board index.
+ * Used to stop soft board-ish signals (nav "All jobs") from hijacking Stagehand on JDs.
+ */
+export function pathLooksLikeJobDetail(snapOrUrl) {
+  const url = typeof snapOrUrl === "string" ? snapOrUrl : String(snapOrUrl?.url || "");
+  if (!url) return false;
+  let host = "";
+  let pathname = "";
+  let pathAndQuery = "";
+  try {
+    const u = new URL(url);
+    host = u.hostname.toLowerCase();
+    pathname = u.pathname || "/";
+    pathAndQuery = `${u.pathname}${u.search}`;
+  } catch {
+    pathAndQuery = url;
+    pathname = url.split(/[?#]/)[0] || "";
+  }
+  if (JOB_BOARD_JOB_PATH_RE.test(pathAndQuery)) return true;
+  const parts = pathname.split("/").filter(Boolean);
+  if (JOB_BOARD_HOST_RE.test(host) && parts.length >= 2) return true;
+  // Aggregator / niche boards: /id/slug or /company/role-slug (2+ segments).
+  if (parts.length >= 2) return true;
   return false;
 }
 
@@ -727,6 +766,8 @@ export function recentPreferencesSignup(history = [], within = 4) {
 export function applyEntrySucceeded(history = [], fingerprint = "") {
   return (history || []).some((h) => {
     if (!h.ok) return false;
+    // No-progress clicks must not suppress further entry / Stagehand retries.
+    if (h.progress === false) return false;
     if (fingerprint && h.fromFingerprint && h.fromFingerprint !== fingerprint) return false;
     if (h.action === "click_apply") return true;
     if (h.action === "act" && h.applyStep === "entry") return true;

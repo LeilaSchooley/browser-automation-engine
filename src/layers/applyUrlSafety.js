@@ -2,6 +2,14 @@ import { normalizeHost } from "../host.js";
 import { looksLikeClosedJobListing } from "../heuristics.js";
 import { CLOSED_JOB_URL_RE, JOB_BOARD_HOST_RE, SEO_AGGREGATOR_HOST_RE } from "../patterns/listing.js";
 import { looksLikeScrapedMirrorUrl } from "./applyUrlHealth.js";
+import { isDeadListingPage } from "./deadListing.js";
+
+export {
+  isDeadListingPage,
+  DEAD_LISTING_TITLE_RE,
+  DEAD_LISTING_BODY_RE,
+  DEAD_LISTING_URL_RE,
+} from "./deadListing.js";
 
 /** Employer / ATS application hosts — never prune these tabs under a tab-cap. */
 export const EMPLOYER_ATS_HOST_RE =
@@ -74,12 +82,19 @@ export function isOauthProviderHost(hostOrUrl = "") {
     return true;
   }
   if (/(?:^|\.)github\.com$/i.test(host) && /\/(login\/oauth|session)/i.test(path)) return true;
+  // LinkedIn only on OAuth/login/join paths — never on /jobs (a real apply target).
+  if (
+    /(?:^|\.)linkedin\.com$/i.test(host) &&
+    /\/(oauth|uas\/login|signup\/cold-join|checkpoint|authwall|login)/i.test(path)
+  ) {
+    return true;
+  }
   return false;
 }
 
 /** CTAs that start Facebook/Apple/Google/Microsoft SSO instead of email Continue. */
 export const SOCIAL_SSO_CTA_RE =
-  /\b((continue|sign|log)\s+(in\s+)?with\s+(apple|google|facebook|github|microsoft|linkedin|x|twitter)|(sign|log)\s+up\s+with\s+(apple|google|facebook|github|microsoft))\b/i;
+  /\b((continue|sign|log)\s+(in\s+)?with\s+(apple|google|facebook|github|microsoft|linkedin|x|twitter)|(sign|log)\s+up\s+with\s+(apple|google|facebook|github|microsoft|linkedin|x|twitter))\b/i;
 
 export function isSocialSsoCta(text = "") {
   return SOCIAL_SSO_CTA_RE.test(String(text || "").trim());
@@ -126,6 +141,10 @@ export function looksLikeDeadApplyDestination(snap) {
   if (isBrowserUnreachablePage(snap)) {
     const label = title || normalizeHost(url) || url.replace(/^chrome-error:\/\//, "");
     return { dead: true, reason: `unreachable apply destination (${label})` };
+  }
+  const httpDead = isDeadListingPage(snap);
+  if (httpDead.dead) {
+    return { dead: true, reason: httpDead.reason };
   }
   const host = snap?.hostname || normalizeHost(url);
   if (
@@ -199,14 +218,22 @@ export function entryHrefScoreDelta(meta = {}, pageHost = "", { hasNativeApplyBu
   const cls = String(meta.className || "").toLowerCase();
   const href = meta.href || "";
 
+  // mailto:/tel: links are never apply CTAs.
+  if (/^\s*(mailto:|tel:)/i.test(href)) return delta - 300;
+
   if (/custom-button/.test(cls)) delta -= 70;
   if (/btn-apply/.test(cls)) delta += 45;
   if (hasNativeApplyButton && /custom-button/.test(cls)) delta -= 100;
 
   if (href && pageHost) {
     try {
-      const linkHost = normalizeHost(new URL(href, `https://${pageHost}`).hostname);
+      const linkUrl = new URL(href, `https://${pageHost}`);
+      const linkHost = normalizeHost(linkUrl.hostname);
       const host = normalizeHost(pageHost);
+      // Y Combinator batch/accelerator apply (/apply) is not a job application.
+      if (/(^|\.)ycombinator\.com$/i.test(linkHost) && /^\/apply\/?$/i.test(linkUrl.pathname)) {
+        delta -= 140;
+      }
       if (linkHost && linkHost !== host) {
         delta -= 40;
         if (isAggregatorHost(linkHost)) delta -= 80;

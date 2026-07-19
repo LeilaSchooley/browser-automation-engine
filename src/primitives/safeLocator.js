@@ -7,6 +7,17 @@ export function escapeRegExp(value = "") {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Decorative glyphs sites append to CTAs (chevrons/arrows) that are absent from the a11y name. */
+const DECORATIVE_GLYPH_RE = /[›»▸▹❯⟩→➜➔➙➛➝➞⟶⟼»↳↦▶►◦·|]/g;
+
+/** Strip decorative chevrons/arrows and collapse whitespace ("Apply to role ›" → "Apply to role"). */
+export function stripDecorativeGlyphs(text = "") {
+  return String(text || "")
+    .replace(DECORATIVE_GLYPH_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** Single-token / short action labels that must never substring-match longer SSO CTAs. */
 export const SHORT_CTA_RE =
   /^(continue|next|proceed|sign in|log in|sign up|submit|apply|ok|yes|no|not yet|save|done|confirm|close|skip|register|join|login)$/i;
@@ -34,11 +45,18 @@ export function shouldExactMatchName(text = "") {
  * @returns {RegExp|null}
  */
 export function roleNameMatcher(text = "") {
-  const t = String(text || "").trim();
-  if (!t) return null;
-  const escaped = escapeRegExp(t).slice(0, 80);
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const stripped = stripDecorativeGlyphs(raw);
+  const base = stripped || raw;
+  const escaped = escapeRegExp(base).slice(0, 80);
   if (!escaped) return null;
-  if (shouldExactMatchName(t)) return new RegExp(`^${escaped}$`, "i");
+  // Decorative glyph removed (e.g. "Apply to role ›"): anchor at start only so the matcher
+  // tolerates either accessible name ("Apply to role" or "Apply to role ›").
+  if (stripped && stripped !== raw && shouldExactMatchName(base)) {
+    return new RegExp(`^${escaped}\\b`, "i");
+  }
+  if (shouldExactMatchName(base)) return new RegExp(`^${escaped}$`, "i");
   return new RegExp(escaped, "i");
 }
 

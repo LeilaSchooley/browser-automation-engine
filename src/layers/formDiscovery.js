@@ -122,7 +122,11 @@ export function scoreListingEntryCandidate(meta, pageHost = "") {
 /** Score apply-entry controls — higher = more likely primary CTA on a job listing. */
 export function scoreEntryCandidate(meta) {
   let score = 0;
-  const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
+  const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href} ${meta.value || ""}`.toLowerCase();
+  const inputType = String(meta.type || meta.inputType || "").toLowerCase();
+
+  // mailto:/tel: "email"/"call" links are never apply CTAs.
+  if (/^\s*(mailto:|tel:)/i.test(meta.href || "")) return -300;
 
   if (/interested/i.test(blob)) score += 95;
   if (/apply with autofill|autofill/i.test(blob)) {
@@ -130,10 +134,18 @@ export function scoreEntryCandidate(meta) {
     score += 35;
   } else if (/easy apply|quick apply|1-click apply/i.test(blob)) {
     score += 98;
+  } else if (/apply to role|apply for (the|this) job|apply to (the|this) job|i'?m interested|apply here|apply today|start application/i.test(blob)) {
+    score += 90;
+  } else if (/apply now/i.test(blob)) {
+    score += 82;
+  } else if (/\bapply\b/i.test(meta.text || meta.value || "")) {
+    score += 55;
   }
-  if (/apply now|start application/i.test(blob)) score += 82;
+  // Y Combinator batch/accelerator apply is not the job application.
+  if (/apply (for|to) (fall|winter|spring|summer|yc|y combinator|the .* batch)/i.test(blob)) {
+    score -= 140;
+  }
   if (/submit application/i.test(blob)) score -= 90;
-  if (/\bapply\b/i.test(meta.text)) score += 55;
   if (/apply|interested/i.test(meta.testId || "")) score += 45;
 
   if (meta.inMainContent) score += 25;
@@ -150,8 +162,15 @@ export function scoreEntryCandidate(meta) {
 
   if (/sign in|log in|register|search jobs|save job|share/i.test(blob)) score -= 60;
 
-  if (meta.tag === "input" && !meta.href) score -= 85;
-  if (meta.tag === "input" && /apply for the job/i.test(blob)) score -= 60;
+  // Submit inputs labeled Apply are real CTAs (findwork.dev) — mild penalty only so
+  // genuine <button> Apply still wins when both exist, but sole submit CTAs clear threshold.
+  if (tag === "input" && !meta.href) {
+    if (inputType === "submit" || /\bapply\b/i.test(blob)) {
+      score -= 20;
+    } else {
+      score -= 85;
+    }
+  }
 
   score += entryHrefScoreDelta(meta, meta.pageHost || "", {
     hasNativeApplyButton: !!meta.hasNativeApplyButton,
@@ -664,6 +683,7 @@ async function scanDom(page, { listingMode = true } = {}) {
         return {
           tag: el.tagName.toLowerCase(),
           role: el.getAttribute("role") || "",
+          type: (el.type || "").toLowerCase(),
           text: text.slice(0, 100),
           testId: testId.slice(0, 80),
           aria: aria.slice(0, 80),
@@ -812,7 +832,8 @@ async function scanDom(page, { listingMode = true } = {}) {
         ) {
           return 0;
         }
-        if (/\bsign in with (x|twitter|google|github|apple|microsoft|facebook)\b/.test(blob)) return 0;
+        if (/\b(sign|log)\s+in\s+with\s+(x|twitter|google|github|apple|microsoft|facebook|linkedin)\b/.test(blob)) return 0;
+        if (/\/(auth|oauth)\/(linkedin|google|apple|facebook|github|microsoft|twitter)\b/.test(blob)) return 0;
         let score = 50;
         if (/sign in with email|log in with email/.test(blob)) score += 80;
         if (/sign in now|already a member|already have an account|have an account/.test(blob)) score += 55;
@@ -824,7 +845,8 @@ async function scanDom(page, { listingMode = true } = {}) {
       function scoreSignUpButton(meta) {
         const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
         if (!/\b(sign up|signup|create account|register|get started|join)\b/.test(blob)) return 0;
-        if (/\bsign up with (x|twitter|google|github|apple|microsoft|facebook)\b/.test(blob) && !/email/.test(blob)) return 0;
+        if (/\b(sign|log)\s+up\s+with\s+(x|twitter|google|github|apple|microsoft|facebook|linkedin)\b/.test(blob) && !/email/.test(blob)) return 0;
+        if (/\/(auth|oauth)\/(linkedin|google|apple|facebook|github|microsoft|twitter)\b/.test(blob) && !/email/.test(blob)) return 0;
         let score = 55;
         if (/sign up with email|create account/.test(blob)) score += 75;
         if (/^sign up$|create account|^register$/i.test((meta.text || "").trim())) score += 45;
@@ -910,16 +932,28 @@ async function scanDom(page, { listingMode = true } = {}) {
 
         let score = 0;
         const blob = `${meta.text} ${meta.testId} ${meta.aria} ${meta.href}`.toLowerCase();
+        const inputType = String(meta.type || "").toLowerCase();
+        // mailto:/tel: "email"/"call" links are never apply CTAs.
+        if (/^\s*(mailto:|tel:)/i.test(meta.href || "")) return -300;
         if (/interested/i.test(blob)) score += 95;
         if (/apply with autofill|autofill/i.test(blob)) {
           // Jobright Autofill depends on their Chrome extension — usually a dead end over CDP.
           score += 35;
         } else if (/easy apply|quick apply|1-click apply/i.test(blob)) {
           score += 98;
+        } else if (/apply to role|apply for (the|this) job|apply to (the|this) job|i'?m interested|apply here|apply today|start application/i.test(blob)) {
+          score += 90;
+        } else if (/apply now/i.test(blob)) {
+          score += 82;
+        } else if (/\bapply\b/i.test(meta.text)) {
+          score += 55;
         }
-        if (/apply now|start application/i.test(blob)) score += 82;
+        // Y Combinator batch/accelerator apply (e.g. "Apply for Fall 2026", "Apply to YC")
+        // is not the job application — must not beat the role-specific "Apply to role".
+        if (/apply (for|to) (fall|winter|spring|summer|yc|y combinator|the .* batch)/i.test(blob)) {
+          score -= 140;
+        }
         if (/submit application/i.test(blob)) score -= 90;
-        if (/\bapply\b/i.test(meta.text)) score += 55;
         if (/apply|interested/i.test(meta.testId || "")) score += 45;
         if (meta.inMainContent) score += 25;
         if (meta.inJobContext) score += 20;
@@ -927,9 +961,13 @@ async function scanDom(page, { listingMode = true } = {}) {
         if (meta.inFooter) score -= 15;
         if (meta.tag === "button" || meta.role === "button") score += 18;
         if (meta.tag === "a" && /apply|interested/i.test(blob)) score += 10;
-        if (meta.tag === "input" && !meta.href) score -= 85;
-        if (meta.tag === "input" && /apply for the job/i.test(blob)) score -= 60;
+        // Mild penalty for Apply submit inputs so sole CTAs still clear the entry threshold.
+        if (meta.tag === "input" && !meta.href) {
+          if (inputType === "submit" || /\bapply\b/i.test(blob)) score -= 20;
+          else score -= 85;
+        }
         if (meta.area < 800) score -= 25;
+        if (meta.area > 4000 && meta.area < 80000) score += 8;
         if (/sign in|log in|register|search jobs|save job|share/i.test(blob)) score -= 60;
         meta.pageHost = pageHost;
         meta.hasNativeApplyButton = hasNativeApplyButton;
@@ -1813,7 +1851,20 @@ async function enrichViaPlaywright(page, snap) {
 
   if ((snap.entryCount || 0) === 0) {
     // Anchored only — bare /\bapply\b/ was matching "Apply with Indeed" / "Apply with Apple" randomly.
-    for (const pattern of [/^interested$/i, /^apply now$/i, /^easy apply$/i, /^apply$/i]) {
+    for (const pattern of [
+      /^interested$/i,
+      /^i'?m interested$/i,
+      /^apply now$/i,
+      /^easy apply$/i,
+      /^quick apply$/i,
+      /^apply$/i,
+      /^apply for the job$/i,
+      /^apply for this job$/i,
+      /^apply to this job$/i,
+      /^start application$/i,
+      /^apply here$/i,
+      /^apply today$/i,
+    ]) {
       for (const role of ["button", "link"]) {
         try {
           const loc = safeRoleLocator(page, role, pattern).first();

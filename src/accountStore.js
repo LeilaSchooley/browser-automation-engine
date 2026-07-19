@@ -97,19 +97,28 @@ export function canProvisionAccounts(context) {
 }
 
 /**
- * Generate credentials for a directory host (email plus-address + username).
+ * Generate credentials for a directory host. Exact email is the safe default; plus-addressing
+ * is opt-in because some providers and job sites reject aliases.
  */
-export function generateAccountCredentials({ emailBase, hostname, label = "" }) {
+export function generateAccountCredentials({ emailBase, hostname, label = "", useEmailAlias } = {}) {
   const password = generatePasswordWithPolicy();
-  const username = slugUsername(label || hostname, { maxLen: 15 });
   if (!emailBase || !emailBase.includes("@")) {
-    return { username, password, email: "" };
+    const username = slugUsername(label || hostname, { maxLen: 15 });
+    return { username, password, email: "", usernameUsed: true };
+  }
+  const aliasEnabled =
+    useEmailAlias === undefined
+      ? getSettings().account_email_alias_enabled === true
+      : useEmailAlias === true;
+  if (!aliasEnabled) {
+    return { email: String(emailBase).trim().toLowerCase(), username: "", password, usernameUsed: false };
   }
   const [local, domain] = emailBase.split("@");
   const hostSlug = normalizeHost(hostname).replace(/\./g, "-").slice(0, 24) || "site";
   const tag = (label || crypto.randomBytes(3).toString("hex")).replace(/[^a-z0-9-]/gi, "").slice(0, 12);
   const email = `${local}+ql-${hostSlug}-${tag}@${domain}`.toLowerCase();
-  return { email, username, password };
+  // Email-based signups — don't invent a username unless the form actually asks for one.
+  return { email, username: "", password, usernameUsed: false };
 }
 
 export function resolveAccountForHost(context, hostname, { provision = true } = {}) {
@@ -124,6 +133,7 @@ export function resolveAccountForHost(context, hostname, { provision = true } = 
     emailBase,
     hostname,
     label: context?.profile?.startupName || context?.sessionId || "",
+    useEmailAlias: getSettings().account_email_alias_enabled === true,
   });
 
   const saved = saveAccountForHost(hostname, {
@@ -174,7 +184,9 @@ export function attachAccountToContext(context, account) {
     email: account.email || context.auth?.email,
     username: account.username || context.auth?.username,
     password: account.password,
+    totpSecret: account.totpSecret || account.totp_secret || context.auth?.totpSecret || "",
     provisioned: account.isNew || account.pending,
   };
+  context.siteAccount = account;
   return context;
 }

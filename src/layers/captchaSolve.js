@@ -5,9 +5,14 @@ import { getSettings } from "../runtime.js";
 
 export async function attemptCaptchaSolve(page, snap, log) {
   const settings = getSettings();
+  // Opt-in only — never call external solvers unless explicitly enabled.
+  if (settings.captcha_solver_enabled !== true) {
+    return { ok: false, reason: "CAPTCHA solver disabled (set captcha_solver_enabled)" };
+  }
   const solverUrl = settings.captcha_solver_url || process.env.CAPTCHA_SOLVER_URL || "";
-  if (!solverUrl || settings.captcha_solver_enabled === false) {
-    return { ok: false, reason: "CAPTCHA solver not configured" };
+  const apiKey = settings.captcha_solver_api_key || process.env.CAPTCHA_SOLVER_API_KEY || "";
+  if (!solverUrl) {
+    return { ok: false, reason: "CAPTCHA solver not configured (captcha_solver_url)" };
   }
 
   try {
@@ -22,10 +27,13 @@ export async function attemptCaptchaSolve(page, snap, log) {
       url: snap?.url || page.url(),
       sitekey,
       hostname: snap?.hostname,
+      apiKey: apiKey || undefined,
     };
+    const headers = { "Content-Type": "application/json" };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
     const res = await fetch(solverUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
     if (!res.ok) return { ok: false, reason: `solver HTTP ${res.status}` };

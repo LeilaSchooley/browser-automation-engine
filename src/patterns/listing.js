@@ -60,7 +60,11 @@ export const JOB_BOARD_HOST_RE =
 
 /** Deep job/application paths — not the board index. */
 export const JOB_BOARD_JOB_PATH_RE =
-  /\/[a-f0-9-]{36}(?:\/|$)|\/jobs\/[^/?#]+|\/job\/[^/?#]+|\/application(?:s)?(?:\/|$)|\/apply(?:\/|$)|\/positions\/[^/?#]+/i;
+  /\/[a-f0-9-]{36}(?:\/|$)|\/jobs\/[^/?#]+|\/job\/[^/?#]+|\/application(?:s)?(?:\/|$)|\/apply(?:\/|$)|\/positions\/[^/?#]+|\/[a-z0-9_-]{4,}\/[a-z0-9][a-z0-9-]{8,}(?:-at-[a-z0-9-]+)?(?:\/|$)/i;
+
+/** Phrases that are primary Apply CTAs (including submit-input labels). */
+export const APPLY_CTA_PHRASE_RE =
+  /apply for (the|this) job|apply to (the|this) job|i'?m interested|start application|apply here|apply today|quick apply/i;
 
 /** Aggregator listing where the original role is gone — similar-jobs redirect only. */
 export const CLOSED_JOB_BODY =

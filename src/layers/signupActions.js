@@ -9,6 +9,7 @@ import {
   markAccountExists,
   resolveAccountForHost,
   saveAccountForHost,
+  slugUsername,
 } from "../accountStore.js";
 import {
   getAuthCredentials,
@@ -34,10 +35,17 @@ import { humanPause } from "../human.js";
 import { getApplicantProfile, hasIdentityRegistrationFields } from "../fillProfile.js";
 import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { shouldBlockAdvance } from "../gateComplete.js";
+import { clickDiscoveredCookie, clickDiscoveredContinue } from "./domActions.js";
+import { looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
 
 async function confirmSignupSucceeded(page, hostname, log, before = null) {
   await humanPause(1200, 2000);
   const after = await inspectPage(page);
+  const dead = looksLikeDeadApplyDestination(after);
+  if (dead.dead) {
+    log?.layer("signup", `signup landed on error page — ${dead.reason}`, "warn");
+    return { ok: false, deadDestination: true, reason: dead.reason };
+  }
   if (looksLikeExistingAccount(after)) {
     log?.layer("signup", "site says account already exists — switch to sign in", "warn");
     markAccountExists(hostname);
@@ -233,8 +241,10 @@ export async function attemptAuthSignup(page, snap, context, log) {
   const fillResult = await fillSignupFormFromDom(
     page,
     {
-      email: applicant.email || email,
-      username,
+      // Keep the submitted address identical to the stored account. With aliases disabled
+      // this is the applicant email; with aliases enabled it is the opted-in plus address.
+      email: email || applicant.email,
+      username: username || slugUsername(hostname, { maxLen: 15 }) || String(email || "").split("@")[0] || "",
       password,
       fullName,
       firstName: applicant.firstName,
@@ -248,6 +258,25 @@ export async function attemptAuthSignup(page, snap, context, log) {
     `discovered ${fillResult.fields.length} fields: ${fillResult.fields.map((f) => f.kind).join(", ")}`,
     "info",
   );
+
+  if (fillResult.filled?.username) {
+    const usedUsername =
+      username ||
+      slugUsername(hostname, { maxLen: 15 }) ||
+      String(email || applicant.email || "")
+        .split("@")[0]
+        .slice(0, 32) ||
+      "";
+    if (usedUsername) {
+      saveAccountForHost(hostname, {
+        ...account,
+        username: usedUsername,
+        usernameUsed: true,
+      });
+      account = { ...account, username: usedUsername, usernameUsed: true };
+      attachAccountToContext(context, account);
+    }
+  }
 
   if (!fillResult.complete) {
     log?.layer(
@@ -278,11 +307,24 @@ export async function attemptAuthSignup(page, snap, context, log) {
 
   await checkTermsIfNeeded(page, log);
 
+  // Cookie banners often sit over Continue (We Work Remotely) — clear before submit.
+  if (freshSnap.cookieBanner || (freshSnap.cookieCandidates || []).length) {
+    await clickDiscoveredCookie(page, log, "signup", freshSnap).catch(() => false);
+    await humanPause(400, 800);
+  }
+
   const authSelectors = authSelectorsFromSignupFields(fillResult.fields);
   const learnings =
     Object.keys(authSelectors).length > 0 ? { authSelectors } : undefined;
 
   const beforeSnap = snap;
+
+  // Prefer discovered Continue CTA from the live snap (input[type=submit] "Continue").
+  const afterOverlay = await inspectPage(page).catch(() => freshSnap);
+  if (await clickDiscoveredContinue(page, log, "signup", afterOverlay)) {
+    const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ...result, learnings: result.ok ? learnings : undefined };
+  }
 
   if (await clickRegistrationContinue(page, log, "signup")) {
     const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
@@ -294,6 +336,10 @@ export async function attemptAuthSignup(page, snap, context, log) {
     return { ...result, learnings: result.ok ? learnings : undefined };
   }
   if (await clickSubmitByPatterns(page, SIGNUP_SUBMIT_PATTERNS, { log, layer: "signup", preferLast: true })) {
+    const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+    return { ...result, learnings: result.ok ? learnings : undefined };
+  }
+  if (await clickSubmitByPatterns(page, REGISTRATION_CONTINUE_PATTERNS, { log, layer: "signup", preferLast: false })) {
     const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
     return { ...result, learnings: result.ok ? learnings : undefined };
   }
@@ -309,6 +355,23 @@ export async function attemptAuthSignup(page, snap, context, log) {
     }
     if (count === 1) {
       await submits.first().click({ timeout: 8000 });
+      log?.layer("signup", "clicked sole submit control", "info");
+      const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
+      return { ...result, learnings: result.ok ? learnings : undefined };
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Last resort: force-click Continue even if partially covered.
+  try {
+    const cont = page
+      .locator('input[type="submit"][value="Continue"], input[type="submit"][value="continue"]')
+      .or(page.getByRole("button", { name: /^Continue$/i }))
+      .first();
+    if ((await cont.count().catch(() => 0)) > 0) {
+      await cont.click({ timeout: 8000, force: true });
+      log?.layer("signup", "force-clicked Continue", "info");
       const result = await confirmSignupSucceeded(page, hostname, log, beforeSnap);
       return { ...result, learnings: result.ok ? learnings : undefined };
     }

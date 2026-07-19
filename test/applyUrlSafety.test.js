@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   entryHrefScoreDelta,
   isChromeErrorPage,
+  isDeadListingPage,
   isOauthProviderHost,
   isQueueableApplyUrl,
   isSocialSsoCta,
@@ -16,6 +17,7 @@ import { scoreEntryCandidate } from "../src/layers/formDiscovery.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { inspectPage } from "../src/layers/formDiscovery.js";
 import { adoptOpenedPage } from "../src/layers/pageReady.js";
+import { buildReadyMessage } from "../src/layers/runPipeline.js";
 
 describe("applyUrlSafety", () => {
   it("detects chrome error pages", () => {
@@ -33,7 +35,12 @@ describe("applyUrlSafety", () => {
     assert.equal(isOauthProviderHost("accounts.google.com"), true);
     assert.equal(isOauthProviderHost("https://secure.indeed.com/auth"), false);
     assert.equal(isOauthProviderHost("https://www.linkedin.com/jobs/view/1"), false);
+    // LinkedIn OAuth / cold-join paths opened by "Sign in with LinkedIn" are not apply targets.
+    assert.equal(isOauthProviderHost("https://www.linkedin.com/uas/login?session_redirect=x"), true);
+    assert.equal(isOauthProviderHost("https://www.linkedin.com/signup/cold-join?source=oauth"), true);
+    assert.equal(isOauthProviderHost("https://www.linkedin.com/oauth/v2/login-success"), true);
     assert.equal(isSocialSsoCta("Continue with Apple"), true);
+    assert.equal(isSocialSsoCta("Sign up with LinkedIn"), true);
     assert.equal(isSocialSsoCta("Continue"), false);
   });
 
@@ -54,6 +61,27 @@ describe("applyUrlSafety", () => {
     assert.equal(c.step, "blocked");
     assert.equal(c.hardStop, true);
     assert.match(c.reason, /SSO|Apple|email Continue/i);
+  });
+
+  it("hard-stops classifyApplyStep on LinkedIn cold-join (opened via Sign in with LinkedIn)", () => {
+    const c = classifyApplyStep(
+      {
+        url: "https://www.linkedin.com/signup/cold-join?session_redirect=x&source=oauth",
+        hostname: "www.linkedin.com",
+        title: "LinkedIn Login, Sign in | LinkedIn",
+        pageKind: "auth",
+        fieldCount: 2,
+        emailFieldCount: 1,
+        passwordFieldCount: 1,
+        signUpCount: 1,
+        signUpCandidates: [{ text: "Join now" }],
+        pageText: "Join LinkedIn",
+      },
+      { filled: [] },
+    );
+    assert.equal(c.step, "blocked");
+    assert.equal(c.hardStop, true);
+    assert.match(c.reason, /SSO|email Continue/i);
   });
 
   it("adoptOpenedPage closes Apple SSO popups and keeps Indeed auth", async () => {
@@ -175,6 +203,7 @@ describe("applyUrlSafety", () => {
     const inputSubmit = scoreEntryCandidate({
       text: "Apply for the job",
       tag: "input",
+      type: "submit",
       inMainContent: true,
       inJobContext: true,
       pageHost: "findwork.dev",
@@ -189,6 +218,8 @@ describe("applyUrlSafety", () => {
       area: 5000,
     });
     assert.ok(button > inputSubmit, `button=${button} should beat input=${inputSubmit}`);
+    // Sole submit CTAs must still clear the entry discovery threshold (>= 20).
+    assert.ok(inputSubmit >= 20, `input submit score=${inputSubmit} should be discoverable`);
   });
 
   it("detects Firefox Server Not Found pages", () => {
@@ -245,5 +276,90 @@ describe("looksLikeDeadApplyDestination", () => {
       entryCount: 0,
     });
     assert.equal(dead.dead, true);
+  });
+
+  it("detects Railway / generic 404 Not Found pages", () => {
+    const snap = {
+      url: "https://vacancyglobal.up.railway.app/job/web-administrator-remote-position",
+      hostname: "vacancyglobal.up.railway.app",
+      title: "404 Not Found",
+      pageText:
+        "Not Found The train has not arrived at the station. Please check your network settings to confirm that your domain has provisioned.",
+      headings: "Not Found",
+      pageKind: "unknown",
+      fieldCount: 0,
+      entryCount: 0,
+      bodyTextLength: 257,
+    };
+    const dead = looksLikeDeadApplyDestination(snap);
+    assert.equal(dead.dead, true);
+    assert.match(dead.reason, /404|not found|error|hosting/i);
+
+    const classified = classifyApplyStep(snap, { filled: [] });
+    assert.equal(classified.step, "blocked");
+    assert.equal(classified.hardStop, true);
+
+    const msg = buildReadyMessage({
+      fillResult: { filled: [] },
+      snap,
+      prep: { actions: [] },
+      agentSteps: 1,
+      agentHistory: [{ action: "wait_user", applyStep: "blocked", reason: dead.reason }],
+    });
+    assert.match(msg, /Blocked/i);
+  });
+
+  it("detects We Work Remotely Application Error and does-not-exist shells", () => {
+    assert.equal(
+      isDeadListingPage({
+        url: "https://weworkremotely.com/job-seekers/account",
+        title: "Application Error",
+        pageText: "",
+        pageKind: "unknown",
+        fieldCount: 0,
+        entryCount: 0,
+        bodyTextLength: 0,
+      }).dead,
+      true,
+    );
+    assert.equal(
+      isDeadListingPage({
+        url: "https://weworkremotely.com/job-seekers/account",
+        title: "This page does not exist - We Work Remotely",
+        pageText: "WE WORK REMOTELY This page does not exist. Search tips",
+        pageKind: "content",
+        fieldCount: 0,
+        entryCount: 0,
+        bodyTextLength: 444,
+      }).dead,
+      true,
+    );
+    assert.equal(
+      looksLikeDeadApplyDestination({
+        url: "https://weworkremotely.com/job-seekers/account",
+        title: "Application Error",
+        pageText: "Something bad happened. We're on it.",
+        pageKind: "unknown",
+        fieldCount: 0,
+        entryCount: 0,
+        bodyTextLength: 40,
+      }).dead,
+      true,
+    );
+  });
+
+  it("isDeadListingPage ignores normal apply forms", () => {
+    assert.equal(
+      isDeadListingPage({
+        url: "https://jobs.lever.co/acme/123",
+        title: "Apply for Engineer",
+        pageText: "Full name Email Resume Submit application",
+        pageKind: "form",
+        fieldCount: 8,
+        entryCount: 0,
+        bodyTextLength: 1200,
+      }).dead,
+      false,
+    );
   });
 });

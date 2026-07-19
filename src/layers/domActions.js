@@ -174,6 +174,21 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
 
   const attempts = [];
 
+  // Prefer stable perception refs (Playwright MCP-style) when present.
+  if (candidate.perceptionRef || candidate.refId) {
+    attempts.push(async () => {
+      const { locatorForRef } = await import("./pagePerception.js");
+      const refs = candidate._perceptionRefs || [];
+      const loc = locatorForRef(page, candidate.perceptionRef || candidate.refId, refs);
+      if (!loc) return false;
+      if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) return false;
+      await loc.scrollIntoViewIfNeeded().catch(() => {});
+      await loc.click({ timeout: 8000, force });
+      log.layer(layer, `${label}: clicked perception ref ${candidate.perceptionRef || candidate.refId}`, "info");
+      return true;
+    });
+  }
+
   if (candidate.testId) {
     attempts.push(async () => {
       const loc = page.getByTestId(candidate.testId).first();
@@ -225,6 +240,26 @@ export async function clickCandidate(page, candidate, log, layer, label, { force
       if (!(await loc.isVisible({ timeout: 1200 }).catch(() => false))) return false;
       await loc.click({ timeout: 8000, force });
       log.layer(layer, `${label}: clicked aria-label "${candidate.aria}"`, "info");
+      return true;
+    });
+  }
+
+  // Last resort for anchor candidates: navigate to the href directly. Handles links whose
+  // accessible name carries decorative glyphs ("Apply to role ›") that defeat role/text matching
+  // and would otherwise fall through to a weaker candidate ("Apply") on the same page. Resolve
+  // relative hrefs (YC role links are like "/companies/…/jobs/…") against the current URL.
+  const rawHref = String(candidate.href || "").trim();
+  if (rawHref && !/^(mailto:|tel:|javascript:|#)/i.test(rawHref)) {
+    attempts.push(async () => {
+      let dest = "";
+      try {
+        dest = new URL(rawHref, page.url()).href;
+      } catch {
+        return false;
+      }
+      if (!/^https?:\/\//i.test(dest)) return false;
+      await page.goto(dest, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      log.layer(layer, `${label}: navigated to href ${dest.slice(0, 90)} "${(candidate.text || "").slice(0, 40)}"`, "info");
       return true;
     });
   }

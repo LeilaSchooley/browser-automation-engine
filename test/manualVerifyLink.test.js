@@ -34,6 +34,13 @@ describe("manualVerifyLink", () => {
     assert.equal(link, "https://example.com/confirm?x=1");
   });
 
+  it("accepts a link pasted before the verification waiter starts", async () => {
+    initTestRuntime({ settings: {} });
+    assert.equal(provideManualVerifyLink(99, "https://example.com/activate?token=early"), true);
+    const link = await waitForManualVerifyLink(99, { timeoutMs: 5000 });
+    assert.equal(link, "https://example.com/activate?token=early");
+  });
+
   it("cancelManualVerifyLink rejects pending wait", async () => {
     initTestRuntime({ settings: {} });
     const wait = waitForManualVerifyLink(7, { timeoutMs: 5000 });
