@@ -24,10 +24,23 @@ describe("fillCustomControls", () => {
     assert.equal(found[0].label, "Salary expectations");
   });
 
-  it("discoverCustomControlsFromSnap infers from page text", () => {
+  it("discoverCustomControlsFromSnap does not invent salary/location from bare pageText", () => {
+    // Sidebar / chrome words like "Location" must not create phantom typeaheads.
     const snap = {
       pageText: "Tell us about yourself. Salary expectations. Location.",
       fields: [],
+    };
+    const found = discoverCustomControlsFromSnap(snap);
+    assert.equal(
+      found.some((c) => c.mappedTo === "salary" || c.mappedTo === "location"),
+      false,
+    );
+  });
+
+  it("discoverCustomControlsFromSnap infers salary when a field label matches", () => {
+    const snap = {
+      pageText: "Tell us about yourself.",
+      fields: [{ label: "Salary expectations", type: "text", filled: false }],
     };
     const found = discoverCustomControlsFromSnap(snap);
     assert.ok(found.some((c) => c.mappedTo === "salary" || c.type === "salary"));

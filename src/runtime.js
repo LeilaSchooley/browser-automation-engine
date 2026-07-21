@@ -44,6 +44,7 @@ export function initRuntime(deps = {}) {
     validateAction: deps.validateAction || createLazyValidateAction(),
     assessEndState: deps.assessEndState || createLazyAssessEndState(),
     answerUnfilledFields: deps.answerUnfilledFields || null,
+    answerChoiceFields: deps.answerChoiceFields || null,
     onStatus: deps.onStatus || null,
   };
   return _runtime;

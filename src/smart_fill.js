@@ -305,6 +305,8 @@ function runSmartFill(config, siteMappings, options) {
         "company", "website", "upload", "attach", "drag", "drop", "file",
         "additional information", "anything else", "other information",
         "tell us about yourself", "salary", "desired job", "location",
+        "education", "school", "college", "university", "degree", "major",
+        "coursework", "employer", "work history", "employment",
       ],
       points: { keyword: 70, inputType: 30 },
     },
@@ -902,6 +904,19 @@ function runSmartFill(config, siteMappings, options) {
     return /additional\s*information|anything\s*else|other\s*information|comments\s*or\s*questions/i.test(blob || "");
   }
 
+  /** Education / work-history textareas must never receive a cover-letter dump. */
+  function isEducationOrHistoryBlob(blob) {
+    return /education|school|college|university|bootcamp|degree|major|gpa|coursework|qualification|employer|company name|job title|work history|employment|responsibilit|achievements|projects?\b/i.test(
+      blob || "",
+    );
+  }
+
+  function looksLikeCoverLetterField(blob) {
+    return /cover\s*letter|why (are you|interested)|motivation|message to hiring|tell us about yourself|about you|introduction|personal pitch/i.test(
+      blob || "",
+    );
+  }
+
   function shouldDeferFill(fieldType, el) {
     if (LONG_TEXT_TYPES.has(fieldType)) return true;
     if (!config.deferTextFill) return false;
@@ -1120,13 +1135,16 @@ function runSmartFill(config, siteMappings, options) {
 
   const hasCoverLetterUpload = fileTargets.some((t) => /cover\s*letter|upload your cover/i.test(t.clue || ""));
 
-  // Fallback: lone empty textarea → cover letter (skip additional-info boxes and when cover upload exists)
+  // Fallback: lone empty textarea → cover letter only when the clue looks like one.
+  // Never dump into Education/work-history description boxes (WaaS Experience).
   if (config.coverLetter && !hasCoverLetterUpload && !filled.some((f) => f.type === "coverletter")) {
     const textareas = getAllFillable().filter((el) => el.tagName === "TEXTAREA" && !el.value);
     if (textareas.length === 1 && isLikelyVisibleField(textareas[0])) {
       const el = textareas[0];
       const blob = buildFieldClueBlob(el);
-      if (isAdditionalInfoBlob(blob)) {
+      if (isEducationOrHistoryBlob(blob)) {
+        /* skip — education/work description */
+      } else if (isAdditionalInfoBlob(blob)) {
         if (config.fillAdditionalInfo) {
           pushFilled(
             {
@@ -1139,12 +1157,12 @@ function runSmartFill(config, siteMappings, options) {
             el,
           );
         }
-      } else {
+      } else if (looksLikeCoverLetterField(blob)) {
         pushFilled(
           {
             type: "coverletter",
             selector: generateStableSelector(el),
-            score: 30,
+            score: 55,
             source: "textarea_fallback",
             deferred: true,
           },
@@ -1181,6 +1199,16 @@ function runSmartFill(config, siteMappings, options) {
     );
     if (el.tagName === "SELECT") {
       entry.options = Array.from(el.options || []).slice(0, 20).map((o) => o.text.trim()).filter(Boolean);
+    }
+    // Numeric constraints so the AI answers an in-range value (a bare year like
+    // "2022" must never land in a 0–100 "years of experience" field).
+    const minAttr = el.getAttribute && el.getAttribute("min");
+    const maxAttr = el.getAttribute && el.getAttribute("max");
+    const modeAttr = el.getAttribute && el.getAttribute("inputmode");
+    if (minAttr !== null && minAttr !== undefined && minAttr !== "") entry.numericMin = Number(minAttr);
+    if (maxAttr !== null && maxAttr !== undefined && maxAttr !== "") entry.numericMax = Number(maxAttr);
+    if (entry.inputType === "number" || modeAttr === "numeric" || modeAttr === "decimal") {
+      entry.numeric = true;
     }
     unfilled.push(entry);
   }

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <!--
+      WaaS /application/role shape: sidebar still says "Location", School Name
+      autocomplete exists, job-function radios have concatenated labels, Continue
+      always enabled. Reproduces the phantom-location + school poison bug.
+    -->
+    <nav>
+      <ul>
+        <li>Personal Info</li>
+        <li>Location</li>
+        <li>Role</li>
+      </ul>
+    </nav>
+    <div
+      data-page='{"props":{"sectionAppProps":{"activeSection":"role","serverErrors":{},"sectionInfo":[{"name":"role","status":"current"}]}}}'
+    >
+      <h1>Role</h1>
+      <form>
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What job function best fits what you're looking for?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="job_function" value="eng" />Engineering<span
+                >Software, hardware and data</span
+              ></label
+            >
+          </div>
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="job_function" value="design" />Design<span
+                >Web, mobile, UI/UX</span
+              ></label
+            >
+          </div>
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="job_function" value="product" />Product<span
+                >Product management</span
+              ></label
+            >
+          </div>
+          <span class="text-red-500" style="color: rgb(239, 68, 68)">Required</span>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >Are you a full-time student at a school or bootcamp?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="radio" name="student" value="yes" />Yes</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="student" value="no" />No</label>
+          </div>
+        </div>
+
+        <div class="mb-4" id="school-block" hidden>
+          <label class="mb-1 block font-bold" for="school"
+            >What is the name of the school or bootcamp you are attending?</label
+          >
+          <input
+            id="school"
+            name="school_name"
+            type="text"
+            aria-autocomplete="list"
+            placeholder="Search schools..."
+            value=""
+          />
+        </div>
+
+        <div class="mb-4" id="role-kind-block" hidden>
+          <label class="mb-1 block font-bold"
+            >What kind of role you interested in?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="role_kind" value="intern" />An internship (e.g. during the
+              summer)</label
+            >
+          </div>
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="role_kind" value="fulltime" />A full-time role after
+              graduation</label
+            >
+          </div>
+          <span class="text-red-500" style="color: rgb(239, 68, 68)">Required</span>
+        </div>
+
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+    <script>
+      const studentYes = document.querySelector('input[name="student"][value="yes"]');
+      const studentNo = document.querySelector('input[name="student"][value="no"]');
+      const schoolBlock = document.getElementById("school-block");
+      const roleBlock = document.getElementById("role-kind-block");
+      function sync() {
+        const yes = studentYes.checked;
+        schoolBlock.hidden = !yes;
+        roleBlock.hidden = !yes;
+      }
+      studentYes.addEventListener("change", sync);
+      studentNo.addEventListener("change", sync);
+      sync();
+    </script>
+  </body>
+</html>

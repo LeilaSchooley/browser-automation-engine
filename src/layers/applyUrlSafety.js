@@ -135,7 +135,7 @@ export function isSuspiciousApplyHost(host = "") {
   return Boolean(h && SUSPICIOUS_APPLY_HOST_RE.test(h));
 }
 
-export function looksLikeDeadApplyDestination(snap) {
+export function looksLikeDeadApplyDestination(snap, history = [], opts = {}) {
   const url = snap?.url || "";
   const title = (snap?.title || "").trim();
   if (isBrowserUnreachablePage(snap)) {
@@ -145,6 +145,10 @@ export function looksLikeDeadApplyDestination(snap) {
   const httpDead = isDeadListingPage(snap);
   if (httpDead.dead) {
     return { dead: true, reason: httpDead.reason };
+  }
+  const homepageGone = looksLikeJobGoneBoardHomepage(snap, history, opts);
+  if (homepageGone.dead) {
+    return { dead: true, reason: homepageGone.reason };
   }
   const host = snap?.hostname || normalizeHost(url);
   if (
@@ -157,6 +161,172 @@ export function looksLikeDeadApplyDestination(snap) {
   }
   const closed = looksLikeClosedJobListing(snap);
   if (closed.closed) return { dead: true, reason: closed.reason };
+  return { dead: false, reason: "" };
+}
+
+/**
+ * True when URL is a board root / index (not a job detail path).
+ * Any board — WWR, Lever company root, Greenhouse board root, careers hubs, etc.
+ * @param {string} url
+ */
+export function isBoardHomepageUrl(url = "") {
+  try {
+    const u = new URL(String(url || ""), "https://example.com");
+    const host = normalizeHost(u.hostname);
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    if (path === "/") return true;
+    // Locale root: /en, /en-us
+    if (/^\/[a-z]{2}(-[a-z]{2})?$/i.test(path)) return true;
+    // Category/index hubs — not a specific job.
+    if (
+      /^\/(home|index|jobs|remote-jobs|remote|careers|search|listings|opportunities|positions|openings)(\/(search|all|browse))?$/i.test(
+        path,
+      )
+    ) {
+      return true;
+    }
+    // ATS company board root (no job id): boards.greenhouse.io/acme, jobs.lever.co/acme
+    if (
+      (/(^|\.)(boards|job-boards)\.greenhouse\.io$/i.test(host) ||
+        /(^|\.)jobs\.lever\.co$/i.test(host) ||
+        /(^|\.)jobs\.ashbyhq\.com$/i.test(host)) &&
+      /^\/[^/]+$/i.test(path)
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+const BOARD_HOMEPAGE_COPY_RE =
+  /\b(find jobs|post a job|top\s*\d+\s*remote|search by (job )?category|advanced remote job search|browse (all )?jobs|trending remote jobs|featured jobs|latest jobs|job search|all openings|view all jobs)\b/i;
+
+const JOB_DETAIL_PATH_RE =
+  /\/(jobs?|job|positions?|openings?|remote-jobs|jdp)\/[^/?#]+/i;
+
+/** Job detail / apply path — not a board index. */
+export function isJobDetailUrl(url = "") {
+  const raw = String(url || "");
+  if (!raw) return false;
+  if (JOB_DETAIL_PATH_RE.test(raw)) return true;
+  try {
+    const u = new URL(raw, "https://example.com");
+    const host = normalizeHost(u.hostname);
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    // Greenhouse / Lever / Ashby job id paths
+    if (
+      (/(^|\.)(boards|job-boards)\.greenhouse\.io$/i.test(host) ||
+        /(^|\.)jobs\.lever\.co$/i.test(host) ||
+        /(^|\.)jobs\.ashbyhq\.com$/i.test(host)) &&
+      /^\/[^/]+\/.+/i.test(path)
+    ) {
+      return true;
+    }
+    // Workday job detail often has /job/ or long path segments
+    if (/\.myworkdayjobs\.com$/i.test(host) && /\/job\//i.test(path)) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+/**
+ * True when the listing itself is shown on the site root (not a redirect-away).
+ * e.g. SPA careers page at `/` with the job title as the main heading + Apply.
+ */
+export function jobAppearsOnHomescreen(snap, opts = {}) {
+  const title = String(opts.jobTitle || opts.title || "").trim();
+  if (!title || title.length < 4) return false;
+  const titleLc = title.toLowerCase();
+  const headings = String(snap?.headings || "").toLowerCase();
+  const topText = `${snap?.title || ""} ${snap?.pageText || ""}`.slice(0, 1800).toLowerCase();
+  const inHeadings = headings.includes(titleLc);
+  const inTop = topText.includes(titleLc);
+  if (!inHeadings && !inTop) return false;
+  const hasApplySurface =
+    (snap?.entryCount || 0) > 0 ||
+    (snap?.fieldCount || 0) >= 2 ||
+    (snap?.fileInputCount || 0) > 0 ||
+    snap?.pageKind === "apply" ||
+    snap?.pageKind === "form";
+  // Heading match alone is enough — the job detail is the home content.
+  if (inHeadings) return true;
+  // Title in page body only counts when there is still an apply surface.
+  return Boolean(inTop && hasApplySurface);
+}
+
+function leftAJobUrl(startUrl = "", history = [], currentUrl = "") {
+  if (isJobDetailUrl(startUrl) && !isBoardHomepageUrl(startUrl)) return true;
+  if (startUrl && isBoardHomepageUrl(currentUrl)) {
+    try {
+      const a = normalizeHost(startUrl);
+      const b = normalizeHost(currentUrl);
+      // Aggregator → board homepage hop after Apply.
+      if (a && b && a !== b) return true;
+      // Same host: started on a deeper path, now at root/index.
+      if (a && a === b && !isBoardHomepageUrl(startUrl)) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return (history || []).some((h) => {
+    const u = h.url || h.fromUrl || h.beforeUrl || "";
+    return u && isJobDetailUrl(u);
+  });
+}
+
+/**
+ * After Apply, landing on any board homepage (not a job URL) ⇒ listing gone.
+ * Exception: job content actually lives on the homescreen (title heading / apply there).
+ * @param {object} snap
+ * @param {object[]} [history]
+ * @param {{ startUrl?: string, jobTitle?: string, title?: string, company?: string }} [opts]
+ */
+export function looksLikeJobGoneBoardHomepage(snap, history = [], opts = {}) {
+  if (!snap) return { dead: false, reason: "" };
+  const url = String(snap.url || "");
+  if (isJobDetailUrl(url)) return { dead: false, reason: "" };
+  if (!isBoardHomepageUrl(url)) return { dead: false, reason: "" };
+
+  // Job is the homescreen content — not a dead redirect.
+  if (jobAppearsOnHomescreen(snap, opts)) return { dead: false, reason: "" };
+
+  const clickedApply = (history || []).some(
+    (h) =>
+      (h.action === "click_apply" || h.applyCta) &&
+      (h.ok !== false || h.progress),
+  );
+  const hoppedAfterApply = (history || []).some(
+    (h) => h.action === "click_apply" || h.source === "apply-cta",
+  );
+  if (!clickedApply && !hoppedAfterApply) return { dead: false, reason: "" };
+
+  const noApplyForm =
+    (snap.fieldCount || 0) < 2 &&
+    (snap.fileInputCount || 0) === 0 &&
+    !snap.authForm &&
+    !snap.signupForm;
+
+  if (!noApplyForm) return { dead: false, reason: "" };
+
+  const body = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.slice(0, 2500);
+  const cameFromJob = leftAJobUrl(opts.startUrl || "", history, url);
+  // Came from a job URL, OR classic homepage signals (copy / listing kind / long index page).
+  const homepageSignal =
+    cameFromJob ||
+    BOARD_HOMEPAGE_COPY_RE.test(body) ||
+    snap.pageKind === "content" ||
+    snap.pageKind === "listing" ||
+    (snap.bodyTextLength || 0) > 1500;
+
+  if (homepageSignal) {
+    return {
+      dead: true,
+      reason: "apply redirected to board homepage — job listing gone",
+    };
+  }
   return { dead: false, reason: "" };
 }
 

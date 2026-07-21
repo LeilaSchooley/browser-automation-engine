@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <!-- Student=Yes path: school name (field D), graduation, role interest. -->
+    <div
+      data-page='{"props":{"sectionAppProps":{"activeSection":"role","serverErrors":{},"sectionInfo":[{"name":"role","status":"current"}]}}}'
+    >
+      <h1>Role</h1>
+      <form>
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >Which engineering roles are you most interested in? (Choose up to four)<span class="text-red-500">
+              *</span
+            ></label
+          >
+          <div class="reactselect__control" role="combobox" aria-haspopup="listbox" tabindex="0"></div>
+          <input type="hidden" name="eng_type" value="" />
+        </div>
+        <div id="eng-options" role="listbox">
+          <div role="option">Full stack</div>
+          <div role="option">Backend</div>
+          <div role="option">Frontend</div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >Are you a full-time student at a school or bootcamp?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="radio" name="in_school" value="yes" checked />Yes</label>
+          </div>
+          <div class="my-0.5"><label><input type="radio" name="in_school" value="no" />No</label></div>
+        </div>
+
+        <div class="mb-4" id="school-block">
+          <label class="mb-1 block font-bold"
+            >What is the name of the school or bootcamp you are attending?<span class="text-red-500">
+              *</span
+            ></label
+          >
+          <input type="text" name="school_name" placeholder="School Name" value="" />
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold">When do you graduate?<span class="text-red-500"> *</span></label>
+          <div class="flex gap-2">
+            <select name="grad_month" aria-label="Month">
+              <option value="">Month</option>
+              <option value="June">June</option>
+              <option value="May">May</option>
+            </select>
+            <select name="grad_year" aria-label="Year">
+              <option value="">Year</option>
+              <option value="2024">2024</option>
+              <option value="2025">2025</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What kind of role you interested in?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="role_interest" value="intern" />An internship (e.g. during the
+              summer)</label
+            >
+          </div>
+          <div class="my-0.5">
+            <label
+              ><input type="radio" name="role_interest" value="fulltime" />A full-time role after
+              graduation</label
+            >
+          </div>
+        </div>
+
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+    <script>
+      const schoolBlock = document.getElementById("school-block");
+      const gradBlock = document.querySelector('form div.mb-4:has(select[name="grad_month"])');
+      const roleBlock = document.querySelector('form div.mb-4:has(input[name="role_interest"])');
+      function sync() {
+        const yes = document.querySelector('input[name="in_school"][value="yes"]')?.checked;
+        if (schoolBlock) schoolBlock.hidden = !yes;
+        if (gradBlock) gradBlock.hidden = !yes;
+        if (roleBlock) roleBlock.hidden = !yes;
+      }
+      document.querySelectorAll('input[name="in_school"]').forEach((el) => el.addEventListener("change", sync));
+      sync();
+    </script>
+  </body>
+</html>

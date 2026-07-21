@@ -9,6 +9,7 @@ import {
   looksLikeWorkAuth,
   looksLikeRemote,
   looksLikeRelocate,
+  looksLikeRelocateLocations,
   looksLikePolicyAck,
   normalizeRemotePreference,
   remoteAnswerForPreference,
@@ -32,6 +33,8 @@ describe("applicationScreening patterns (site-agnostic)", () => {
     );
     assert.ok(looksLikeRemote("Are you open to working remotely?"));
     assert.ok(looksLikeRelocate("Are you willing to relocate?"));
+    assert.ok(looksLikeRelocateLocations("Where else would you relocate? (cities, regions, countries, etc.)"));
+    assert.equal(looksLikeRelocate("Where else would you relocate? (cities, regions, countries, etc.)"), false);
     assert.ok(
       looksLikeHideFromCompanies(
         "Are there companies you want to be hidden from? (e.g. your current employer)",

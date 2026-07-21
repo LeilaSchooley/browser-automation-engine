@@ -73,18 +73,39 @@
         </div>
       </div>
 
+      <div class="field" id="relocate-cities-field" hidden>
+        <label for="relocate-cities">Where else would you relocate? (cities, regions, countries, etc.)</label>
+        <input
+          id="relocate-cities"
+          name="relocate_cities"
+          role="combobox"
+          aria-label="Where else would you relocate?"
+          aria-autocomplete="list"
+          placeholder="Search ..."
+          value=""
+        />
+        <div id="relocate-cities-list" role="listbox" hidden></div>
+      </div>
+
       <button type="button" id="continue" disabled>Continue</button>
     </form>
     <script>
       const city = document.getElementById("city");
       const list = document.getElementById("city-list");
       const err = document.getElementById("city-error");
+      const relocateCities = document.getElementById("relocate-cities");
+      const relocateField = document.getElementById("relocate-cities-field");
+      const relocateList = document.getElementById("relocate-cities-list");
       const places = ["London, United Kingdom", "Berlin, Germany", "Paris, France"];
 
       function sync() {
+        const relocateYes = document.querySelector('input[name="relocate"][value="Yes"]:checked');
+        relocateField.hidden = !relocateYes;
         const cityOk = !!city.value && !/search/i.test(city.value);
+        const relocateOk = !relocateYes || (!!relocateCities.value && !/search/i.test(relocateCities.value));
         const ok =
           cityOk &&
+          relocateOk &&
           document.querySelector('input[name="work_auth"]:checked') &&
           document.querySelector('input[name="visa_sponsor"]:checked') &&
           document.querySelector('input[name="remote"]:checked') &&
@@ -93,29 +114,34 @@
         document.getElementById("continue").disabled = !ok;
       }
 
-      function showOptions(q) {
-        const needle = String(q || "").toLowerCase();
-        list.innerHTML = "";
-        places
-          .filter((p) => !needle || p.toLowerCase().includes(needle))
-          .forEach((p) => {
-            const opt = document.createElement("div");
-            opt.setAttribute("role", "option");
-            opt.textContent = p;
-            opt.addEventListener("click", () => {
-              city.value = p;
-              city.setAttribute("aria-expanded", "false");
-              list.hidden = true;
-              sync();
+      function bindTypeahead(input, listEl, onPick) {
+        function showOptions(q) {
+          const needle = String(q || "").toLowerCase();
+          listEl.innerHTML = "";
+          places
+            .filter((p) => !needle || p.toLowerCase().includes(needle))
+            .forEach((p) => {
+              const opt = document.createElement("div");
+              opt.setAttribute("role", "option");
+              opt.textContent = p;
+              opt.addEventListener("click", () => {
+                input.value = p;
+                input.setAttribute("aria-expanded", "false");
+                listEl.hidden = true;
+                onPick?.();
+                sync();
+              });
+              listEl.appendChild(opt);
             });
-            list.appendChild(opt);
-          });
-        list.hidden = list.children.length === 0;
-        city.setAttribute("aria-expanded", list.hidden ? "false" : "true");
+          listEl.hidden = listEl.children.length === 0;
+          input.setAttribute("aria-expanded", listEl.hidden ? "false" : "true");
+        }
+        input.addEventListener("input", () => showOptions(input.value));
+        input.addEventListener("focus", () => showOptions(input.value));
       }
 
-      city.addEventListener("input", () => showOptions(city.value));
-      city.addEventListener("focus", () => showOptions(city.value));
+      bindTypeahead(city, list);
+      bindTypeahead(relocateCities, relocateList);
       document.querySelectorAll('input[type="radio"]').forEach((el) => el.addEventListener("change", sync));
       sync();
     </script>

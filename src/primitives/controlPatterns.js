@@ -13,6 +13,11 @@ export const LABEL_TO_MAPPED = [
     type: "salary",
   },
   {
+    re: /where else (would you )?relocat|relocat(e|ion).{0,60}(cities|regions|countries)|cities.{0,30}relocat/i,
+    mappedTo: "relocatelocations",
+    type: "relocatelocations",
+  },
+  {
     re: /\blocation\b|where\s*are\s*you|based\s*in|city\s*region|what\s*city|which\s*city|city\s*do\s*you\s*live|live\s*in\b|hometown/i,
     mappedTo: "location",
     type: "location",
@@ -45,7 +50,11 @@ const AFFILIATION_AND_EEOC_LABEL_TO_MAPPED = [
     type: "volunteer",
   },
   {
-    re: /\bcontractor\b|third[\s-]party/i,
+    // Affiliation-shaped only: "are/were/current/former … contractor", or a
+    // third-party engagement. A bare "Contractor" option inside an
+    // employment-type choice group (and page soup like "type OF role") must NOT
+    // map to this yes/no — so no loose preposition branch.
+    re: /\b(?:are|were|is|as an?|been an?|current(?:ly)?|former(?:ly)?)\b[^?.!]{0,60}\bcontractor\b|contractor\s+(?:through|via)\s+a?\s*third[\s-]?party|third[\s-]party/i,
     mappedTo: "contractor",
     type: "contractor",
   },
@@ -193,7 +202,32 @@ export async function nearbyLabelText(loc) {
 export function isCommittedValue(value, mappedTo = "") {
   const trimmed = String(value || "").replace(/\s+/g, " ").trim();
   if (!trimmed || PLACEHOLDER_RE.test(trimmed) || looksLikeEmptyComboboxText(trimmed)) return false;
+  // Question chrome (aria-label) must never count as a committed city/location value.
+  if (
+    /^(what|where|are you|do you|which)\b/i.test(trimmed) ||
+    /\brequired\b/i.test(trimmed) ||
+    /^search\b/i.test(trimmed)
+  ) {
+    return false;
+  }
   if (mappedTo === "salary") return SALARY_COMMITTED_RE.test(trimmed);
+  if (mappedTo === "location" || mappedTo === "relocatelocations") {
+    // A committed place is a resolved chip: "London, UK" / "Berlin, Germany" /
+    // "New York". A bare single-token search string ("LONDON") is uncommitted
+    // typeahead text (Places dropdown still open) — do NOT treat it as committed,
+    // or we skip picking a real suggestion and the site rejects the submit.
+    if (!/[A-Za-z]{2,}/.test(trimmed)) return false;
+    // School / education / company names must never count as Places chips
+    // (Role step: "London School of Jewish Studies" poisoned location fill).
+    if (
+      /\b(school|university|college|bootcamp|institute|academy|polytechnic)\b/i.test(trimmed)
+    ) {
+      return false;
+    }
+    if (trimmed.includes(",")) return true;
+    if (/\s/.test(trimmed) && trimmed.length >= 3) return true;
+    return false;
+  }
   return trimmed.length > 0 && !/^select|choose$/i.test(trimmed);
 }
 

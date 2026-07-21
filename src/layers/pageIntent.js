@@ -158,6 +158,10 @@ export function rankEntryCandidates(candidates, context = {}) {
       if (/ycombinator\.com\/apply\/?$/i.test(href) || /apply (for|to) (fall|winter|spring|summer|yc)\b/i.test(blob)) {
         bonus -= 140;
       }
+      // Never treat filter/search CTAs as Apply (WWR homepage "Apply filters").
+      if (/apply\s*filters?|filter(s)?\s*jobs?|search\s*jobs?|refine\s*search/i.test(blob)) {
+        bonus -= 250;
+      }
       // Boost role-specific apply phrasing (must stay ABOVE bare "Apply").
       if (/\bapply to (this )?role\b|\bapply for (this|the) (role|job|position)\b/i.test(blob)) {
         bonus += 90;

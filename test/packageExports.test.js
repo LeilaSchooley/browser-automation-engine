@@ -27,6 +27,7 @@ const CREATE_ENGINE_KEYS = [
   "capabilities",
   "classifyApplyStep",
   "computeApplyOutcome",
+  "buildTermination",
   "createAgent",
   "createLogger",
   "detectCaptcha",

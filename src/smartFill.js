@@ -8,7 +8,7 @@ import { fillCustomControls } from "./fillCustomControls.js";
 import { recordSiteLearning, mergeControlSkills } from "./siteLearnings.js";
 import { normalizeHost } from "./host.js";
 import { hasPreferencesGateFields, getPreferencesFromContext } from "./fillPreferences.js";
-import { hasUnfilledYesNoOrEEOC, hasUnfilledApplicationControls } from "./fillApplicationAnswers.js";
+import { hasUnfilledYesNoOrEEOC, hasUnfilledApplicationControls, isWaasRoleStep, isWaasSkillsStep } from "./fillApplicationAnswers.js";
 import {
   sortByVisualOrder,
   sortApplyFields,
@@ -17,9 +17,26 @@ import {
   isEarlyCustomControl,
   isVoluntaryField,
 } from "./fillOrder.js";
+import { sanitizeExperienceValue } from "./fieldMapper.js";
 import { canUseStagehand, attemptStagehandAct } from "./layers/stagehandAdapter.js";
+import {
+  collectUnmappedChoiceControls,
+  buildChoiceSpecs,
+  requiredHintsFromSnap,
+  applyResolvedChoice,
+} from "./layers/fillWidgets/choiceResolver.js";
 import { SMART_FILL_SALARY_HELPER } from "./primitives/browserControlPatterns.js";
 import { looksLikeJobAlertSignupForm, looksLikeMarketingYesNoModal, looksLikeApplySignupGate, looksLikeGoogleVignetteAd } from "./heuristics.js";
+import { fillWaasRoleMissing, waasRoleDomLooksComplete } from "./siteAdapters/waasRoleFields.js";
+import { fillWaasSkillsMissing, waasSkillsDomLooksComplete } from "./siteAdapters/waasSkillsFields.js";
+import { fillWaasReachOutMissing, isWaasReachOutStep } from "./siteAdapters/waasReachOut.js";
+import { buildWizardAdvanceInstruction } from "./layers/wizardLoop.js";
+import { inspectPage } from "./layers/formDiscovery.js";
+import { isStepComplete, looksLikeSteppedForm } from "./layers/steppedForm.js";
+import { enrichSnapWithWaasValidation } from "./siteAdapters/waasValidator.js";
+import { runUniversalFill } from "./layers/universalFillPipeline.js";
+import { assessCompleteness } from "./layers/CompletenessOracle.js";
+import { maybeLearnSiteStructure } from "./siteStructureLearner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMART_FILL_JS = fs.readFileSync(path.join(__dirname, "smart_fill.js"), "utf8");
@@ -243,6 +260,100 @@ async function applyCustomControlsResult(
 }
 
 /**
+ * After a choice can unlock conditional fields (student Yes → school, Eng → eng_type),
+ * re-inspect the DOM and fill newly visible controls. Caps at a few passes.
+ * Stops when Role DOM is complete or the unfilled fingerprint does not change.
+ */
+async function unlockRescanAndRefill(page, context, log, state) {
+  const maxPasses = 2;
+  let workingSnap = state.snap;
+  let prevFingerprint = "";
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    if (isWaasRoleStep(workingSnap) && (await waasRoleDomLooksComplete(page))) {
+      log?.layer("smart_fill", "unlock re-scan: Role DOM complete — stop", "info");
+      break;
+    }
+
+    await humanPause(450, 750);
+    let fresh;
+    try {
+      fresh = await inspectPage(page);
+      await enrichSnapWithWaasValidation(page, fresh);
+    } catch {
+      break;
+    }
+    if (workingSnap) {
+      workingSnap.customControls = fresh.customControls;
+      workingSnap.fields = fresh.fields;
+      workingSnap.waasValidation = fresh.waasValidation;
+      workingSnap.pageText = fresh.pageText;
+      workingSnap.fieldCount = fresh.fieldCount;
+      workingSnap.url = fresh.url || workingSnap.url;
+    } else {
+      workingSnap = fresh;
+      state.snap = fresh;
+    }
+
+    const fingerprint = (workingSnap.customControls || [])
+      .filter((c) => !c.filled)
+      .map((c) => `${c.mappedTo || c.type}:${c.widgetType}:${c.label || ""}`)
+      .sort()
+      .join("|");
+    if (fingerprint && fingerprint === prevFingerprint) {
+      log?.layer("smart_fill", "unlock re-scan: no new controls — stop", "debug");
+      break;
+    }
+    prevFingerprint = fingerprint;
+
+    const beforeCount = state.allFilled.length;
+    if (isWaasRoleStep(workingSnap)) {
+      const waasResult = await fillWaasRoleMissing(page, workingSnap, context, log);
+      if (waasResult.alreadyComplete) {
+        log?.layer("smart_fill", "unlock re-scan: Role already complete after inspect", "info");
+        break;
+      }
+      for (const entry of waasResult.filled || []) {
+        const key = `waas:${entry.field || entry.mappedTo}:${pass}`;
+        if (!state.seen.has(key)) {
+          state.seen.add(key);
+          state.allFilled.push(entry);
+        }
+        for (const c of workingSnap.customControls || []) {
+          if (String(c.mappedTo || "").toLowerCase() === String(entry.mappedTo || "").toLowerCase()) {
+            c.filled = true;
+          }
+        }
+      }
+    }
+
+    await applyCustomControlsResult(page, context, log, {
+      snap: workingSnap,
+      seen: state.seen,
+      allFilled: state.allFilled,
+      lastUnfilled: state.lastUnfilled,
+      hostname: workingSnap?.hostname || state.lastHostname,
+      pageCtx: state.pageCtx,
+      deferVoluntary: false,
+    });
+
+    const gained = state.allFilled.length - beforeCount;
+    log?.layer(
+      "smart_fill",
+      `unlock re-scan pass ${pass + 1}/${maxPasses}: +${gained} fill(s)`,
+      gained ? "info" : "debug",
+    );
+
+    if (gained === 0) break;
+    if (isStepComplete(workingSnap)) {
+      log?.layer("smart_fill", "unlock re-scan: step complete", "info");
+      break;
+    }
+  }
+  return workingSnap;
+}
+
+/**
  * Smart fill layer — heuristic DOM scoring + site mappings + optional AI fallback.
  */
 export async function runSmartFill(page, context, log = null, { sessionId = null, snap = null } = {}) {
@@ -298,7 +409,110 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     pageKind: snap?.pageKind,
   };
 
+  // WaaS Role step: authoritative serverErrors → direct field-name fill first.
+  if (snap && isWaasRoleStep(snap)) {
+    const waasResult = await fillWaasRoleMissing(page, snap, context, log);
+    for (const entry of waasResult.filled || []) {
+      const key = entry.field || entry.mappedTo;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        allFilled.push(entry);
+      }
+    }
+    if (waasResult.ok) {
+      for (const c of snap.customControls || []) {
+        const m = String(c.mappedTo || "").toLowerCase();
+        if (waasResult.filled.some((f) => f.mappedTo === m)) c.filled = true;
+      }
+    }
+  }
+
+  // WaaS Skills step: pick technologies + set Intermediate proficiency radios.
+  if (snap && isWaasSkillsStep(snap)) {
+    const skillsResult = await fillWaasSkillsMissing(page, snap, context, log);
+    for (const entry of skillsResult.filled || []) {
+      const key = `skills:${entry.field || entry.mappedTo}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allFilled.push(entry);
+      }
+    }
+    if (skillsResult.alreadyComplete || skillsResult.ok) {
+      for (const c of snap.customControls || []) {
+        if (String(c.mappedTo || "").toLowerCase() === "techskills") {
+          c.filled = Boolean(skillsResult.alreadyComplete || (await waasSkillsDomLooksComplete(page)));
+        }
+      }
+    }
+  }
+
+  // WaaS job-page Reach out modal — message ≥50 chars + optional location mismatch.
+  if (snap && isWaasReachOutStep(snap)) {
+    const reach = await fillWaasReachOutMissing(page, snap, context, log);
+    for (const entry of reach.filled || []) {
+      const key = `reach:${entry.type || entry.mappedTo}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allFilled.push(entry);
+      }
+    }
+    if (reach.ok || reach.alreadyComplete) {
+      for (const f of snap.fields || []) {
+        if (/textarea/i.test(String(f.type || ""))) f.filled = true;
+      }
+      const types = [...new Set(allFilled.map((x) => x.type || "?"))].sort();
+      return {
+        filled: allFilled,
+        filled_types: types,
+        unfilled: [],
+        unfilled_count: 0,
+        ai_filled: 0,
+        hostname: snap?.hostname || "",
+        site_mapped: ["waas_reach_out"],
+        required_unfilled: 0,
+        reach_out_ready: Boolean(reach.readyForSend || reach.alreadyComplete),
+        reach_out_sent: Boolean(reach.sent),
+      };
+    }
+  }
+
+  // Stepped wizards: chronological custom fill + CompletenessOracle gate.
+  // Native text/file passes below still run for Greenhouse-style / free-text steps.
+  let universalOk = false;
+  if (snap && looksLikeSteppedForm(snap)) {
+    const uni = await runUniversalFill(page, context, log, {
+      snap,
+      seen,
+      allFilled,
+      maxPasses: 2,
+      learnOnComplete: true,
+    });
+    if (uni.snap) snap = uni.snap;
+    universalOk = Boolean(uni.success);
+    if (universalOk && (isWaasRoleStep(snap) || isWaasSkillsStep(snap))) {
+      log?.layer(
+        "smart_fill",
+        `universal fill complete (${uni.reason}) — Role/Skills ready to advance`,
+        "info",
+      );
+      const types = [...new Set(allFilled.map((f) => f.type || "?"))].sort();
+      return {
+        filled: allFilled,
+        filled_types: types,
+        unfilled: [],
+        unfilled_count: 0,
+        ai_filled: 0,
+        hostname: snap?.hostname || "",
+        site_mapped: [],
+        required_unfilled: 0,
+        oracle_complete: true,
+        oracle_reason: uni.reason,
+      };
+    }
+  }
+
   const preferCustomFirst =
+    !universalOk &&
     snap &&
     (hasPreferencesGateFields(snap) ||
       (snap.customControls || []).some((c) => isEarlyCustomControl(c, pageCtx)));
@@ -413,11 +627,27 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     }
   }
 
+  // Mark controls we already filled so a late pass does not retype city/typeaheads.
+  const filledMappedEarly = new Set(
+    allFilled.map((f) => String(f.mappedTo || f.type || "").toLowerCase()).filter(Boolean),
+  );
+  if (snap?.customControls?.length && filledMappedEarly.size) {
+    for (const c of snap.customControls) {
+      if (filledMappedEarly.has(String(c.mappedTo || c.type || "").toLowerCase())) {
+        c.filled = true;
+      }
+    }
+  }
   const needsLateCustom =
-    !customRanEarly ||
-    allFilled.length === 0 ||
-    hasUnfilledYesNoOrEEOC(snap) ||
-    (snap?.customControls || []).some((c) => !c.filled);
+    !universalOk &&
+    (!customRanEarly ||
+      allFilled.length === 0 ||
+      hasUnfilledYesNoOrEEOC(snap) ||
+      (snap?.customControls || []).some(
+        (c) =>
+          !c.filled &&
+          !filledMappedEarly.has(String(c.mappedTo || c.type || "").toLowerCase()),
+      ));
   if (needsLateCustom) {
     await applyCustomControlsResult(page, context, log, {
       snap,
@@ -428,6 +658,27 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
       pageCtx,
       deferVoluntary: false,
     });
+  }
+
+  // Conditional unlock: re-inspect after fills so newly revealed fields (school,
+  // eng_type, role interest) are not skipped by a one-pass model.
+  if (!universalOk && (snap || allFilled.length > 0)) {
+    snap = await unlockRescanAndRefill(page, context, log, {
+      snap,
+      seen,
+      allFilled,
+      lastUnfilled,
+      pageCtx,
+      lastHostname: lastResult.hostname,
+    });
+  }
+
+  // Oracle gate after native + custom — do not learn requiredOrder until verified advance.
+  if (snap && looksLikeSteppedForm(snap)) {
+    const oracle = await assessCompleteness(page, snap, { filled: allFilled });
+    if (oracle.complete) {
+      log?.layer("smart_fill", `oracle complete (${oracle.reason})`, "info");
+    }
   }
 
   let aiAnswers = {};
@@ -448,11 +699,23 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
   }
   if (getSettings().ai_fill_enabled && lastUnfilled.length && answerUnfilled) {
     // Prefer truly required unfilled for the AI budget; voluntary EEOC last.
+    // Never hand city/typeahead/custom-controls to AI — it paints whole form divs.
+    const aiSafe = (u) => {
+      const mapped = String(u.mappedTo || u.type || "").toLowerCase();
+      const widget = String(u.widgetType || "").toLowerCase();
+      const sel = String(u.selector || "");
+      if (["location", "relocatelocations", "salary", "desiredtitle"].includes(mapped)) return false;
+      if (widget === "typeahead" || widget === "combobox" || widget === "radio" || widget === "yesno") {
+        return false;
+      }
+      if (/^div\s*>/i.test(sel) && /form/i.test(sel)) return false;
+      return true;
+    };
     const requiredFirst = [
       ...detectRequiredUnfilled(lastUnfilled, pageCtx),
       ...lastUnfilled.filter((u) => !looksRequiredish(u, pageCtx) && !isVoluntaryField(u, pageCtx)),
       ...lastUnfilled.filter((u) => isVoluntaryField(u, pageCtx)),
-    ];
+    ].filter(aiSafe);
     const orderedUnfilled = requiredFirst.filter(
       (u, i, arr) => arr.findIndex((x) => x.selector === u.selector) === i,
     );
@@ -464,8 +727,10 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     aiAnswers = await answerUnfilled(context, { unfilled: orderedUnfilled, sessionId });
     for (const entry of orderedUnfilled) {
       const selector = entry.selector || "";
-      const value = aiAnswers[selector];
+      let value = aiAnswers[selector];
       if (!selector || !value || seen.has(selector)) continue;
+      value = sanitizeExperienceValue(value, entry);
+      if (!value) continue;
       const longText = value.length > getSettings().human_long_text_threshold;
       if (await fillViaPlaywright(page, selector, value, { longText })) {
         seen.add(selector);
@@ -475,13 +740,65 @@ export async function runSmartFill(page, context, log = null, { sessionId = null
     }
   }
 
+  // Semantic option-resolver — unmapped choice groups (radio / select / checkbox)
+  // the deterministic vocabulary never claimed. The model picks from the REAL,
+  // visible options (grounded), so it cannot invent free-text values.
+  const answerChoice = getRuntime().answerChoiceFields;
+  if (getSettings().ai_fill_enabled && answerChoice) {
+    const choiceControls = collectUnmappedChoiceControls(snap, seen);
+    if (choiceControls.length) {
+      const requiredHints = requiredHintsFromSnap(snap);
+      log?.layer(
+        "smart_fill",
+        `choice resolver for ${choiceControls.length} unmapped group(s)${requiredHints.length ? ` (required: ${requiredHints.join(", ")})` : ""}`,
+        "info",
+      );
+      let choiceAnswers = {};
+      try {
+        choiceAnswers =
+          (await answerChoice(context, {
+            choices: buildChoiceSpecs(choiceControls),
+            requiredHints,
+            sessionId,
+          })) || {};
+      } catch {
+        choiceAnswers = {};
+      }
+      for (const ctrl of choiceControls) {
+        const selector = ctrl.selector || ctrl.triggerSelector || "";
+        const chosen = choiceAnswers[selector];
+        if (!selector || !chosen || seen.has(selector)) continue;
+        if (await applyResolvedChoice(page, ctrl, chosen, log, snap)) {
+          seen.add(selector);
+          ctrl.filled = true;
+          allFilled.push({ type: "choice", mappedTo: "choice", selector, score: 0, source: "choice_ai" });
+          log?.layer("smart_fill", `choice filled → ${String(chosen).slice(0, 40)} @ ${selector.slice(0, 60)}`, "info");
+        }
+      }
+    }
+  }
+
   // Leftover required — one Stagehand nudge (apply fields only), never footer noise.
-  const stillRequired = detectRequiredUnfilled(
-    (lastUnfilled || []).filter((u) => !seen.has(u.selector)),
-    pageCtx,
-  );
+  // Skip when CompletenessOracle already says the wizard step is done.
+  let oracleDone = universalOk;
+  if (!oracleDone && snap && looksLikeSteppedForm(snap)) {
+    try {
+      const o = await assessCompleteness(page, snap, { filled: allFilled });
+      oracleDone = o.complete;
+    } catch {
+      oracleDone = false;
+    }
+  }
+  const stillRequired = oracleDone
+    ? []
+    : detectRequiredUnfilled(
+        (lastUnfilled || []).filter((u) => !seen.has(u.selector)),
+        pageCtx,
+      );
   if (stillRequired.length && canUseStagehand(context).ok) {
-    const instruction = buildRequiredFieldsInstruction(stillRequired, pageCtx);
+    const instruction = isWaasRoleStep(snap)
+      ? buildWizardAdvanceInstruction(snap, context)
+      : buildRequiredFieldsInstruction(stillRequired, pageCtx);
     if (instruction) {
       log?.layer("smart_fill", `Stagehand required pass (${stillRequired.length})`, "info");
       await attemptStagehandAct(page, context, { instruction, log }).catch(() => null);

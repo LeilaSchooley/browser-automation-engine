@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <!--
+      WaaS /application/role with a job_type checkbox group
+      (Full-time employee / Contractor / Cofounder) plus an unmapped choice
+      group (work schedule) for the semantic option-resolver. serverErrors names
+      the authoritative required fields: role, in_school, job_type.
+    -->
+    <div
+      data-page='{"props":{"sectionAppProps":{"activeSection":"role","serverErrors":{"role":["is missing"],"in_school":["is missing"],"job_type":["is missing"]},"sectionInfo":[{"name":"role","status":"current"}]}}}'
+    >
+      <h1>Role</h1>
+      <form>
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What job function best fits what you're looking for?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="radio" name="job_function" value="eng" />Engineering</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="job_function" value="design" />Design</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="job_function" value="product" />Product</label>
+          </div>
+          <span class="text-red-500">Required</span>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >Are you a full-time student at a school or bootcamp?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5"><label><input type="radio" name="student" value="yes" />Yes</label></div>
+          <div class="my-0.5"><label><input type="radio" name="student" value="no" />No</label></div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What type of role are you looking for?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type[]" value="fulltime" />Full-time employee</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type[]" value="contractor" />Contractor</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type[]" value="cofounder" />Cofounder</label>
+          </div>
+          <span class="text-red-500">Required</span>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold">What is your preferred work schedule?</label>
+          <div class="my-0.5">
+            <label><input type="radio" name="work_schedule" value="flexible" />Flexible hours</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="work_schedule" value="fixed" />Fixed nine to five</label>
+          </div>
+        </div>
+
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+  </body>
+</html>

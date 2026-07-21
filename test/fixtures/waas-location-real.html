@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body class="bg-beige-light">
+    <!--
+      Structural copy of the real https://www.workatastartup.com/application/location
+      DOM (captured 2026-07-20): Google Places city typeahead with the dropdown OPEN
+      and raw search text (not committed), four screening radios that HAVE `name`
+      attributes but sit in bare `<div class="mb-4">` blocks, remote/relocate
+      pre-checked with defaults, and an always-enabled Continue submit button.
+    -->
+    <div>
+      <h1>Location</h1>
+      <form>
+        <div class="mb-2 mt-8">
+          <div class="mb-4 ">
+            <label class="mb-1 block font-bold"
+              >What city do you live in?<span class="text-red-500"> *</span></label
+            >
+            <div id="PlacesAutocomplete__root" style="position: relative">
+              <input
+                autocomplete="off"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-controls="PlacesAutocomplete__autocomplete-container"
+                aria-expanded="true"
+                aria-haspopup="true"
+                placeholder="Search ..."
+                class="w-full rounded border-gray-300"
+                type="text"
+                value="LONDON"
+                name="city_current"
+              />
+              <div role="listbox" id="PlacesAutocomplete__autocomplete-container">
+                <div id="opt-1" role="option"><div>London, UK</div></div>
+                <div id="opt-2" role="option"><div>London, ON, Canada</div></div>
+                <div id="opt-3" role="option"><div>London, KY, USA</div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mb-4 ">
+            <label class="mb-1 block font-bold"
+              >Are you legally authorized to work in the United States?<span class="text-red-500">
+                *</span
+              ><p class="!mb-0 font-light text-sm text-gray-500">
+                You are a US citizen, already have an employment visa (O1, H1B, etc.), or are
+                specifically covered under a TN/H1-B1/E-3.
+              </p></label
+            >
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="yes" name="us_authorized" />Yes</label
+              >
+            </div>
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="no" name="us_authorized" />No</label
+              >
+            </div>
+          </div>
+
+          <div class="mb-4 ">
+            <label class="mb-1 block font-bold"
+              >Do you require visa sponsorship to work legally in the United States (now or in the
+              future)?<span class="text-red-500"> *</span><p class="!mb-0 font-light text-sm text-gray-500">
+                This includes needing sponsorship for CPT, OPT or other visa types to work in the US.
+              </p></label
+            >
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="yes" name="us_visa_sponsorship" />Yes</label
+              >
+            </div>
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="no" name="us_visa_sponsorship" />No</label
+              >
+            </div>
+          </div>
+
+          <div class="mb-4 ">
+            <label class="mb-1 block font-bold"
+              >Are you open to working remotely?<span class="text-red-500"> *</span></label
+            >
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="no" checked="" name="remote" />I don't want to work
+                remotely</label
+              >
+            </div>
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="yes" name="remote" />I'm open to working remotely</label
+              >
+            </div>
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="only" name="remote" />I only want to work remotely</label
+              >
+            </div>
+          </div>
+
+          <div class="mb-4 ">
+            <label class="mb-1 block font-bold"
+              >Are you willing to relocate?<span class="text-red-500"> *</span></label
+            >
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="no" checked="" name="relocate" />No</label
+              >
+            </div>
+            <div class="my-0.5">
+              <label class="flex cursor-pointer items-center font-normal"
+                ><input type="radio" value="yes" name="relocate" />Yes</label
+              >
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <button type="button">Back</button>
+          <button class="ml-auto" type="submit"><span>Continue</span></button>
+        </div>
+      </form>
+    </div>
+    <script>
+      const city = document.getElementById("city") || document.querySelector('input[name="city_current"]');
+      const listbox = document.getElementById("PlacesAutocomplete__autocomplete-container");
+      // Selecting a Places option commits the "City, Region" chip and closes the dropdown.
+      listbox.querySelectorAll('[role="option"]').forEach((opt) => {
+        opt.addEventListener("click", () => {
+          city.value = opt.textContent.replace(/\s+/g, " ").trim();
+          city.setAttribute("aria-expanded", "false");
+          listbox.style.display = "none";
+        });
+      });
+    </script>
+  </body>
+</html>

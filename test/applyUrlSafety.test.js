@@ -8,8 +8,10 @@ import {
   isQueueableApplyUrl,
   isSocialSsoCta,
   isSuspiciousApplyHost,
+  isBoardHomepageUrl,
   looksLikeAggregatorTrap,
   looksLikeDeadApplyDestination,
+  looksLikeJobGoneBoardHomepage,
   shouldBlockApplyNavigation,
 } from "../src/layers/applyUrlSafety.js";
 import { classifyApplyStep } from "../src/layers/applyStep.js";
@@ -23,6 +25,104 @@ describe("applyUrlSafety", () => {
   it("detects chrome error pages", () => {
     assert.equal(isChromeErrorPage("chrome-error://chromewebdata/", "careersprint.7f.liveblog365.com"), true);
     assert.equal(isChromeErrorPage("https://boards.greenhouse.io/acme/jobs/1", "Apply"), false);
+  });
+
+  it("treats Apply→board homepage redirect as job gone", () => {
+    assert.equal(isBoardHomepageUrl("https://weworkremotely.com/"), true);
+    assert.equal(isBoardHomepageUrl("https://weworkremotely.com/remote-jobs/foo-bar"), false);
+    assert.equal(isBoardHomepageUrl("https://jobs.lever.co/acme"), true);
+    assert.equal(isBoardHomepageUrl("https://jobs.lever.co/acme/abc-123"), false);
+    assert.equal(isBoardHomepageUrl("https://boards.greenhouse.io/acme"), true);
+    assert.equal(isBoardHomepageUrl("https://example.com/careers"), true);
+    const snap = {
+      url: "https://weworkremotely.com/",
+      hostname: "weworkremotely.com",
+      title: "We Work Remotely: Advanced Remote Job Search",
+      pageText: "Find Jobs. Post a job. Top 100 Remote Companies. Search by Job Category.",
+      pageKind: "content",
+      fieldCount: 0,
+      entryCount: 0,
+      bodyTextLength: 8000,
+    };
+    const history = [{ action: "click_apply", ok: true, progress: true }];
+    const gone = looksLikeJobGoneBoardHomepage(snap, history);
+    assert.equal(gone.dead, true);
+    assert.match(gone.reason, /board homepage|job listing gone/i);
+    const dead = looksLikeDeadApplyDestination(snap, history);
+    assert.equal(dead.dead, true);
+  });
+
+  it("treats Apply→any board root as job gone (not only WWR)", () => {
+    const history = [{ action: "click_apply", ok: true, progress: true }];
+    const leverHome = looksLikeJobGoneBoardHomepage(
+      {
+        url: "https://jobs.lever.co/acme",
+        hostname: "jobs.lever.co",
+        title: "Acme Jobs",
+        pageText: "Open positions Browse all jobs",
+        pageKind: "listing",
+        fieldCount: 0,
+        entryCount: 0,
+        bodyTextLength: 3000,
+      },
+      history,
+      { startUrl: "https://jobs.lever.co/acme/senior-engineer-123" },
+    );
+    assert.equal(leverHome.dead, true);
+
+    const careersHub = looksLikeJobGoneBoardHomepage(
+      {
+        url: "https://careers.example.com/careers",
+        hostname: "careers.example.com",
+        title: "Careers",
+        pageText: "Join our team. View all jobs.",
+        pageKind: "content",
+        fieldCount: 0,
+        bodyTextLength: 2000,
+      },
+      history,
+      { startUrl: "https://findwork.dev/job/abc-remote-role" },
+    );
+    assert.equal(careersHub.dead, true);
+  });
+
+  it("does not treat homepage as gone when the job lives on the homescreen", () => {
+    const history = [{ action: "click_apply", ok: true, progress: true }];
+    const snap = {
+      url: "https://startup.example.com/",
+      hostname: "startup.example.com",
+      title: "Senior Engineer — Startup",
+      headings: "Senior Engineer Apply now",
+      pageText: "Senior Engineer Full-time Remote Apply now Submit your resume",
+      pageKind: "apply",
+      fieldCount: 4,
+      entryCount: 1,
+      bodyTextLength: 1200,
+    };
+    const gone = looksLikeJobGoneBoardHomepage(snap, history, {
+      startUrl: "https://startup.example.com/",
+      jobTitle: "Senior Engineer",
+    });
+    assert.equal(gone.dead, false);
+  });
+
+  it("does not treat homepage as gone when job title is the main heading (no form yet)", () => {
+    const history = [{ action: "click_apply", ok: true, progress: true }];
+    const snap = {
+      url: "https://startup.example.com/",
+      hostname: "startup.example.com",
+      title: "Careers",
+      headings: "Staff Platform Engineer",
+      pageText: "Staff Platform Engineer About the role",
+      pageKind: "content",
+      fieldCount: 0,
+      entryCount: 0,
+      bodyTextLength: 900,
+    };
+    const gone = looksLikeJobGoneBoardHomepage(snap, history, {
+      jobTitle: "Staff Platform Engineer",
+    });
+    assert.equal(gone.dead, false);
   });
 
   it("flags suspicious apply hosts", () => {

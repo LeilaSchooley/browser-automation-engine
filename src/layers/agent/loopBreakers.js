@@ -54,6 +54,13 @@ export function applyLoopBreakers({
         reason: "continue loop broken — fill before Next",
         source: "loop-breaker",
       };
+    } else if ((snap.customControls || []).some((c) => c.filled && /typeahead|combobox/i.test(c.widgetType || ""))) {
+      // Location step looks filled but Continue thrashing — commit, don't re-fill.
+      next = {
+        type: "commit_step",
+        reason: "continue loop broken — commit typeahead before retry",
+        source: "loop-breaker",
+      };
     } else if ((context?.submitUrl || context?.startUrl) && !history.some((h) => h.action === "nav_recovery")) {
       next = {
         type: "nav_recovery",

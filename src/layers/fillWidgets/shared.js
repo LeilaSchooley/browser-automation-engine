@@ -196,6 +196,11 @@ export function resolveValueForControl(mappedTo, label, context) {
   const byMapped = {
     // City typeaheads match better on the city token than "City, country".
     location: prefs.city || prefs.location,
+    relocatelocations:
+      prefs.relocateLocations ||
+      prefs.relocate_locations ||
+      prefs.city ||
+      prefs.location,
     desiredtitle: prefs.desiredTitle,
     salary: prefs.salary,
     country: prefs.country,

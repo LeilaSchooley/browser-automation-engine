@@ -427,11 +427,25 @@ export function buildActionCatalog(snap, fillResult, history = [], context = {},
       let continueScore = 58;
       if (shouldAutoAdvance(snap, fillResult)) continueScore = 88;
       if (looksLikeSteppedForm(snap) && currentStepIncomplete(snap, fillResult)) continueScore = 35;
+      if (top.disabled) {
+        // Disabled Continue (YC relocate cities, etc.) — keep filling, don't thrash clicks.
+        continueScore = Math.min(continueScore, 28);
+        actions.push({
+          id: "smart_fill_before_continue",
+          type: "smart_fill",
+          score: 86,
+          reason: "continue disabled — fill remaining typeahead/required fields",
+          step: "form",
+        });
+      } else if (looksLikeSteppedForm(snap)) {
+        // Continue is enabled — Places/city snap.filled flags are often stale; advance.
+        continueScore = Math.max(continueScore, 90);
+      }
       actions.push({
         id: "click_continue",
         type: "click_continue",
         score: continueScore,
-        reason: shouldAutoAdvance(snap, fillResult)
+        reason: shouldAutoAdvance(snap, fillResult) || !top.disabled
           ? `step complete — ${top.text || "Next"}`
           : `continue: ${top.text || "Next"}`,
         targetCandidate: top,

@@ -32,12 +32,22 @@ export const LOGICAL_TYPE_BAND = {
   citystatezip: 34,
   country: 35,
   location: 36,
+  relocatelocations: 37,
   company: 38,
   currentcompany: 38,
   desiredtitle: 40,
   linkedin: 45,
   linkedinurl: 45,
   website: 46,
+  githuburl: 47,
+  github: 47,
+  jobfunction: 48,
+  engroles: 48,
+  employmenttype: 49,
+  fulltimestudent: 50,
+  school: 51,
+  schoolname: 51,
+  techskills: 53,
   salary: 55,
   formeremployee: 56,
   employeetenure: 56,
@@ -68,7 +78,7 @@ const PRIORITY_IDENTITY_RE =
 
 /** Employer affiliation cards (Trevor-style) — usually required for external applicants. */
 export const COMPANY_AFFILIATION_RE =
-  /\bcurrent or former employee\b|\bformer employee of\b|are you (a |an )?(current|former)\s+employee\b|\bvolunteer\b|\bcontractor\b|third[\s-]party|related to an employee|been in your position for at least/i;
+  /\bcurrent or former employee\b|\bformer employee of\b|are you (a |an )?(current|former)\s+employee\b|\bvolunteer\b|\b(?:are|were|is|as an?|been an?|current(?:ly)?|former(?:ly)?)\b[^?.!]{0,60}\bcontractor\b|third[\s-]party|related to an employee|been in your position for at least/i;
 
 /** Voluntary EEOC / diversity self-ID — fill after required application fields. */
 export const VOLUNTARY_FIELD_RE =
@@ -311,6 +321,28 @@ export function detectRequiredUnfilled(fields, ctx = {}) {
   );
 }
 
+const EXPERIENCE_LABEL_RE =
+  /years?\s+of\s+(professional\s+)?(experience|work)|how many years|years?\s+(of\s+)?experience|professional experience/i;
+
+export function looksLikeExperienceField(field = {}) {
+  const blob = `${field.clue || ""} ${field.label || ""} ${field.name || ""} ${field.placeholder || ""} ${field.questionLabel || ""}`;
+  return EXPERIENCE_LABEL_RE.test(blob) || /^experience$/i.test(String(field.name || ""));
+}
+
+export function isLikelyCalendarYear(value) {
+  const n = Number(String(value || "").replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) && n >= 1900 && n <= 2100 && Number.isInteger(n);
+}
+
+/** Replace a hallucinated calendar year in years-of-experience with a sane default. */
+export function sanitizeExperienceValue(value, field = {}, defaultYears = "3") {
+  if (value == null) return value;
+  const v = String(value).trim();
+  if (!v) return v;
+  if (looksLikeExperienceField(field) && isLikelyCalendarYear(v)) return String(defaultYears);
+  return v;
+}
+
 export function buildRequiredFieldsInstruction(fields, ctx = {}) {
   const req = detectRequiredUnfilled(fields, ctx).slice(0, 12);
   if (!req.length) return "";
@@ -318,12 +350,17 @@ export function buildRequiredFieldsInstruction(fields, ctx = {}) {
     .map((f) => f.label || f.clue || f.name || f.mappedTo || f.type || "field")
     .map((s) => String(s).replace(/\s+/g, " ").trim().slice(0, 60))
     .filter(Boolean);
+  const hasExperience = req.some((f) => looksLikeExperienceField(f));
   return (
     `Fill these REQUIRED job-application fields in order (skip footer/nav/newsletter): ` +
     `${labels.join(" → ")}. ` +
     `For employee/volunteer/contractor/related-to-employee questions prefer No. ` +
     `Defer voluntary EEOC / self-identify until after required fields. ` +
-    `Use He/him for pronouns when shown. Do not submit.`
+    `Use He/him for pronouns when shown. ` +
+    (hasExperience
+      ? `For years-of-experience fields use a small number like 3 (never a calendar year such as 2022). `
+      : "") +
+    `Do not submit.`
   );
 }
 

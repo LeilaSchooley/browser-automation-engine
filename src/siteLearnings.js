@@ -549,6 +549,9 @@ export function recordSiteLearning(hostname, patch) {
   if (patch.situationSkills) {
     merged.situationSkills = mergeSituationSkills(prev.situationSkills, patch.situationSkills);
   }
+  if (patch.stepStructures) {
+    merged.stepStructures = { ...(prev.stepStructures || {}), ...patch.stepStructures };
+  }
 
   store.hosts[key] = {
     ...merged,

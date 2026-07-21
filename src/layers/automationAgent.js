@@ -4,6 +4,7 @@ import {
   detectCaptcha,
   waitForCaptchaClear,
   looksLikeCaptchaReason,
+  probeCaptchaAfterAction,
 } from "../captchaDetect.js";
 import { humanPause, humanPauseInterruptible } from "../human.js";
 import { uploadDiscoveredFile } from "./domActions.js";
@@ -35,13 +36,25 @@ import {
   shouldPreferStagehand,
 } from "./stagehandPolicy.js";
 import { fillCustomControls } from "../fillCustomControls.js";
-import { looksLikeHardGate, looksLikeAuthForm } from "./authActions.js";
+import { looksLikeHardGate } from "./authActions.js";
 import { looksLikeSignupForm } from "./signupActions.js";
 import {
   currentStepIncomplete,
+  hasEnabledContinue,
+  isStepComplete,
+  locationTypeaheadCommitted,
   looksLikeSteppedForm,
   planAfterContinue,
+  wizardAdvanced,
 } from "./steppedForm.js";
+import { decideWizardPlan, planAfterWizardContinue, buildWizardAdvanceInstruction } from "./wizardLoop.js";
+import { assessCompletenessFromSnap } from "./CompletenessOracle.js";
+import { looksLikeReachOutModal } from "../patterns/outreach.js";
+import { detectAuthWallFromSnap } from "../patterns/authWall.js";
+import { handleAuthWall } from "./authWall.js";
+import { needsApplyCtaDiscovery, clickApplyOrHandoff } from "./applyCta.js";
+import { classifyPageRoleFromSnap } from "./classifyPageRole.js";
+import { fillProfileSetup } from "./profileFill.js";
 import { recordSiteLearning, loadSiteLearnings, affordanceSkillFromAct } from "../siteLearnings.js";
 import { recordCachedPlan } from "./actionPlanCache.js";
 import { recordEngineEvent, captureDebugScreenshot } from "../observability.js";
@@ -63,6 +76,8 @@ import {
 } from "./semanticRecovery.js";
 import { tryAdoptFormIframe } from "./iframeAdopt.js";
 import { decideWithActionBrain } from "./actionBrain.js";
+import { looksLikeOtpWall } from "../inboxOtp.js";
+import { handleOtp } from "../patterns/otpHandler.js";
 import { applyLoopBreakers } from "./agent/loopBreakers.js";
 import {
   scoreStepProgress,
@@ -71,6 +86,14 @@ import {
   evaluateReadyForReview,
 } from "./agent/progressAndDone.js";
 import { applyTabHygieneAfterClick, applyHostHop } from "./agent/tabAndHop.js";
+
+function shortUrlPath(url = "") {
+  try {
+    return new URL(String(url || "")).pathname || "";
+  } catch {
+    return String(url || "").slice(0, 80);
+  }
+}
 
 export async function decideNextAction(snap, fillResult, history, context, page = null) {
   return decideWithActionBrain(snap, fillResult, history, context, page);
@@ -182,6 +205,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
   const stopRequested = () => Boolean(shouldStop?.()) || sessionGone();
   /** After Continue/Next opens a new wizard panel — force fill before another advance. */
   let pendingSteppedFill = null;
+  /** Queued by wizard SM when Continue fails to leave the current step. */
+  let pendingWizardPlan = null;
+  let wizardStuckCount = 0;
 
   for (let step = 1; step <= maxSteps; step++) {
     if (sessionGone()) {
@@ -210,21 +236,28 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     {
-      const challenge = await detectCaptcha(page).catch(() => ({ detected: false }));
-      if (challenge.detected) {
-        log.layer("agent", `captcha — ${challenge.reason} — waiting for manual solve`, "warn");
-        const cleared = await waitForCaptchaClear(page, sessionId, { initial: challenge });
-        history.push({
-          step,
-          action: cleared ? "captcha_wait" : "wait_user",
-          applyStep: "blocked",
-          ok: cleared,
-          progress: cleared,
-          reason: challenge.reason,
-        });
-        if (!cleared) break;
-        consecutiveNoProgress = 0;
-        continue;
+      // Prefer OTP / passcode walls over stale CAPTCHA iframes left in the DOM.
+      const earlySnap = await inspectPage(page).catch(() => null);
+      const earlyRole = earlySnap ? classifyPageRoleFromSnap(earlySnap, agentContext) : null;
+      if (earlyRole?.role === "otp" || (earlySnap && looksLikeOtpWall(earlySnap))) {
+        log.layer("agent", "otp wall detected — skipping captcha wait", "info");
+      } else {
+        const challenge = await detectCaptcha(page, { snap: earlySnap }).catch(() => ({ detected: false }));
+        if (challenge.detected) {
+          log.layer("agent", `captcha — ${challenge.reason} — waiting for manual solve`, "warn");
+          const cleared = await waitForCaptchaClear(page, sessionId, { initial: challenge });
+          history.push({
+            step,
+            action: cleared ? "captcha_wait" : "wait_user",
+            applyStep: "blocked",
+            ok: cleared,
+            progress: cleared,
+            reason: challenge.reason,
+          });
+          if (!cleared) break;
+          consecutiveNoProgress = 0;
+          continue;
+        }
       }
     }
 
@@ -234,7 +267,20 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     recordEngineEvent("agent_step", { step, url: snap.url, pageKind: snap.pageKind, perceptionDiff: perception?.diff });
     lastSnap = snap;
 
-    const deadDestination = looksLikeDeadApplyDestination(snap);
+    const deadDestination = looksLikeDeadApplyDestination(snap, history, {
+      startUrl: agentContext.startUrl || url || "",
+      jobTitle:
+        agentContext.job?.title ||
+        agentContext.listingTitle ||
+        agentContext.jobTitle ||
+        agentContext.title ||
+        "",
+      company:
+        agentContext.job?.company ||
+        agentContext.jobCompany ||
+        agentContext.company ||
+        "",
+    });
     if (deadDestination.dead) {
       log.layer("agent", `dead apply destination — ${deadDestination.reason}`, "warn");
       history.push({
@@ -283,7 +329,226 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     let plan;
     let classification;
     let decision;
-    if (pendingSteppedFill) {
+
+    // Auth wall — only on strong auth surfaces (never Findwork/job listings).
+    const authState = detectAuthWallFromSnap(snap);
+    if (authState.isAuthWall) {
+      log.layer("agent", `auth wall check — ${authState.reason}`, "debug");
+      const wall = await handleAuthWall(page, snap, agentContext, log, { history });
+      if (wall.handled) {
+        const after = wall.snap || (await inspectPage(page).catch(() => snap));
+        lastSnap = after;
+        history.push({
+          step,
+          action: wall.mode === "login" ? "auth_login" : wall.mode === "register" ? "auth_signup" : "wait_user",
+          applyStep: wall.handoff ? "blocked" : "auth",
+          ok: Boolean(wall.ok),
+          progress: Boolean(wall.ok),
+          fingerprint: pageFingerprint(after),
+          existingAccount: Boolean(wall.existingAccount),
+          learnings: wall.learnings,
+          authWall: true,
+          reason: wall.reason || wall.mode,
+          source: "auth-wall",
+        });
+        if (wall.handoff || (!wall.ok && wall.mode === "handoff")) {
+          log.layer(
+            "agent",
+            `handoff: auth wall — ${wall.reason || "complete login manually"}`,
+            "warn",
+          );
+          break;
+        }
+        if (wall.ok) {
+          consecutiveNoProgress = 0;
+          snap = after;
+          continue;
+        }
+        plan = {
+          type: wall.existingAccount || wall.mode === "login" ? "auth_login" : "auth_signup",
+          reason: `auth wall — ${wall.reason || wall.mode}`,
+          source: "auth-wall",
+        };
+        classification = { step: "auth", confidence: "high", reason: plan.reason };
+        decision = { path: "auth-wall", reason: plan.reason };
+      }
+    } else if (authState.reason === "job_listing") {
+      log.layer("agent", "auth wall skipped — job_listing", "debug");
+    }
+
+    // Modular page-role routing (profile setup before generic wizard/smart_fill).
+    if (!plan) {
+      const pageRole = classifyPageRoleFromSnap(snap, agentContext);
+      if (pageRole.role !== "unknown" && pageRole.role !== "job_application") {
+        log.layer("agent", `page role = ${pageRole.role} (${pageRole.reason})`, "info");
+      }
+
+      if (pageRole.role === "otp") {
+        const otpResult = await handleOtp(page, snap, log, { sessionId, context: agentContext });
+        const after = otpResult.snap || (await inspectPage(page).catch(() => snap));
+        lastSnap = after;
+        history.push({
+          step,
+          action: otpResult.status === "otp_submitted" ? "enter_otp" : "wait_user",
+          applyStep: otpResult.status === "otp_submitted" ? "enter_otp" : "blocked",
+          ok: Boolean(otpResult.ok),
+          progress: Boolean(otpResult.ok),
+          fingerprint: pageFingerprint(after),
+          source: "otp-handler",
+          reason: otpResult.reason,
+        });
+        if (otpResult.ok) {
+          consecutiveNoProgress = 0;
+          snap = after;
+          continue;
+        }
+        log.layer(
+          "agent",
+          `handoff: OTP / passcode required — paste code in dashboard or browser (${otpResult.reason})`,
+          "warn",
+        );
+        break;
+      }
+
+      if (pageRole.role === "profile_setup") {
+        const profileResult = await fillProfileSetup(page, snap, agentContext, log, { sessionId });
+        const after = profileResult.snap || (await inspectPage(page).catch(() => snap));
+        lastSnap = after;
+        if (profileResult.filled?.length) {
+          fillResult = {
+            ...fillResult,
+            filled: [...(fillResult.filled || []), ...profileResult.filled],
+          };
+        }
+        const reallyAdvanced = Boolean(profileResult.advanced);
+        const stuck =
+          Boolean(profileResult.stuckOnStep) ||
+          (/\/onboarding\//i.test(String(after.url || "")) &&
+            !reallyAdvanced &&
+            history.filter(
+              (h) =>
+                h.source === "profile-setup" &&
+                h.urlPath === shortUrlPath(after.url) &&
+                !h.progress,
+            ).length >= 1);
+        history.push({
+          step,
+          action: "smart_fill",
+          applyStep: "form",
+          ok: Boolean(profileResult.ok),
+          progress: reallyAdvanced,
+          fingerprint: pageFingerprint(after),
+          urlPath: shortUrlPath(after.url),
+          source: "profile-setup",
+          reason: profileResult.reason,
+          fillResult,
+        });
+        if (stuck) {
+          log.layer(
+            "agent",
+            `handoff: profile onboarding stuck on ${shortUrlPath(after.url) || "step"} — complete it in the browser`,
+            "warn",
+          );
+          history.push({
+            step,
+            action: "wait_user",
+            applyStep: "blocked",
+            ok: true,
+            progress: false,
+            fingerprint: pageFingerprint(after),
+            source: "profile-setup",
+            reason: "profile onboarding continue stuck — handoff",
+          });
+          break;
+        }
+        if (profileResult.ok || reallyAdvanced) {
+          if (reallyAdvanced) consecutiveNoProgress = 0;
+          else consecutiveNoProgress += 1;
+          snap = after;
+          // Stay in onboarding only when we actually moved to a new step.
+          if (reallyAdvanced && /\/onboarding\//i.test(String(after.url || ""))) {
+            continue;
+          }
+          if (reallyAdvanced) continue;
+          // Filled but same step — try one more agent cycle (smart_fill fallthrough) then handoff.
+          if (consecutiveNoProgress >= 2) {
+            log.layer(
+              "agent",
+              "handoff: profile setup not advancing — complete onboarding in the browser",
+              "warn",
+            );
+            break;
+          }
+          continue;
+        }
+        // Incomplete — fall through once to normal smart_fill / handoff paths.
+        plan = {
+          type: "smart_fill",
+          reason: "profile setup incomplete — retry fill",
+          source: "profile-setup",
+        };
+        classification = { step: "form", confidence: "high", reason: plan.reason };
+        decision = { path: "profile-setup", reason: plan.reason };
+      }
+    }
+
+    // Zero-field job detail — find Apply/Reach out before Stagehand board mop-up.
+    if (!plan && needsApplyCtaDiscovery(snap)) {
+      const cta = await clickApplyOrHandoff(page, snap, agentContext, log, { history });
+      const advanced = Boolean(cta.advanced);
+      history.push({
+        step,
+        action: cta.clicked ? "click_apply" : "wait_user",
+        applyStep: advanced ? "entry" : cta.clicked ? "blocked" : "blocked",
+        ok: Boolean(cta.clicked),
+        clicked: Boolean(cta.clicked),
+        advanced,
+        progress: advanced,
+        stuck: Boolean(cta.stuck),
+        fingerprint: pageFingerprint(cta.before || snap),
+        applyCta: true,
+        source: "apply-cta",
+        reason: cta.reason || cta.source,
+      });
+      if (cta.handoff || cta.stuck || !cta.clicked || !advanced) {
+        log.layer(
+          "agent",
+          `handoff: ${cta.reason || "apply_cta_no_advance"} — complete Apply in the browser`,
+          "warn",
+        );
+        break;
+      }
+      consecutiveNoProgress = 0;
+      snap = cta.after || cta.snap || (await inspectPage(page).catch(() => snap));
+      lastSnap = snap;
+      continue;
+    }
+
+    if (!plan && looksLikeReachOutModal(snap)) {
+      // Job-page Reach out — never Stagehand-click Apply; smart_fill owns message + ack.
+      plan = {
+        type: "smart_fill",
+        reason: "reach-out modal — fill ≥50-char message + location-mismatch ack",
+        source: "reach-out",
+      };
+      classification = {
+        step: "form",
+        confidence: "high",
+        reason: plan.reason,
+      };
+      decision = { path: "reach-out", reason: plan.reason };
+      log.layer("agent", plan.reason, "info");
+    } else if (!plan && pendingWizardPlan) {
+      plan = pendingWizardPlan;
+      classification = {
+        step: "form",
+        confidence: "high",
+        reason: plan.reason,
+      };
+      decision = { path: "wizard", reason: plan.reason, situation: plan.type };
+      pendingWizardPlan = null;
+      log.layer("agent", plan.reason, "info");
+    } else if (!plan && pendingSteppedFill) {
       plan = pendingSteppedFill;
       classification = {
         step: "form",
@@ -293,7 +558,29 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       decision = { path: "stepped-form", reason: plan.reason };
       pendingSteppedFill = null;
       log.layer("agent", plan.reason, "info");
-    } else {
+    } else if (!plan && looksLikeSteppedForm(snap)) {
+      const wiz = decideWizardPlan(snap, fillResult, history, agentContext, {
+        stuckCount: wizardStuckCount,
+      });
+      if (wiz?.plan) {
+        plan = wiz.plan;
+        classification = {
+          step: "form",
+          confidence: "high",
+          reason: wiz.reason,
+        };
+        decision = { path: "wizard", situation: wiz.situation, reason: wiz.reason };
+        log.layer("agent", `wizard:${wiz.situation} — ${wiz.reason}`, "info");
+      } else {
+        ({ plan, classification, decision } = await decideNextAction(
+          snap,
+          fillResult,
+          history,
+          agentContext,
+          page,
+        ));
+      }
+    } else if (!plan) {
       ({ plan, classification, decision } = await decideNextAction(
         snap,
         fillResult,
@@ -337,7 +624,14 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       const fp = pageFingerprint(snap);
       recoveryTracker.record(plan.type, fp);
       if (plan.type === "stagehand_act") hasUsedStagehand = true;
-      const esc = recoveryTracker.escalate(plan.type, fp, { hasUsedStagehand });
+      const oracle = assessCompletenessFromSnap(snap, fillResult);
+      const stepComplete = Boolean(oracle.complete);
+      const continueEnabled = hasEnabledContinue(snap);
+      const esc = recoveryTracker.escalate(plan.type, fp, {
+        hasUsedStagehand,
+        stepComplete,
+        continueEnabled,
+      });
       const stagehandAllowed = shouldPreferStagehand(
         snap,
         classification || { step: "ambiguous", confidence: "low" },
@@ -345,37 +639,113 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         agentContext,
         fillResult,
       );
-      if (
+      if (esc === "advance" && stepComplete && plan.type !== "click_continue" && plan.type !== "wait_user") {
+        plan = {
+          type: "click_continue",
+          reason: `recovery: oracle complete (${oracle.reason || "step"}) — advance instead of re-fill`,
+          source: "recovery-tracker",
+        };
+        decision = { path: "recovery-tracker", reason: plan.reason };
+        log.layer("agent", plan.reason, "warn");
+      } else if (esc === "advance" && !stepComplete) {
+        log.layer(
+          "agent",
+          `recovery: skip force-Continue — oracle incomplete (${oracle.reason || "?"})`,
+          "debug",
+        );
+      } else if (
         esc === "stagehand" &&
         stagehandAllowed &&
         plan.type !== "stagehand_act" &&
         plan.type !== "wait_user"
       ) {
+        const scopedMissing = (oracle.missing || []).filter(Boolean).slice(0, 8);
+        const wizardScoped =
+          looksLikeSteppedForm(snap) &&
+          (scopedMissing.length > 0 || currentStepIncomplete(snap, fillResult));
         plan = {
           type: "stagehand_act",
           reason: `recovery: ${plan.type} looping — Stagehand escalate`,
           source: "recovery-tracker",
-          instruction: buildStagehandInstruction(snap, classification || { step: plan.type === "click_apply" ? "entry" : classification?.step }, history, context, {
-            forceApply: plan.type === "click_apply" || classification?.step === "entry",
-          }),
+          instruction: wizardScoped
+            ? scopedMissing.length
+              ? `Fill only these remaining required fields: ${scopedMissing.join(", ")}. ` +
+                `Do not invent fields from the sidebar/nav. Do not dump cover letter into education. ` +
+                `Then click Continue. Do not open new tabs.`
+              : buildWizardAdvanceInstruction(snap, context)
+            : buildStagehandInstruction(
+                snap,
+                classification || {
+                  step: plan.type === "click_apply" ? "entry" : classification?.step,
+                },
+                history,
+                context,
+                {
+                  forceApply: plan.type === "click_apply" || classification?.step === "entry",
+                },
+              ),
         };
         hasUsedStagehand = true;
         decision = { path: "recovery-tracker", reason: plan.reason };
         log.layer("agent", plan.reason, "warn");
       } else if (esc === "stagehand" && !stagehandAllowed && plan.type !== "wait_user") {
-        plan = {
-          type: "wait_user",
-          reason: `recovery: ${plan.type} looping on protected auth/signup flow — handoff`,
-          source: "recovery-tracker",
-        };
+        // P0: never re-queue smart_fill forever when Continue is enabled / step complete.
+        if (stepComplete && continueEnabled) {
+          plan = {
+            type: "click_continue",
+            reason: "recovery: smart_fill stall — step complete, force Continue",
+            source: "recovery-tracker",
+          };
+        } else if (
+          continueEnabled &&
+          locationTypeaheadCommitted(snap, fillResult) &&
+          !(snap.waasValidation?.visibleRequiredCount > 0) &&
+          !(snap.waasValidation?.missing?.length > 0) &&
+          /\/application\/location\b/i.test(String(snap.url || ""))
+        ) {
+          plan = {
+            type: "commit_step",
+            reason: "recovery: smart_fill stall — commit typeahead then advance",
+            source: "recovery-tracker",
+          };
+        } else if (plan.type === "smart_fill" && currentStepIncomplete(snap, fillResult)) {
+          plan = {
+            type: "smart_fill",
+            reason: "recovery: smart_fill stall — retry fill (step still incomplete)",
+            source: "recovery-tracker",
+          };
+        } else if (
+          snap.waasValidation?.visibleRequiredCount > 0 ||
+          (snap.waasValidation?.missing?.length > 0)
+        ) {
+          plan = {
+            type: "smart_fill",
+            reason: "recovery: WaaS Required/serverErrors still open — keep filling",
+            source: "recovery-tracker",
+          };
+        } else {
+          plan = {
+            type: "wait_user",
+            reason: `recovery: ${plan.type} looping — handoff (stagehand blocked)`,
+            source: "recovery-tracker",
+          };
+        }
         decision = { path: "recovery-tracker", reason: plan.reason };
         log.layer("agent", plan.reason, "warn");
       } else if (esc === "wait_user" && plan.type !== "wait_user") {
-        plan = {
-          type: "wait_user",
-          reason: `recovery: ${plan.type} exhausted — handoff`,
-          source: "recovery-tracker",
-        };
+        if (stepComplete && continueEnabled) {
+          plan = {
+            type: "click_continue",
+            reason: "recovery: exhausted but step complete — force Continue",
+            source: "recovery-tracker",
+          };
+        } else {
+          plan = {
+            type: "wait_user",
+            reason: `recovery: ${plan.type} exhausted — handoff`,
+            source: "recovery-tracker",
+          };
+        }
         decision = { path: "recovery-tracker", reason: plan.reason };
         log.layer("agent", plan.reason, "warn");
       }
@@ -445,11 +815,13 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         await humanPause(500, 900);
         continue;
       }
-      if (obstacle.action === "needs_auth" || looksLikeAuthForm(snap) || looksLikeSignupForm(snap)) {
+      if (obstacle.action === "needs_auth" || classifyPageRoleFromSnap(snap, agentContext).role === "auth_wall") {
+        const role = classifyPageRoleFromSnap(snap, agentContext);
         const preferSignup =
           looksLikeSignupForm(snap) ||
           classification?.step === "signup" ||
-          classification?.step === "signup_entry";
+          classification?.step === "signup_entry" ||
+          /signup|register/i.test(role.reason || "");
         plan = {
           type: preferSignup ? "auth_signup" : "auth_login",
           reason: "recovery — auth wall after empty plan",
@@ -481,6 +853,31 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         url,
         sessionId,
       });
+      if (finalTry.captcha?.detected) {
+        log.layer(
+          "agent",
+          `captcha after final recovery — ${finalTry.captcha.reason} — waiting for manual solve`,
+          "warn",
+        );
+        const cleared = await waitForCaptchaClear(page, sessionId, {
+          initial: finalTry.captcha,
+          keepSuspectOverlay: finalTry.captcha.source === "overlay",
+        });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          fingerprint: pageFingerprint(finalTry.snap || snap),
+          progress: cleared,
+          reason: finalTry.captcha.reason,
+        });
+        if (cleared) {
+          consecutiveNoProgress = 0;
+          continue;
+        }
+        break;
+      }
       if (finalTry.recovered) {
         if (finalTry.fillResult) fillResult = finalTry.fillResult;
         lastSnap = finalTry.snap || snap;
@@ -551,7 +948,7 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
           history.push({ step, action: "clear_obstacle", ok: true, progress: true });
           continue;
         }
-        if (looksLikeSignupForm(snap) || looksLikeAuthForm(snap)) {
+        if (classifyPageRoleFromSnap(snap, agentContext).role === "auth_wall" || looksLikeSignupForm(snap)) {
           const preferSignup =
             looksLikeSignupForm(snap) ||
             classification?.step === "signup" ||
@@ -635,6 +1032,45 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     if (executed.prepActions?.length) prepActions.push(...executed.prepActions);
     const stepLearnings = executed.learnings;
 
+    // Reach-out modal filled — respect auto_submit; otherwise hand off with Send ready.
+    if (
+      plan.type === "smart_fill" &&
+      (fillResult?.reach_out_ready || fillResult?.reach_out_sent) &&
+      (plan.source === "reach-out" || looksLikeReachOutModal(snap) || looksLikeReachOutModal(executed.snap || {}))
+    ) {
+      if (fillResult.reach_out_sent) {
+        log.layer("agent", "reach-out: message sent", "info");
+        history.push({
+          step,
+          action: "smart_fill",
+          applyStep: "form",
+          ok: true,
+          fingerprint: pageFingerprint(executed.snap || snap),
+          progress: true,
+          source: "reach-out",
+          reason: "reach_out_sent",
+        });
+        break;
+      }
+      log.layer(
+        "agent",
+        "handoff: reach-out message filled (≥50 chars) — Send ready for manual review",
+        "info",
+      );
+      history.push({
+        step,
+        action: "wait_user",
+        applyStep: "review",
+        ok: true,
+        progress: true,
+        handoff: "review",
+        source: "reach-out",
+        reason: "reach_out_message_filled",
+        fillResult,
+      });
+      break;
+    }
+
     // Apply links with target=_blank open the next hop in a new tab — follow it.
     // Only adopt when the current page stayed put; if it navigated, the flow
     // continued here and any stray popup is likely an ad.
@@ -654,29 +1090,70 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
     }
 
     let snapAfter = await refreshSnapIfNeeded(page, snap, inspectPage, {
-      force: ["click_apply", "click_modal", "click_continue", "click_signup", "click_signin", "act", "smart_fill", "upload_resume"].includes(plan.type),
+      force: ["click_apply", "click_modal", "click_continue", "commit_step", "click_signup", "click_signin", "act", "smart_fill", "upload_resume"].includes(plan.type),
     });
     lastSnap = snapAfter;
 
-    // Wizard advanced → queue fill of the new step on the next loop iteration.
+    // Wizard advanced → queue fill; stuck Continue → commit/Stagehand (not blind smart_fill).
     if (ok && (plan.type === "click_continue" || plan.type === "click_modal")) {
-      const follow = planAfterContinue(snap, snapAfter, fillResult);
-      if (follow) {
-        pendingSteppedFill = follow;
-        log.layer("agent", follow.reason, "info");
+      const after = planAfterWizardContinue(snap, snapAfter, fillResult, {
+        stuckCount: wizardStuckCount,
+        history,
+        context: agentContext,
+      });
+      if (after?.advanced) {
+        wizardStuckCount = 0;
+        const follow = planAfterContinue(snap, snapAfter, fillResult);
+        if (follow) {
+          pendingSteppedFill = follow;
+          log.layer("agent", follow.reason, "info");
+        }
+      } else if (executed.stuckAdvance || after?.stuck) {
+        wizardStuckCount = after?.stuckCount || wizardStuckCount + 1;
+        pendingWizardPlan = after?.plan || {
+          type: "commit_step",
+          reason: "wizard — Continue did not advance; commit typeahead",
+          source: "wizard",
+        };
+        log.layer(
+          "agent",
+          `${pendingWizardPlan.reason} (stuck×${wizardStuckCount})`,
+          "warn",
+        );
+      }
+    }
+    if (ok && plan.type === "commit_step") {
+      // After commit, prefer another Continue attempt via wizard SM next turn.
+      const wiz = decideWizardPlan(snapAfter, fillResult, history, agentContext, {
+        stuckCount: wizardStuckCount,
+      });
+      if (wiz?.plan && wiz.situation === "advance") {
+        pendingWizardPlan = wiz.plan;
+        log.layer("agent", `after commit — ${wiz.reason}`, "info");
+      }
+    }
+    if (ok && plan.type === "stagehand_act" && plan.source === "wizard") {
+      if (!wizardAdvanced(snap, snapAfter)) {
+        wizardStuckCount += 1;
+      } else {
+        wizardStuckCount = 0;
       }
     }
 
-    // Failed Continue / CTA with no DOM progress — often an invisible captcha overlay
-    // (Playwright: "<div></div> … intercepts pointer events"). Wait for manual solve.
+    // Failed Continue / CTA / recovery with no DOM progress — often captcha overlay
+    // (Playwright: "recaptcha … iframe … intercepts pointer events"). Wait for manual solve.
     if (
       !ok &&
-      ["click_continue", "click_modal", "click_apply", "act", "stagehand_act"].includes(plan.type)
+      ["click_continue", "click_modal", "click_apply", "act", "stagehand_act", "smart_fill"].includes(
+        plan.type,
+      )
     ) {
-      const challenge = await detectCaptcha(page, {
-        snap: snapAfter,
-        suspectPointerBlock: true,
-      }).catch(() => ({ detected: false }));
+      const challenge =
+        (executed.learnings?.captcha?.detected && executed.learnings.captcha) ||
+        (await probeCaptchaAfterAction(page, {
+          snap: snapAfter,
+          error: executed.error || null,
+        }).catch(() => ({ detected: false })));
       if (challenge.detected) {
         log.layer(
           "agent",
@@ -991,7 +1468,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
       plan.type === "smart_fill" &&
       ok &&
       hasUnfilledApplicationControls(snapAfter) &&
-      getSettings().stagehand_enabled
+      getSettings().stagehand_enabled &&
+      !looksLikeReachOutModal(snapAfter) &&
+      !looksLikeReachOutModal(snap)
     ) {
       const sh = await attemptApplicationControlsStagehand(page, agentContext, {
         snap: snapAfter,
@@ -1119,7 +1598,9 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         }
       } else if (stuckPlan?.type === "upload_resume" && !uploadAlreadySucceeded(history)) {
         log.layer("agent", "stuck — forcing upload recovery", "warn");
-        const uploadOk = await uploadDiscoveredFile(page, log, "agent", snapAfter, sessionId);
+        const uploadOk = await uploadDiscoveredFile(page, log, "agent", snapAfter, sessionId, {
+          context: agentContext,
+        });
         history.push({
           step,
           action: "upload_resume",
@@ -1140,6 +1621,31 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         url,
         sessionId,
       });
+      if (finalTry.captcha?.detected) {
+        log.layer(
+          "agent",
+          `captcha after stuck recovery — ${finalTry.captcha.reason} — waiting for manual solve`,
+          "warn",
+        );
+        const cleared = await waitForCaptchaClear(page, sessionId, {
+          initial: finalTry.captcha,
+          keepSuspectOverlay: finalTry.captcha.source === "overlay",
+        });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          fingerprint: pageFingerprint(finalTry.snap || snapAfter),
+          progress: cleared,
+          reason: finalTry.captcha.reason,
+        });
+        if (cleared) {
+          consecutiveNoProgress = 0;
+          continue;
+        }
+        break;
+      }
       if (finalTry.recovered) {
         if (finalTry.fillResult) fillResult = finalTry.fillResult;
         lastSnap = finalTry.snap || snapAfter;
@@ -1154,6 +1660,36 @@ export async function runAutomationAgent(page, context, log, { url, sessionId = 
         });
         await humanPause(900, 1600);
         continue;
+      }
+
+      // Before giving up on no-progress, one last captcha probe (Dribbble-style bframe).
+      const lastChance = await probeCaptchaAfterAction(page, { snap: snapAfter }).catch(() => ({
+        detected: false,
+      }));
+      if (lastChance.detected) {
+        log.layer(
+          "agent",
+          `captcha before stop — ${lastChance.reason} — waiting for manual solve`,
+          "warn",
+        );
+        const cleared = await waitForCaptchaClear(page, sessionId, {
+          initial: lastChance,
+          keepSuspectOverlay: lastChance.source === "overlay",
+        });
+        history.push({
+          step,
+          action: cleared ? "captcha_wait" : "wait_user",
+          applyStep: "blocked",
+          ok: cleared,
+          fingerprint: pageFingerprint(snapAfter),
+          progress: cleared,
+          reason: lastChance.reason,
+        });
+        if (cleared) {
+          consecutiveNoProgress = 0;
+          continue;
+        }
+        break;
       }
 
       log.layer(

@@ -557,10 +557,11 @@ export async function performGenericAct(page, plan, { snap = null, log = null, s
         const ok = await uploadDiscoveredFile(page, log, layer, snap, sessionId, {
           preferredSelector: item.selector || "",
           preferredTestId: item.testId || "",
+          context,
         });
         return { ok };
       }
-      return { ok: await uploadDiscoveredFile(page, log, layer, snap, sessionId) };
+      return { ok: await uploadDiscoveredFile(page, log, layer, snap, sessionId, { context }) };
     }
 
     default:
@@ -673,7 +674,9 @@ export async function clickDiscoveredModalStep(page, log, layer = "agent", snap 
 /** Upload file via file input (setInputFiles) — never click the overlay button. */
 export async function uploadDiscoveredFile(page, log, layer = "agent", snap = null, sessionId = null, options = {}) {
   const state = snap || (await inspectPage(page));
-  const file = await getRuntime().resolveFileUpload(sessionId, log);
+  const file = await getRuntime().resolveFileUpload(sessionId, log, {
+    context: options.context || null,
+  });
   if (!file.ok) {
     log.layer(layer, "upload: no file available from resolveFileUpload", "warn");
     return false;
@@ -719,9 +722,38 @@ export async function clickDiscoveredContinue(page, log, layer = "agent", snap =
     return modal.ok;
   }
 
+  // Wait for Continue to leave a disabled/loading state (validation + Places commit).
+  const continueBtn = page.getByRole("button", { name: /^(continue|next|save and continue)$/i }).first();
+  if ((await continueBtn.count().catch(() => 0)) > 0) {
+    const enabled = await continueBtn
+      .waitFor({ state: "visible", timeout: 2000 })
+      .then(() =>
+        continueBtn
+          .evaluate(async (el) => {
+            const start = Date.now();
+            while (Date.now() - start < 12_000) {
+              const disabled = el.disabled || el.getAttribute("aria-disabled") === "true";
+              if (!disabled) return true;
+              await new Promise((r) => setTimeout(r, 250));
+            }
+            return !(el.disabled || el.getAttribute("aria-disabled") === "true");
+          })
+          .catch(() => false),
+      )
+      .catch(() => false);
+    if (!enabled) {
+      log?.layer?.(layer, "continue: still disabled after wait — fill remaining fields first", "warn");
+      return false;
+    }
+  }
+
   for (const c of state.continueCandidates || []) {
     if ((c.text || "").length > 80) continue;
     if (isSocialSsoCta(c.text || c.aria || "")) continue;
+    if (c.disabled) {
+      log?.layer?.(layer, `continue: skip disabled "${c.text || "Continue"}"`, "debug");
+      continue;
+    }
     if (await clickCandidate(page, c, log, layer, "continue")) return true;
   }
   return false;

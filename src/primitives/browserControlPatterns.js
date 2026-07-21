@@ -2,6 +2,7 @@
  * Browser-context helpers serialized from Node primitives for page.evaluate / smart_fill eval.
  */
 import { APPLICATION_LABEL_TO_MAPPED, LABEL_TO_MAPPED, PLACEHOLDER_RE } from "./controlPatterns.js";
+import { serializeFieldNameMap } from "../patterns/fieldNameMap.js";
 import { parseSalaryNumbers } from "../salaryExpectation.js";
 
 /** Serializable label rules for in-browser mapComboboxLabel. */
@@ -28,6 +29,7 @@ export function browserPatternArgs() {
   return {
     labelRules: serializeLabelRules(),
     applicationLabelRules: serializeApplicationLabelRules(),
+    fieldNameRules: serializeFieldNameMap(),
     placeholderPatternSource: PLACEHOLDER_RE.source,
     placeholderPatternFlags: PLACEHOLDER_RE.flags || "i",
   };

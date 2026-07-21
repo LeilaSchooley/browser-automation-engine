@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+    <script>
+      window.JOBS_GLOBALS = {
+        ENG_TYPES: [
+          { label: "Full stack", value: "fs" },
+          { label: "Backend", value: "be" },
+          { label: "Frontend", value: "fe" },
+          { label: "Machine learning", value: "ml" },
+        ],
+      };
+    </script>
+  </head>
+  <body>
+    <!-- Production-shaped WaaS /application/role (native radios + job_type checkboxes + eng_type). -->
+    <div
+      data-page='{"props":{"sectionAppProps":{"activeSection":"role","serverErrors":{"role":["is missing"],"in_school":["is missing"],"job_type":["is missing"]},"sectionInfo":[{"name":"role","status":"current"}]}}}'
+    >
+      <h1>Role</h1>
+      <form>
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What job function best fits what you're looking for?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="radio" name="role" value="eng" />Engineering<small>Software, hardware and data</small></label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="role" value="design" />Design<small>Web, mobile, UI/UX</small></label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="radio" name="role" value="product" />Product<small>Product management</small></label>
+          </div>
+        </div>
+
+        <div class="mb-4" id="eng-roles-block">
+          <label class="mb-1 block font-bold"
+            >Which engineering roles are you most interested in? (Choose up to four)<span class="text-red-500">
+              *</span
+            ></label
+          >
+          <div class="reactselect__control" role="combobox" aria-haspopup="listbox" tabindex="0"></div>
+          <input type="hidden" name="eng_type" value="" />
+        </div>
+
+        <div id="eng-options" role="listbox" aria-multiselectable="true">
+          <div role="option">Full stack</div>
+          <div role="option">Backend</div>
+          <div role="option">Frontend</div>
+          <div role="option">Machine learning</div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >Are you a full-time student at a school or bootcamp?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5"><label><input type="radio" name="in_school" value="yes" />Yes</label></div>
+          <div class="my-0.5"><label><input type="radio" name="in_school" value="no" />No</label></div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >What job type(s) are you most interested in?<span class="text-red-500"> *</span></label
+          >
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type" value="fulltime" />Full-time employee</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type" value="contract" />Contractor</label>
+          </div>
+          <div class="my-0.5">
+            <label><input type="checkbox" name="job_type" value="cofounder" />Cofounder</label>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="mb-1 block font-bold"
+            >How many years of professional experience in software engineering do you have?<span class="text-red-500">
+              *</span
+            ></label
+          >
+          <input type="number" name="experience" min="0" max="100" value="3" />
+        </div>
+
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+  </body>
+</html>

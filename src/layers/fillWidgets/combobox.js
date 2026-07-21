@@ -171,6 +171,9 @@ export async function selectFromOptions(page, options, value, mappedTo, log) {
 
 
 export async function fillComboboxControl(page, { label, mappedTo, value, triggerSelector, confirmPattern, requiresConfirm }, log, snap = null) {
+  const mapped = String(mappedTo || "").toLowerCase();
+  // Multi-select skill/role widgets must never fall through to A–Z single pick (ABAP).
+  if (mapped === "techskills" || mapped === "engroles") return false;
   if (!value && mappedTo !== "salary" && mappedTo !== "custom") return false;
 
   if (mappedTo === "salary" || mappedTo === "custom") {

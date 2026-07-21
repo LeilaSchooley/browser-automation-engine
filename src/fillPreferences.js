@@ -18,6 +18,9 @@ export function getPreferencesFromContext(context = {}) {
 
   const salary = resolveSalaryExpectation(context);
 
+  const relocateLocations =
+    String(p.relocateLocations || p.relocate_locations || "").trim() || city || location;
+
   return {
     location,
     desiredTitle,
@@ -26,6 +29,7 @@ export function getPreferencesFromContext(context = {}) {
     salaryExpectation: salary,
     country,
     city,
+    relocateLocations,
   };
 }
 

@@ -11,8 +11,11 @@ import {
   looksLikeApplySignupGate,
 } from "../../heuristics.js";
 import { looksLikePlatformOnboarding } from "../../platformOnboarding.js";
+import { looksLikeProfileSetup } from "../../patterns/profileSetup.js";
 import { hasUnfilledApplicationControls } from "../../fillApplicationAnswers.js";
 import { looksLikeSignupForm } from "../signupActions.js";
+import { assessCompletenessFromSnap } from "../CompletenessOracle.js";
+import { isStepComplete } from "../steppedForm.js";
 
 /** Score current page + track best seen this run. */
 export function scoreStepProgress(snap, fillResult, bestScore = 0) {
@@ -66,6 +69,21 @@ export function computeMechanicalProgress({
   );
 }
 
+/** Mid-wizard WaaS profile steps still need Continue — never hand off for review yet. */
+function stillInWaasProfileWizard(snap) {
+  const url = String(snap?.url || "");
+  if (!/\/application\/(skills|role|experience|location|career|personal|founders|equity)\b/i.test(url)) {
+    return false;
+  }
+  const continueEnabled =
+    (snap?.continueCount || 0) > 0 && !snap?.continueCandidates?.[0]?.disabled;
+  if (!continueEnabled) return false;
+  // If the current wizard step is incomplete, definitely keep going.
+  if (!isStepComplete(snap)) return true;
+  // Complete step with Continue visible → agent should click Continue, not hand off.
+  return true;
+}
+
 /** Text filled but file inputs untouched → keep going for upload. */
 export function uploadsStillPending(snapAfter, history, fillResult) {
   return (
@@ -103,14 +121,21 @@ export function evaluateReadyForReview({
   const onPlatformSignupGate =
     looksLikeApplySignupGate(snapAfter) || looksLikeSignupForm(snapAfter) || snapAfter.signupForm;
   const onPlatformOnboarding = looksLikePlatformOnboarding(snapAfter);
+  const midWaasWizard = stillInWaasProfileWizard(snapAfter);
+  const midProfileSetup =
+    looksLikeProfileSetup(snapAfter) || /\/onboarding\//i.test(String(snapAfter?.url || ""));
+  const oracle = assessCompletenessFromSnap(snapAfter, fillResult);
+  // Oracle SSOT: fill-count / progressed heuristics alone never declare ready-for-review.
   const readyForReview =
     !uploadsPending &&
     !appControlsPending &&
     !onPlatformOnboarding &&
+    !midWaasWizard &&
+    !midProfileSetup &&
     !(onPlatformSignupGate && !authSucceeded) &&
+    oracle.complete &&
     ((filledCount >= 2 && looksLikeApplyForm(snapAfter, 2)) ||
-      (filledCount >= 1 && authSucceeded && looksLikeApplyForm(snapAfter, 1)) ||
-      (filledCount >= 2 && progressed && ok));
+      (filledCount >= 1 && authSucceeded && looksLikeApplyForm(snapAfter, 1)));
 
   return {
     filledCount,
@@ -119,6 +144,9 @@ export function evaluateReadyForReview({
     appControlsPending,
     onPlatformSignupGate,
     onPlatformOnboarding,
+    midProfileSetup,
+    oracleComplete: oracle.complete,
+    oracleReason: oracle.reason,
     readyForReview,
   };
 }

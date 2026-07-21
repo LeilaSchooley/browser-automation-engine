@@ -19,6 +19,7 @@ import { preparePageForApply } from "./layers/pagePrep.js";
 import { classifyApplyStep, stepToPlan, STEP_ACTIONS } from "./layers/applyStep.js";
 import {
   computeApplyOutcome,
+  buildTermination,
   outcomeJobStatus,
   isStuck,
   shouldPreferUpload,
@@ -76,6 +77,8 @@ import {
   waitForCaptchaClear,
   looksLikeCaptchaInSnap,
   looksLikeCaptchaReason,
+  looksLikeCaptchaClickError,
+  probeCaptchaAfterAction,
   CAPTCHA_SELECTORS,
 } from "./captchaDetect.js";
 import { humanPause, humanGoto } from "./human.js";
@@ -173,6 +176,7 @@ import {
  * @property {(args: { plan: unknown, snapBefore: unknown, snapAfter: unknown, fillResult: unknown, mechanicalProgress: boolean, actorOk: boolean, history: unknown[], context: unknown, classification?: unknown, filledBefore?: number }) => Promise<{ progressed: boolean, reason?: string, recovery?: string, source?: string }>} [validateAction]
  * @property {(args: { snap: unknown, fillResult: unknown, history: unknown[], context: unknown }) => Promise<{ action: string, target?: string, reason?: string }>} [assessEndState]
  * @property {(context: unknown, opts: { unfilled: unknown[], sessionId?: string }) => Promise<Record<string, string>>} [answerUnfilledFields]
+ * @property {(context: unknown, opts: { choices: unknown[], sessionId?: string, requiredHints?: string[] }) => Promise<Record<string, string>>} [answerChoiceFields]
  * @property {(sessionId: string, payload: Record<string, unknown>) => void} [onStatus]
  */
 
@@ -223,6 +227,7 @@ export function createEngine(options = {}) {
     classifyApplyStep,
     stepToPlan,
     computeApplyOutcome,
+    buildTermination,
     outcomeJobStatus,
     loadSiteMappings,
     loadSiteLearnings,
@@ -244,6 +249,8 @@ export function createEngine(options = {}) {
     waitForCaptchaClear,
     looksLikeCaptchaInSnap,
     looksLikeCaptchaReason,
+    looksLikeCaptchaClickError,
+    probeCaptchaAfterAction,
     humanPause,
     humanGoto,
     provideManualVerifyLink,
@@ -309,6 +316,7 @@ export {
   stepToPlan,
   STEP_ACTIONS,
   computeApplyOutcome,
+  buildTermination,
   outcomeJobStatus,
   isStuck,
   dismissLoopStalled,
@@ -371,6 +379,8 @@ export {
   waitForCaptchaClear,
   looksLikeCaptchaInSnap,
   looksLikeCaptchaReason,
+  looksLikeCaptchaClickError,
+  probeCaptchaAfterAction,
   CAPTCHA_SELECTORS,
   humanPause,
   humanGoto,
@@ -463,6 +473,50 @@ export {
   parseJsonFromLlm,
 } from "./ai/contracts.js";
 export { loadOptionalSharedContracts } from "./ai/sharedBridge.js";
+
+export {
+  assessCompleteness,
+  assessCompletenessFromSnap,
+  assessProfileSetupCompleteness,
+  getAuthoritativeRequiredKeys,
+} from "./layers/CompletenessOracle.js";
+export {
+  runUniversalFill,
+  sortChronologically,
+  isAlreadyCommitted,
+} from "./layers/universalFillPipeline.js";
+export {
+  learnSiteStructure,
+  maybeLearnSiteStructure,
+  loadStepStructure,
+} from "./siteStructureLearner.js";
+export {
+  looksLikeReachOutModal,
+  looksLikeRequiredOutreachTextarea,
+} from "./patterns/outreach.js";
+export {
+  fillWaasReachOutMissing,
+  isWaasReachOutStep,
+  buildOutreachMessage,
+} from "./siteAdapters/waasReachOut.js";
+export { detectAuthWallFromSnap, historySaysAccountExists } from "./patterns/authWall.js";
+export { handleAuthWall, detectAuthWall } from "./layers/authWall.js";
+export {
+  needsApplyCtaDiscovery,
+  clickApplyOrHandoff,
+  findBestApplyCta,
+} from "./layers/applyCta.js";
+export { looksLikeProfileSetup, detectProfileSetupFromSnap } from "./patterns/profileSetup.js";
+export { fillProfileSetup, getCoreProfile } from "./layers/profileFill.js";
+export { classifyPageRoleFromSnap } from "./layers/classifyPageRole.js";
+export {
+  verifyAdvance,
+  toTransitionResult,
+  countUnverifiedAttempts,
+  normalizeStepIdentity,
+  MAX_UNVERIFIED_APPLY_CTA,
+  MAX_UNVERIFIED_CONTINUE,
+} from "./layers/transition.js";
 
 /** @deprecated use `patterns` */
 export const authPatterns = patterns;

@@ -3,12 +3,13 @@
  */
 import { getSettings } from "./runtime.js";
 import { isImapConfigured } from "./manualVerifyLink.js";
-import { normalizeVerifyCode, waitForManualVerifyCode } from "./manualVerifyCode.js";
+import { normalizeVerifyCode } from "./manualVerifyCode.js";
 import { TWO_FACTOR_TEXT } from "./patterns/blocked.js";
 import { resolveTotpCode } from "./totp.js";
+import { detectOtpFromSnap } from "./patterns/otpDetect.js";
 
 const OTP_INTENT =
-  /\b(verification code|verify code|one[- ]time|otp|security code|login code|enter the code|enter (your )?code|code from your email|authenticator)\b/i;
+  /\b(verification code|verify code|one[- ]time|otp|security code|login code|enter the code|enter (your )?code|code from your email|authenticator|passcode|we've sent you a (pass)?code|sent you a passcode)\b/i;
 
 const OTP_CODE_NEAR =
   /(?:code|otp|pin|passcode)[^\d]{0,40}(\d{4,8})\b|\b(\d{4,8})\b[^\d]{0,40}(?:code|otp|pin|passcode)/i;
@@ -18,25 +19,7 @@ const OTP_CODE_NEAR =
  * Prefer this over hard-stopping on TWO_FACTOR_TEXT when a code field is fillable.
  */
 export function looksLikeOtpWall(snap) {
-  if (!snap) return false;
-  const blob = `${snap.title || ""} ${snap.pageText || ""} ${snap.headings || ""}`.toLowerCase();
-  if (!TWO_FACTOR_TEXT.test(blob) && !OTP_INTENT.test(blob)) return false;
-  // Need a fillable identity/code field (or few fields on a login-ish page).
-  const fields = snap.fields || [];
-  const hasCodeish = fields.some((f) => {
-    const t = `${f.type || ""} ${f.label || ""} ${f.name || ""} ${f.autocomplete || ""}`.toLowerCase();
-    return (
-      /otp|one[-_]?time|totp|verification|security.?code|passcode/.test(t) ||
-      f.type === "tel" ||
-      (f.type === "text" && /code/.test(t))
-    );
-  });
-  if (hasCodeish) return true;
-  // Passwordless verify screens often expose a single text field.
-  if ((snap.fieldCount || 0) >= 1 && (snap.fieldCount || 0) <= 2 && (snap.passwordFieldCount || 0) === 0) {
-    return OTP_INTENT.test(blob) || /enter the code|verify code|from your email/.test(blob);
-  }
-  return false;
+  return detectOtpFromSnap(snap).isOtp;
 }
 
 /**
@@ -114,8 +97,33 @@ export async function pollVerifyCode({ hostFilter = "", timeoutMs = 20000 } = {}
 }
 
 async function fillOtpField(page, code, log) {
+  const digits = String(code || "").replace(/\D/g, "");
+  if (!digits) return false;
+
+  // Multi-box passcode (Dribbble etc.): one digit per maxlength=1 input.
+  const boxes = page.locator(
+    'input[maxlength="1"], input[aria-label*="digit" i], input[aria-label*="Code digit" i]',
+  );
+  const boxCount = await boxes.count().catch(() => 0);
+  if (boxCount >= 4 && digits.length >= 4) {
+    const n = Math.min(boxCount, digits.length);
+    for (let i = 0; i < n; i += 1) {
+      try {
+        const loc = boxes.nth(i);
+        if (!(await loc.isVisible({ timeout: 500 }).catch(() => false))) continue;
+        await loc.fill("");
+        await loc.fill(digits[i]);
+      } catch {
+        /* next box */
+      }
+    }
+    log?.layer("otp", `filled ${n} digit boxes`, "info");
+    return true;
+  }
+
   const selectors = [
     'input[autocomplete="one-time-code"]',
+    'input[maxlength="6"]',
     'input[name*="otp" i]',
     'input[id*="otp" i]',
     'input[name*="code" i]',
@@ -133,7 +141,7 @@ async function fillOtpField(page, code, log) {
       if ((await loc.count()) === 0) continue;
       if (!(await loc.isVisible({ timeout: 800 }).catch(() => false))) continue;
       await loc.fill("");
-      await loc.fill(code);
+      await loc.fill(digits);
       log?.layer("otp", `filled code into ${sel}`, "info");
       return true;
     } catch {
@@ -173,14 +181,101 @@ async function submitOtp(page, log) {
   }
 }
 
+async function readFilledOtpFromPage(page) {
+  if (!page) return "";
+  try {
+    const digits = await page.evaluate(() => {
+      const boxes = [...document.querySelectorAll('input[maxlength="1"], input[aria-label*="digit" i], input[aria-label*="Code digit" i]')].filter(
+        (el) => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        },
+      );
+      if (boxes.length >= 4) {
+        const joined = boxes.map((el) => String(el.value || "").trim()).join("");
+        if (/^\d{4,8}$/.test(joined)) return joined;
+      }
+      const single = document.querySelector(
+        'input[autocomplete="one-time-code"], input[maxlength="6"], input[name*="otp" i], input[name*="code" i]',
+      );
+      if (single) {
+        const v = String(single.value || "").replace(/\D/g, "");
+        if (v.length >= 4 && v.length <= 8) return v;
+      }
+      return "";
+    });
+    return String(digits || "");
+  } catch {
+    return "";
+  }
+}
+
+/** True when the passcode modal is gone (user finished signup in the browser). */
+async function otpModalCleared(page) {
+  if (!page) return false;
+  try {
+    return await page.evaluate(() => {
+      const body = (document.body?.innerText || "").toLowerCase().slice(0, 1500);
+      const boxes = document.querySelectorAll('input[maxlength="1"], input[aria-label*="Code digit" i]');
+      const visibleBoxes = [...boxes].filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (visibleBoxes.length >= 4) return false;
+      return !/passcode|we've sent you|enter the code|resend code/.test(body);
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Resolve OTP (IMAP → manual paste), fill the code field, and submit.
+ * Wait for dashboard paste OR code already typed in the browser.
+ */
+async function waitForOtpFromUserOrPage(page, sessionId, opts = {}) {
+  const {
+    waitForManualVerifyCode,
+    provideManualVerifyCode,
+    completeManualVerifyFromBrowser,
+    normalizeVerifyCode,
+  } = await import("./manualVerifyCode.js");
+
+  const manual = waitForManualVerifyCode(sessionId, opts);
+
+  if (!page) return manual;
+
+  let stopped = false;
+  const pagePoll = (async () => {
+    while (!stopped) {
+      const fromPage = normalizeVerifyCode(await readFilledOtpFromPage(page));
+      if (fromPage) {
+        provideManualVerifyCode(sessionId, fromPage);
+        return fromPage;
+      }
+      if (await otpModalCleared(page)) {
+        completeManualVerifyFromBrowser(sessionId);
+        return "__browser_done__";
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    return "";
+  })();
+
+  try {
+    return await Promise.race([manual, pagePoll]);
+  } finally {
+    stopped = true;
+  }
+}
+
+/**
+ * Resolve OTP (IMAP → manual paste / in-browser fill), fill the code field, and submit.
  */
 export async function attemptOtpEntry(page, snap, log, { sessionId = null, context = null } = {}) {
   if (!looksLikeOtpWall(snap)) {
-    // Still allow if caller already classified enter_otp
     const blob = `${snap?.title || ""} ${snap?.pageText || ""}`;
-    if (!TWO_FACTOR_TEXT.test(blob) && !OTP_INTENT.test(blob)) return false;
+    const digitOnly = detectOtpFromSnap(snap).digitFields >= 4;
+    if (!digitOnly && !TWO_FACTOR_TEXT.test(blob) && !OTP_INTENT.test(blob)) return false;
   }
 
   log?.layer("otp", "OTP wall — resolving verification code", "info");
@@ -193,6 +288,15 @@ export async function attemptOtpEntry(page, snap, log, { sessionId = null, conte
     log?.layer("otp", "using TOTP from site account secret", "info");
   }
 
+  // Already typed in the browser before we started waiting.
+  if (!code) {
+    const existing = await readFilledOtpFromPage(page);
+    if (existing) {
+      code = existing;
+      log?.layer("otp", "using code already typed in the browser", "info");
+    }
+  }
+
   const imapTimeout = settings.otp_verify_timeout_ms || settings.email_verify_timeout_ms || 25000;
   if (!code) code = await pollVerifyCode({ hostFilter: host, timeoutMs: imapTimeout });
   const imapConfigured = isImapConfigured();
@@ -201,19 +305,19 @@ export async function attemptOtpEntry(page, snap, log, { sessionId = null, conte
   if (!code && sessionId != null) {
     const manualTimeout = settings.otp_verify_manual_timeout_ms || settings.email_verify_manual_timeout_ms || 600_000;
     const message = imapFailed
-      ? "Couldn't find the verification code via IMAP — paste the code from your email below."
+      ? "Couldn't find the verification code via IMAP — paste the code from your email below (or type it in the browser)."
       : imapConfigured
-        ? "Waiting for verification code — paste it below if it doesn't arrive automatically."
-        : "Verification code required — paste the code from your email below.";
+        ? "Waiting for verification code — paste below or type it in the browser."
+        : "Verification code required — paste in the dashboard or type it in the browser window.";
     log?.layer(
       "otp",
       imapConfigured
-        ? "IMAP found no code — waiting for manual OTP in dashboard"
-        : "no IMAP configured — waiting for manual OTP in dashboard",
+        ? "IMAP found no code — waiting for manual OTP (dashboard or browser)"
+        : "no IMAP configured — waiting for manual OTP (dashboard or browser)",
       "info",
     );
     try {
-      code = await waitForManualVerifyCode(sessionId, {
+      code = await waitForOtpFromUserOrPage(page, sessionId, {
         timeoutMs: manualTimeout,
         message,
         imapFailed,
@@ -224,13 +328,31 @@ export async function attemptOtpEntry(page, snap, log, { sessionId = null, conte
     }
   }
 
+  if (code === "__browser_done__") {
+    log?.layer("otp", "passcode modal cleared in browser — continuing", "info");
+    return true;
+  }
+
   if (!code) {
     log?.layer("otp", "no verification code found (configure EMAIL_IMAP_* or paste code in dashboard)", "warn");
     return false;
   }
 
+  // If browser already has the full code, don't overwrite — just submit if needed.
+  const already = await readFilledOtpFromPage(page);
+  if (already && already === String(code).replace(/\D/g, "")) {
+    log?.layer("otp", "browser already has code — submitting", "info");
+    await submitOtp(page, log);
+    return true;
+  }
+
   const filled = await fillOtpField(page, code, log);
   if (!filled) {
+    // User may have already submitted; treat cleared modal as success.
+    if (await otpModalCleared(page)) {
+      log?.layer("otp", "OTP inputs gone — assuming browser verify succeeded", "info");
+      return true;
+    }
     log?.layer("otp", "could not find OTP input field", "warn");
     return false;
   }

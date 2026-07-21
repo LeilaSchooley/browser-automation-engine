@@ -1,5 +1,8 @@
 /**
  * Per-action attempt tracking — break loops and escalate Stagehand → wait_user.
+ *
+ * When CompletenessOracle / isStepComplete says the step is done, looping
+ * smart_fill escalates to `advance` (click Continue) — never re-queue fill.
  */
 export class RecoveryTracker {
   /**
@@ -38,11 +41,34 @@ export class RecoveryTracker {
   }
 
   /**
-   * @returns {"continue" | "stagehand" | "wait_user"}
+   * @param {string} action
+   * @param {string} pageHash
+   * @param {{
+   *   hasUsedStagehand?: boolean,
+   *   stepComplete?: boolean,
+   *   continueEnabled?: boolean,
+   * }} [opts]
+   * @returns {"continue" | "advance" | "stagehand" | "wait_user"}
    */
-  escalate(action, pageHash, { hasUsedStagehand = false } = {}) {
-    if (this.isGlobalExhausted()) return "wait_user";
+  escalate(
+    action,
+    pageHash,
+    { hasUsedStagehand = false, stepComplete = false, continueEnabled = false } = {},
+  ) {
+    if (this.isGlobalExhausted()) {
+      // Prefer advancing a validated wizard step over handoff.
+      if (stepComplete && continueEnabled) return "advance";
+      return "wait_user";
+    }
     if (this.isLooping(action, this.maxPerAction, pageHash)) {
+      // P0: fill thrash on a complete step → force Continue, not another smart_fill.
+      if (
+        stepComplete &&
+        continueEnabled &&
+        (action === "smart_fill" || action === "commit_step")
+      ) {
+        return "advance";
+      }
       return hasUsedStagehand ? "wait_user" : "stagehand";
     }
     return "continue";

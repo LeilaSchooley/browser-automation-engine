@@ -9,3 +9,4 @@ export * from "./consent.js";
 export * from "./blocked.js";
 export * from "./modal.js";
 export * from "./applicationScreening.js";
+export * from "./fieldNameMap.js";

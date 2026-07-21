@@ -446,9 +446,14 @@ export function hasUnfilledApplicationFields(snap, fillResult = null) {
   if (unfilledCustom.length >= 1) return true;
 
   const fields = snap.fields || [];
-  const textLike = fields.filter((f) => !/select|file|hidden|checkbox|radio/i.test(String(f.type || "")));
+  // Combobox/contenteditable are tracked on customControls — counting them here
+  // double-flags location typeaheads as unfilled after a successful Places pick.
+  const textLike = fields.filter(
+    (f) => !/select|file|hidden|checkbox|radio|combobox|contenteditable/i.test(String(f.type || "")),
+  );
   const unfilled = textLike.filter((f) => !f.filled);
   if (unfilled.length >= 1) return true;
   const filledCount = fillResult?.filled?.length || 0;
-  return (snap.fieldCount || 0) >= 2 && filledCount === 0;
+  const hasRealTextFields = textLike.length >= 2;
+  return hasRealTextFields && (snap.fieldCount || 0) >= 2 && filledCount === 0;
 }

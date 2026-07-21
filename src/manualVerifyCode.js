@@ -100,6 +100,28 @@ export function provideManualVerifyCode(sessionId, code) {
   return true;
 }
 
+/**
+ * Unblock OTP wait when the user finished verify in the browser (modal gone).
+ * Resolves the waiter with a sentinel the OTP handler recognizes.
+ */
+export function completeManualVerifyFromBrowser(sessionId) {
+  const key = String(sessionId);
+  queued.delete(key);
+  const entry = pending.get(key);
+  if (!entry) return false;
+  clearTimeout(entry.timer);
+  pending.delete(key);
+  const { onStatus } = getRuntime();
+  onStatus?.(key, {
+    phase: "agent",
+    message: "Verification completed in browser…",
+    needs_user_action: false,
+    needs_otp_code: false,
+  });
+  entry.resolve("__browser_done__");
+  return true;
+}
+
 export function normalizeVerifyCode(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";

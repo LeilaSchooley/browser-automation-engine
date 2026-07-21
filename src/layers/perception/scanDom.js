@@ -169,6 +169,7 @@ export async function scanDom(page, { listingMode = true } = {}) {
       listingMode,
       labelRules,
       applicationLabelRules,
+      fieldNameRules,
       placeholderPatternSource,
       placeholderPatternFlags,
       candidateScoringHelperJs,
@@ -219,7 +220,29 @@ export async function scanDom(page, { listingMode = true } = {}) {
         let sib = el.previousElementSibling;
         while (sib) {
           if (sib.tagName === "LABEL") return (sib.textContent || "").trim();
+          const sibText = (sib.textContent || "").replace(/\s+/g, " ").trim();
+          if (
+            sibText.length >= 8 &&
+            sibText.length <= 160 &&
+            /\b(city|live in|relocat|location|where|authorized|sponsor|remote)\b/i.test(sibText)
+          ) {
+            return sibText;
+          }
           sib = sib.previousElementSibling;
+        }
+        // YC / React: question text often sits in a parent field wrapper, not as <label>.
+        let node = el.parentElement;
+        for (let depth = 0; depth < 6 && node; depth += 1, node = node.parentElement) {
+          const q =
+            node.querySelector?.("label, legend, [class*='question' i], p, h1, h2, h3, span") || null;
+          const qText = (q?.textContent || "").replace(/\s+/g, " ").trim();
+          if (
+            qText.length >= 8 &&
+            qText.length <= 160 &&
+            /\b(city|live in|relocat|location|where else|authorized|sponsor|remote)\b/i.test(qText)
+          ) {
+            return qText;
+          }
         }
         return "";
       }
@@ -241,11 +264,47 @@ export async function scanDom(page, { listingMode = true } = {}) {
         }
         return null;
       }
+      /** Prefer HTML name= over label text (stable across boards). */
+      function mapByFieldName(name) {
+        const key = String(name || "")
+          .trim()
+          .replace(/\[\d*\]$/, "")
+          .toLowerCase();
+        if (!key) return null;
+        for (const rule of fieldNameRules || []) {
+          if (rule.name === key) {
+            return {
+              mappedTo: rule.mappedTo,
+              type: rule.type,
+              widgetType: rule.widgetType || "",
+            };
+          }
+        }
+        return null;
+      }
       function buttonLooksSelected(btn) {
         if (btn.getAttribute("aria-pressed") === "true") return true;
         if (btn.getAttribute("aria-checked") === "true") return true;
         const cls = btn.className || "";
         return /selected|active|pressed|checked/i.test(cls);
+      }
+      function radioGroupLooksFilled(rootEl) {
+        // Trust only real selection state — never the presence of "Yes"/"No" in
+        // the question text (that falsely marked unfilled screening radios as done,
+        // which then excluded them from the fill pass and stalled WaaS Continue).
+        const radios = [...rootEl.querySelectorAll("input[type='radio'], [role='radio']")].filter(isVisibleEl);
+        if (radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true")) return true;
+        // A label/button is "selected" only if it carries a selected marker AND
+        // wraps/points at a checked control (avoids matching decorative .active).
+        const options = [...rootEl.querySelectorAll("label, button, [role='button']")].filter(isVisibleEl);
+        for (const opt of options) {
+          if (!buttonLooksSelected(opt)) continue;
+          const input = opt.querySelector("input[type='radio'], [role='radio']");
+          if (input && (input.checked || input.getAttribute("aria-checked") === "true")) return true;
+          // Button-style yes/no (no inner input) — selected marker is authoritative.
+          if (!input && (opt.tagName === "BUTTON" || opt.getAttribute("role") === "button")) return true;
+        }
+        return false;
       }
       function discoverApplicationControls() {
         const out = [];
@@ -312,7 +371,7 @@ export async function scanDom(page, { listingMode = true } = {}) {
           const radios = [...root.querySelectorAll("input[type='radio'], [role='radio']")].filter(isVisibleEl);
           if (radios.length >= 2 && mapping) {
             visited.add(root);
-            const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+            const filled = radioGroupLooksFilled(root, label);
             const meta = elementMetaWithModal(root, applyModals);
             out.push({
               label: label.slice(0, 120),
@@ -453,7 +512,37 @@ export async function scanDom(page, { listingMode = true } = {}) {
             (/\beeo\[?veteran\]?/i.test(nameAttr) ? { mappedTo: "eeocveteran", type: "eeocveteran" } : null) ||
             (/\beeo\[?disabilit/i.test(nameAttr) ? { mappedTo: "eeocdisability", type: "eeocdisability" } : null) ||
             mapApplicationLabel(selLabel);
-          if (!selMap) continue;
+          if (!selMap) {
+            // Unmapped <select> with a real question + concrete options → surface
+            // for the semantic resolver. Skip identity/geo selects handled elsewhere.
+            const qText = (selLabel || "").replace(/\s+/g, " ").trim();
+            const selOpts = [...sel.options]
+              .map((o) => ({ text: (o.textContent || "").replace(/\s+/g, " ").trim(), value: o.value }))
+              .filter((o) => o.text && !/^(select|choose|please select|\-+)/i.test(o.text));
+            const isGeoIdentity = /country|state|province|nationalit|postal|zip|phone|timezone|language/i.test(
+              `${nameAttr} ${qText}`,
+            );
+            if (visited.has(sel) || qText.length < 8 || selOpts.length < 2 || isGeoIdentity) continue;
+            visited.add(sel);
+            const metaU = elementMetaWithModal(sel, applyModals);
+            out.push({
+              label: qText.slice(0, 120),
+              mappedTo: null,
+              type: "choice",
+              unmapped: true,
+              widgetType: "select",
+              text: "",
+              options: selOpts.slice(0, 40).map((o) => ({ text: o.text.slice(0, 120), value: o.value })),
+              selector: elementSelector(sel, metaU),
+              triggerSelector: elementSelector(sel, metaU),
+              questionLabel: qText.slice(0, 120),
+              top: metaU.top,
+              left: Math.round(sel.getBoundingClientRect().left),
+              filled: Boolean(sel.value && sel.value !== "" && sel.selectedIndex > 0),
+              inModal: metaU.inApplyModal || metaU.inDialog,
+            });
+            continue;
+          }
           if (selMap.mappedTo === "pronouns" && !/pronoun/i.test(nameAttr)) continue;
           visited.add(sel);
           const meta = elementMetaWithModal(sel, applyModals);
@@ -520,7 +609,7 @@ export async function scanDom(page, { listingMode = true } = {}) {
           if (visited.has(scope)) continue;
           visited.add(scope);
           visited.add(group);
-          const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+          const filled = radioGroupLooksFilled(scope, qLabel);
           const meta = elementMetaWithModal(scope, applyModals);
           out.push({
             label: qLabel.slice(0, 160),
@@ -580,12 +669,21 @@ export async function scanDom(page, { listingMode = true } = {}) {
           if (!radioNameGroups.has(key)) radioNameGroups.set(key, []);
           radioNameGroups.get(key).push(r);
         }
+        function lowestCommonAncestor(els) {
+          if (!els.length) return null;
+          let anc = els[0].parentElement || els[0];
+          for (let i = 1; i < els.length; i += 1) {
+            while (anc && !anc.contains(els[i])) anc = anc.parentElement;
+            if (!anc) return null;
+          }
+          return anc;
+        }
         for (const radios of radioNameGroups.values()) {
           if (radios.length < 2) continue;
-          const scope =
-            radios[0].closest(
-              '[role="radiogroup"], fieldset, .field, [class*="field"], .application-question, .custom-question, form > div, section',
-            ) || radios[0].parentElement;
+          // Use the tightest block that holds exactly this name-group's radios (their
+          // lowest common ancestor). A broad `form > div` wrapper would swallow sibling
+          // questions and make radioGroupLooksFilled() report a checked sibling as ours.
+          const scope = lowestCommonAncestor(radios) || radios[0].parentElement;
           if (!scope || visited.has(scope)) continue;
           const optionTexts = radios
             .map((r) => {
@@ -598,9 +696,16 @@ export async function scanDom(page, { listingMode = true } = {}) {
           const ariaGroup = (scope.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
           let qLabel = ariaGroup;
           if (!qLabel || qLabel.length < 8) {
-            const qEl =
-              scope.querySelector(".question, .application-label, [class*='question-title'], legend, p.question") ||
-              scope.previousElementSibling;
+            // Prefer a question label WITHIN the scope that does not wrap an option
+            // radio (WaaS: <label class="font-bold">question</label> above the options).
+            const inScopeQ = [
+              ...scope.querySelectorAll(
+                "label, legend, .question, .application-label, [class*='question-title']",
+              ),
+            ].find(
+              (l) => isVisibleEl(l) && !l.querySelector("input[type='radio'], [role='radio']"),
+            );
+            const qEl = inScopeQ || scope.previousElementSibling;
             qLabel = (qEl?.textContent || "").replace(/\s+/g, " ").trim();
           }
           if (!qLabel || qLabel.length < 8) {
@@ -612,16 +717,50 @@ export async function scanDom(page, { listingMode = true } = {}) {
             qLabel = blob.replace(/\s+/g, " ").trim().slice(0, 200);
           }
           const mapping = mapApplicationLabel(qLabel) || mapApplicationLabel(ariaGroup);
-          if (!mapping) continue;
-          if (out.some((c) => c.mappedTo === mapping.mappedTo)) continue;
+          const radioName = (radios[0].getAttribute("name") || "").replace(/\[\d*\]$/, "").trim();
+          const nameMapping = mapByFieldName(radioName);
+          const resolvedMapping = nameMapping || mapping;
+          if (!resolvedMapping) {
+            // No deterministic mapping — still surface it as an unmapped choice
+            // group so the semantic option-resolver can pick from real options.
+            // Require a real question (>= 8 chars) and >= 2 options to avoid noise.
+            if (visited.has(scope) || qLabel.length < 8 || optionTexts.length < 2) continue;
+            visited.add(scope);
+            const filledU = radioGroupLooksFilled(scope, qLabel);
+            const metaU = elementMetaWithModal(scope, applyModals);
+            out.push({
+              label: qLabel.slice(0, 160),
+              mappedTo: null,
+              type: "choice",
+              unmapped: true,
+              widgetType: "radio",
+              text: "",
+              options: optionTexts.slice(0, 24).map((t) => ({ text: t.slice(0, 120) })),
+              selector: elementSelector(scope, metaU),
+              triggerSelector: elementSelector(scope, metaU),
+              questionLabel: qLabel.slice(0, 160),
+              top: metaU.top,
+              left: Math.round(scope.getBoundingClientRect().left),
+              filled: filledU,
+              inModal: metaU.inApplyModal || metaU.inDialog,
+            });
+            continue;
+          }
+          if (out.some((c) => c.mappedTo === resolvedMapping.mappedTo)) continue;
           visited.add(scope);
-          const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+          const filled = radioGroupLooksFilled(scope, qLabel);
           const meta = elementMetaWithModal(scope, applyModals);
+          const widgetFromName = nameMapping?.widgetType;
           out.push({
             label: qLabel.slice(0, 160),
-            mappedTo: mapping.mappedTo,
-            type: mapping.type,
-            widgetType: "radio",
+            mappedTo: resolvedMapping.mappedTo,
+            type: resolvedMapping.type,
+            widgetType:
+              widgetFromName === "yesno"
+                ? "yesno"
+                : widgetFromName === "checkbox"
+                  ? "checkbox"
+                  : "radio",
             text: "",
             selector: elementSelector(scope, meta),
             triggerSelector: elementSelector(scope, meta),
@@ -629,6 +768,211 @@ export async function scanDom(page, { listingMode = true } = {}) {
             top: meta.top,
             left: Math.round(scope.getBoundingClientRect().left),
             filled,
+            inModal: meta.inApplyModal || meta.inDialog,
+          });
+        }
+
+        // Generic checkbox groups (non-pronoun): WaaS job_type
+        // ("Full-time employee / Contractor / Cofounder") and similar multi-selects.
+        // Group by shared name; map the question when possible (employmenttype),
+        // otherwise surface as an unmapped choice group for the semantic resolver.
+        const checkboxNameGroups = new Map();
+        for (const cb of queryDeep("input[type='checkbox']").filter(isVisibleEl)) {
+          const name = (cb.getAttribute("name") || "").replace(/\[\d*\]$/, "").trim();
+          if (!name) continue;
+          if (/pronoun/i.test(name)) continue;
+          if (!checkboxNameGroups.has(name)) checkboxNameGroups.set(name, []);
+          checkboxNameGroups.get(name).push(cb);
+        }
+        for (const boxes of checkboxNameGroups.values()) {
+          if (boxes.length < 2) continue;
+          const scope = lowestCommonAncestor(boxes) || boxes[0].parentElement;
+          if (!scope || visited.has(scope)) continue;
+          const optionTexts = boxes
+            .map((b) => {
+              const lbl = b.closest("label");
+              return (lbl?.textContent || b.getAttribute("aria-label") || b.value || "")
+                .replace(/\s+/g, " ")
+                .trim();
+            })
+            .filter(Boolean);
+          const inScopeQ = [
+            ...scope.querySelectorAll("label, legend, .question, .application-label, [class*='question-title']"),
+          ].find((l) => isVisibleEl(l) && !l.querySelector("input[type='checkbox']"));
+          let qLabel = (inScopeQ?.textContent || scope.getAttribute("aria-label") || "")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (!qLabel || qLabel.length < 8) {
+            let blob = (scope.parentElement?.innerText || scope.innerText || "").replace(/\s+/g, " ").trim();
+            for (const opt of optionTexts) {
+              if (opt.length >= 2) blob = blob.split(opt).join(" ");
+            }
+            qLabel = blob.replace(/\s+/g, " ").trim().slice(0, 200);
+          }
+          if (qLabel.length < 8 || optionTexts.length < 2) continue;
+          const cbName = (boxes[0].getAttribute("name") || "").replace(/\[\d*\]$/, "").trim();
+          let mapping = mapByFieldName(cbName) || mapApplicationLabel(qLabel);
+          if (mapping && out.some((c) => c.mappedTo === mapping.mappedTo)) continue;
+          visited.add(scope);
+          const filledC = boxes.some((b) => b.checked || b.getAttribute("aria-checked") === "true");
+          const metaC = elementMetaWithModal(scope, applyModals);
+          out.push({
+            label: qLabel.slice(0, 160),
+            mappedTo: mapping ? mapping.mappedTo : null,
+            type: mapping ? mapping.type : "choice",
+            unmapped: !mapping,
+            widgetType: "checkbox",
+            text: "",
+            options: optionTexts.slice(0, 24).map((t) => ({ text: t.slice(0, 120) })),
+            selector: elementSelector(scope, metaC),
+            triggerSelector: elementSelector(scope, metaC),
+            questionLabel: qLabel.slice(0, 160),
+            top: metaC.top,
+            left: Math.round(scope.getBoundingClientRect().left),
+            filled: filledC,
+            inModal: metaC.inApplyModal || metaC.inDialog,
+          });
+        }
+
+        // WaaS engineering sub-roles (eng_type) — react-select multi after role=eng.
+        for (const block of queryDeep("form div.mb-4, .mb-4")) {
+          if (!isVisibleEl(block) || visited.has(block)) continue;
+          const hidden = block.querySelector("input[name='eng_type'], input[type='hidden'][name='eng_type']");
+          const rsInput = block.querySelector("[id^='react-select-'][id$='-input'], [class*='select__control']");
+          if (!hidden && !rsInput) continue;
+          let qLabel = "";
+          const qEl = [...block.querySelectorAll("label, legend")].find(
+            (l) => isVisibleEl(l) && !l.querySelector("input[type='checkbox'], input[type='radio']"),
+          );
+          qLabel = (qEl?.textContent || block.innerText || "").replace(/\s+/g, " ").trim();
+          if (!/engineering roles|choose up to four/i.test(qLabel)) continue;
+          if (out.some((c) => c.mappedTo === "engroles")) continue;
+          visited.add(block);
+          const filledEng =
+            Boolean(hidden?.value && String(hidden.value).trim()) ||
+            block.querySelectorAll("[class*='multi-value'], [class*='MultiValue']").length > 0;
+          const metaE = elementMetaWithModal(block, applyModals);
+          const globals = typeof window !== "undefined" ? window.JOBS_GLOBALS : null;
+          const engOpts = (globals?.ENG_TYPES || [])
+            .map((e) => ({ text: String(e.label || e.value || "").trim() }))
+            .filter((o) => o.text);
+          out.push({
+            label: qLabel.slice(0, 160),
+            mappedTo: "engroles",
+            type: "engroles",
+            widgetType: "combobox",
+            multiple: true,
+            text: "",
+            options: engOpts.length
+              ? engOpts.slice(0, 24)
+              : ["Full stack", "Backend", "Frontend", "Machine learning"].map((t) => ({ text: t })),
+            selector: elementSelector(block, metaE),
+            triggerSelector: elementSelector(block, metaE),
+            questionLabel: qLabel.slice(0, 160),
+            top: metaE.top,
+            left: Math.round(block.getBoundingClientRect().left),
+            filled: filledEng,
+            inModal: metaE.inApplyModal || metaE.inDialog,
+          });
+        }
+
+        // WaaS /application/skills — technologies multi-select.
+        for (const block of queryDeep("form div.mb-4, .mb-4, form")) {
+          if (!isVisibleEl(block) || visited.has(block)) continue;
+          const rsInput = block.querySelector(
+            "[id^='react-select-'][id$='-input'], [class*='select__control'], [role='combobox']",
+          );
+          if (!rsInput) continue;
+          let qLabel = "";
+          const qEl = [...block.querySelectorAll("label, legend, p, h1, h2, h3, div")].find((l) => {
+            const t = (l.textContent || "").replace(/\s+/g, " ").trim();
+            return t.length > 12 && t.length < 200 && /technologies|skills are you/i.test(t);
+          });
+          qLabel = (qEl?.textContent || "").replace(/\s+/g, " ").trim();
+          if (!/technologies|skills are you most/i.test(qLabel)) continue;
+          if (out.some((c) => c.mappedTo === "techskills")) continue;
+          visited.add(block);
+          const filledSkills =
+            block.querySelectorAll("[class*='multi-value'], [class*='MultiValue']").length > 0;
+          const metaS = elementMetaWithModal(block, applyModals);
+          out.push({
+            label: qLabel.slice(0, 160),
+            mappedTo: "techskills",
+            type: "techskills",
+            widgetType: "combobox",
+            multiple: true,
+            text: "",
+            options: [],
+            selector: elementSelector(rsInput.closest("[class*='select']") || block, metaS),
+            triggerSelector: elementSelector(rsInput, metaS),
+            questionLabel: qLabel.slice(0, 160),
+            top: metaS.top,
+            left: Math.round(block.getBoundingClientRect().left),
+            filled: filledSkills,
+            required: true,
+            inModal: metaS.inApplyModal || metaS.inDialog,
+          });
+        }
+
+        // WaaS-style screening: questions rendered as plain text with bare radios
+        // that carry no `name` and no `[role=radiogroup]`, so the grouping above
+        // skips them. Anchor on the question text, climb to the smallest block
+        // that owns the radio options, and emit a mapped control with a real
+        // selector so completeness + fill can both see it.
+        const SCREENING_RADIO_MAPPED = new Set([
+          "visasponsorship",
+          "workauthorization",
+          "remotepreference",
+          "willingtorelocate",
+          "policyack",
+          "jobfunction",
+          "roleinterest",
+          "fulltimestudent",
+        ]);
+        function ownTextOf(el) {
+          let t = "";
+          for (const n of el.childNodes) {
+            if (n.nodeType === 3) t += n.textContent;
+          }
+          return t.replace(/\s+/g, " ").trim();
+        }
+        const textCandidates = queryDeep(
+          "label, legend, p, h2, h3, h4, div, span, li",
+        ).filter(isVisibleEl);
+        for (const el of textCandidates) {
+          const own = ownTextOf(el);
+          if (own.length < 8 || own.length > 240) continue;
+          const mapping = mapApplicationLabel(own);
+          if (!mapping || !SCREENING_RADIO_MAPPED.has(mapping.mappedTo)) continue;
+          if (out.some((c) => c.mappedTo === mapping.mappedTo)) continue;
+          // Climb to the nearest ancestor that actually owns radio options,
+          // capped so we never grab the whole form (a per-question block holds
+          // ≤ 3 options; a full-form wrapper holds far more).
+          let node = el.closest(
+            '[class*="field" i], [class*="question" i], [class*="form-group" i], fieldset, [data-field], [data-testid], li, section',
+          ) || el.parentElement;
+          let radios = [];
+          for (let up = 0; up < 4 && node; up += 1) {
+            radios = [...node.querySelectorAll("input[type='radio'], [role='radio']")].filter(isVisibleEl);
+            if (radios.length >= 1) break;
+            node = node.parentElement;
+          }
+          if (!node || radios.length < 1 || radios.length > 4) continue;
+          if (visited.has(node)) continue;
+          visited.add(node);
+          const meta = elementMetaWithModal(node, applyModals);
+          out.push({
+            label: own.slice(0, 160),
+            mappedTo: mapping.mappedTo,
+            type: mapping.type,
+            widgetType: mapping.mappedTo === "remotepreference" ? "radio" : "yesno",
+            text: "",
+            selector: elementSelector(node, meta),
+            triggerSelector: elementSelector(node, meta),
+            questionLabel: own.slice(0, 160),
+            top: meta.top,
+            left: Math.round(node.getBoundingClientRect().left),
+            filled: radioGroupLooksFilled(node),
             inModal: meta.inApplyModal || meta.inDialog,
           });
         }
@@ -882,6 +1226,12 @@ export async function scanDom(page, { listingMode = true } = {}) {
 
       function toCandidate(el, score, kind, metaOverride = null) {
         const meta = metaOverride || elementMeta(el);
+        let disabled = false;
+        try {
+          disabled = !!(el.disabled || el.getAttribute("aria-disabled") === "true");
+        } catch {
+          /* ignore */
+        }
         return {
           kind,
           tag: meta.tag,
@@ -891,6 +1241,7 @@ export async function scanDom(page, { listingMode = true } = {}) {
           href: meta.href || "",
           selector: buildSelector(meta),
           score,
+          disabled,
           inApplyModal: !!meta.inApplyModal,
           source: "dom",
         };
@@ -1021,14 +1372,16 @@ export async function scanDom(page, { listingMode = true } = {}) {
         [
           '[role="combobox"]',
           '[aria-haspopup="listbox"]',
-          // React Select / similar
+          // React Select / similar — do NOT include bare div[data-field] (YC wraps radios in those).
           ".Select__control",
           "[class*='select__control' i]",
           "[class*='Select__control']",
           "[id^='react-select-'][id$='-input']",
-          "div[data-field]",
         ].join(", "),
       ).filter(isVisibleEl);
+      function screeningRadiosFilled(rootEl, textBlob) {
+        return radioGroupLooksFilled(rootEl, textBlob);
+      }
       const customControls = comboboxEls.slice(0, 12).map((el) => {
         const meta = elementMetaWithModal(el, applyModals);
         const ariaLabel = (el.getAttribute("aria-label") || meta.aria || "").trim();
@@ -1047,8 +1400,7 @@ export async function scanDom(page, { listingMode = true } = {}) {
             "hidecompanies",
           ].includes(appMap.mappedTo)
         ) {
-          const radios = [...el.querySelectorAll("input[type='radio'], [role='radio']")].filter(isVisibleEl);
-          const filled = radios.some((r) => r.checked || r.getAttribute("aria-checked") === "true");
+          const filled = screeningRadiosFilled(el, `${label} ${text}`);
           return {
             label: label.slice(0, 120),
             mappedTo: appMap.mappedTo,
@@ -1064,13 +1416,24 @@ export async function scanDom(page, { listingMode = true } = {}) {
           };
         }
         const mapping = mapComboboxLabel(label);
-        const filled = comboboxLooksFilled(text, label);
+        const isLoc = mapping.mappedTo === "location" || mapping.mappedTo === "relocatelocations";
+        let filled;
+        if (isLoc) {
+          // A typeahead input's committed value lives in el.value (not innerText).
+          // An open dropdown (aria-expanded=true) or a bare single-token search
+          // string ("LONDON") is NOT committed — a real Places chip is "London, UK".
+          const val = String(el.value || text || "").replace(/\s+/g, " ").trim();
+          const expanded = el.getAttribute("aria-expanded") === "true";
+          filled = !expanded && val.length >= 2 && (/,/.test(val) || /\S\s+\S/.test(val)) && !/^search\b/i.test(val);
+        } else {
+          filled = comboboxLooksFilled(text, label);
+        }
         return {
           label,
           mappedTo: mapping.mappedTo,
           type: mapping.type,
           role: el.getAttribute("role") || "combobox",
-          widgetType: mapping.mappedTo === "location" ? "typeahead" : "combobox",
+          widgetType: isLoc ? "typeahead" : "combobox",
           text: text.slice(0, 80),
           selector: elementSelector(el, meta),
           triggerSelector: elementSelector(el, meta),

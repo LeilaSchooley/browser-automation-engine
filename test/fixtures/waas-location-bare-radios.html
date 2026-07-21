@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <!--
+      Reproduces the real WaaS /application/location markup: screening questions
+      are plain text with bare radios that have NO `name` and are NOT wrapped in
+      [role=radiogroup], and Continue is always enabled (validates on click).
+      This is the shape the name/radiogroup scanner cannot group.
+    -->
+    <div id="app">
+      <form>
+        <div class="form-field">
+          <div class="form-label">What city do you live in? *</div>
+          <input
+            id="city"
+            role="combobox"
+            aria-label="What city do you live in?"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            placeholder="Search ..."
+            value=""
+          />
+          <div id="city-list" role="listbox" hidden></div>
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">Are you legally authorized to work in the United States? *</div>
+          <div class="options">
+            <label class="opt"><input type="radio" value="Yes" /> Yes</label>
+            <label class="opt"><input type="radio" value="No" /> No</label>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">
+            Do you require visa sponsorship to work legally in the United States (now or in the future)? *
+          </div>
+          <div class="options">
+            <label class="opt"><input type="radio" value="Yes" /> Yes</label>
+            <label class="opt"><input type="radio" value="No" /> No</label>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">Are you open to working remotely? *</div>
+          <div class="options">
+            <label class="opt"><input type="radio" value="no" /> I don't want to work remotely</label>
+            <label class="opt"><input type="radio" value="open" /> I'm open to working remotely</label>
+            <label class="opt"><input type="radio" value="only" /> I only want to work remotely</label>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">Are you willing to relocate? *</div>
+          <div class="options">
+            <label class="opt"><input type="radio" value="No" /> No</label>
+            <label class="opt"><input type="radio" value="Yes" /> Yes</label>
+          </div>
+        </div>
+
+        <button type="button" id="continue">Continue</button>
+      </form>
+    </div>
+    <script>
+      const city = document.getElementById("city");
+      const list = document.getElementById("city-list");
+      const places = ["London, United Kingdom", "Berlin, Germany", "Paris, France"];
+      function showOptions(q) {
+        const needle = String(q || "").toLowerCase();
+        list.innerHTML = "";
+        places
+          .filter((p) => !needle || p.toLowerCase().includes(needle))
+          .forEach((p) => {
+            const opt = document.createElement("div");
+            opt.setAttribute("role", "option");
+            opt.textContent = p;
+            opt.addEventListener("click", () => {
+              city.value = p;
+              city.setAttribute("aria-expanded", "false");
+              list.hidden = true;
+            });
+            list.appendChild(opt);
+          });
+        list.hidden = list.children.length === 0;
+        city.setAttribute("aria-expanded", list.hidden ? "false" : "true");
+      }
+      city.addEventListener("input", () => showOptions(city.value));
+      city.addEventListener("focus", () => showOptions(city.value));
+    </script>
+  </body>
+</html>

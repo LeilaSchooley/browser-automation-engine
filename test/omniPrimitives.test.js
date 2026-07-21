@@ -21,11 +21,17 @@ describe("controlPatterns", () => {
     assert.equal(mapLabelToMapped("Salary expectations")?.mappedTo, "salary");
     assert.equal(mapLabelToMapped("Where are you based?")?.mappedTo, "location");
     assert.equal(mapLabelToMapped("What city do you live in? * Required")?.mappedTo, "location");
+    assert.equal(
+      mapLabelToMapped("Where else would you relocate? (cities, regions, countries, etc.)")?.mappedTo,
+      "relocatelocations",
+    );
   });
 
   it("isCommittedValue rejects placeholders", () => {
     assert.equal(isCommittedValue("?"), false);
     assert.equal(isCommittedValue("USD 60,000 - 80,000", "salary"), true);
+    assert.equal(isCommittedValue("What city do you live in?", "location"), false);
+    assert.equal(isCommittedValue("London, UK", "location"), true);
   });
 
   it("PICKER_CONFIRM_PATTERNS includes Save", () => {

@@ -30,6 +30,7 @@ import {
   validatorRecentlyRejected,
   repeatedActionWithoutProgress,
 } from "./recovery/stallPredicates.js";
+import { probeCaptchaAfterAction } from "../captchaDetect.js";
 
 export { validatorRecentlyRejected, repeatedActionWithoutProgress };
 
@@ -373,6 +374,23 @@ export async function attemptFinalRecovery(
     return { recovered: false, plan: null, snap };
   }
 
+  async function afterFailedExecute(plan, executed) {
+    const challenge = await probeCaptchaAfterAction(page, {
+      snap: executed?.snap || snap,
+      error: executed?.error || null,
+    }).catch(() => ({ detected: false }));
+    if (challenge.detected) {
+      log?.layer("agent", `captcha after failed recovery ${plan?.type || "?"} — ${challenge.reason}`, "warn");
+      return {
+        recovered: false,
+        plan,
+        snap: executed?.snap || snap,
+        captcha: challenge,
+      };
+    }
+    return null;
+  }
+
   const { assessEndState, planNextAction } = getRuntime();
   if (typeof assessEndState === "function") {
     try {
@@ -395,6 +413,12 @@ export async function attemptFinalRecovery(
           history,
         });
         if (executed.ok) {
+          const challenge = await probeCaptchaAfterAction(page, { snap: executed.snap }).catch(() => ({
+            detected: false,
+          }));
+          if (challenge.detected) {
+            return { recovered: false, plan, snap: executed.snap || snap, captcha: challenge };
+          }
           return {
             recovered: true,
             plan,
@@ -402,6 +426,8 @@ export async function attemptFinalRecovery(
             fillResult: executed.fillResult,
           };
         }
+        const blocked = await afterFailedExecute(plan, executed);
+        if (blocked) return blocked;
       }
     } catch (err) {
       log?.layer("agent", `end-state assessor error: ${err?.message || err}`, "warn");
@@ -436,6 +462,12 @@ export async function attemptFinalRecovery(
         classification: finalClassification,
       });
       if (executed.ok) {
+        const challenge = await probeCaptchaAfterAction(page, { snap: executed.snap }).catch(() => ({
+          detected: false,
+        }));
+        if (challenge.detected) {
+          return { recovered: false, plan: shPlan, snap: executed.snap || snap, captcha: challenge };
+        }
         return {
           recovered: true,
           plan: shPlan,
@@ -443,6 +475,8 @@ export async function attemptFinalRecovery(
           fillResult: executed.fillResult,
         };
       }
+      const blocked = await afterFailedExecute(shPlan, executed);
+      if (blocked) return blocked;
     }
 
     const aiPlan = await planNextAction(context, snap, history, fillResult, {
@@ -462,6 +496,12 @@ export async function attemptFinalRecovery(
         history,
       });
       if (executed.ok) {
+        const challenge = await probeCaptchaAfterAction(page, { snap: executed.snap }).catch(() => ({
+          detected: false,
+        }));
+        if (challenge.detected) {
+          return { recovered: false, plan: aiPlan, snap: executed.snap || snap, captcha: challenge };
+        }
         return {
           recovered: true,
           plan: aiPlan,
@@ -469,7 +509,15 @@ export async function attemptFinalRecovery(
           fillResult: executed.fillResult,
         };
       }
+      const blocked = await afterFailedExecute(aiPlan, executed);
+      if (blocked) return blocked;
     }
+  }
+
+  // Last probe before giving up — challenge may already be on screen from earlier clicks.
+  const lingering = await probeCaptchaAfterAction(page, { snap }).catch(() => ({ detected: false }));
+  if (lingering.detected) {
+    return { recovered: false, plan: null, snap, captcha: lingering };
   }
 
   return { recovered: false, plan: null, snap };

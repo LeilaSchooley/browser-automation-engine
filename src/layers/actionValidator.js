@@ -89,8 +89,28 @@ export function computeMechanicalSignals(snapBefore, snapAfter, { filledBefore =
 export function isStrongMechanicalProgress(signals, mechanicalProgress, actorOk, plan = null, snapAfter = null) {
   if (!actorOk || !mechanicalProgress) return false;
   const customFill = plan?.type === "smart_fill" || plan?.type === "act";
-  if (customFill && signals.filledDelta > 0 && !signals.commitCompleted && !signals.salaryCommittedDelta && !signals.pickerClosed) {
+  // Salary/preferences pickers need an explicit commit; city typeaheads do not.
+  const onPrefsSalaryGate =
+    Boolean(snapAfter?.customControls?.some((c) => c.mappedTo === "salary" && !c.filled)) ||
+    /salary expectations/i.test(String(snapAfter?.pageText || ""));
+  if (
+    customFill &&
+    signals.filledDelta > 0 &&
+    !signals.commitCompleted &&
+    !signals.salaryCommittedDelta &&
+    !signals.pickerClosed &&
+    onPrefsSalaryGate
+  ) {
     return false;
+  }
+  // WaaS / stepped profile: filled something and Continue is present → real progress.
+  if (
+    customFill &&
+    signals.filledDelta > 0 &&
+    (snapAfter?.continueCount || 0) > 0 &&
+    !snapAfter?.continueCandidates?.[0]?.disabled
+  ) {
+    return true;
   }
   // Board wizard Next that only advances ?step= with no fills is not progress.
   if (

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>WaaS Location</title></head>
+  <body>
+    <div
+      id="app"
+      data-page='{"props":{"sectionAppProps":{"activeSection":"location","serverErrors":{"city_current":["is missing"],"us_authorized":["is missing"]},"sectionInfo":[{"name":"location","status":"current","url":"/application/location"}]}}}'
+    >
+      <form>
+        <label>What city do you live in? *</label>
+        <input name="city_current" role="combobox" aria-expanded="true" value="LONDON" />
+        <label>Are you legally authorized to work in the United States? *</label>
+        <input type="radio" name="us_authorized" value="yes" /> Yes
+        <input type="radio" name="us_authorized" value="no" /> No
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+  </body>
+</html>

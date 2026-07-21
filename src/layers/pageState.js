@@ -104,8 +104,8 @@ async function buildCustomControls(snap, page) {
       if (ctrl.mappedTo === "salary") {
         ctrl.liveValue = await readLiveControlValue(page, "salary");
         ctrl.filled = !!(ctrl.liveValue && !PLACEHOLDER_RE.test(ctrl.liveValue));
-      } else if (ctrl.mappedTo === "location") {
-        ctrl.liveValue = await readLiveControlValue(page, "location");
+      } else if (ctrl.mappedTo === "location" || ctrl.mappedTo === "relocatelocations") {
+        ctrl.liveValue = await readLiveControlValue(page, ctrl.mappedTo);
         ctrl.filled = !!(ctrl.liveValue && !PLACEHOLDER_RE.test(ctrl.liveValue));
       } else if (ctrl.mappedTo === "desiredtitle") {
         ctrl.liveValue = await readLiveControlValue(page, "desiredtitle");

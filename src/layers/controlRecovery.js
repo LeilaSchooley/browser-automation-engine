@@ -17,6 +17,7 @@ import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { hasUnfilledYesNoOrEEOC } from "../fillApplicationAnswers.js";
 import { MIN_CONTROL_SKILL_SUCCESS } from "../primitives/controlPatterns.js";
 import { verifyCommitted } from "../primitives/interactWidget.js";
+import { probeCaptchaAfterAction } from "../captchaDetect.js";
 
 function buildRecoveryInstruction(context, snap) {
   return buildStagehandInstruction(snap, { step: "form", confidence: "low" }, [], context);
@@ -148,6 +149,14 @@ export async function attemptImmediateControlRecovery(page, snap, context, fillR
     if (plan?.type === "act" && plan?.action) {
       const result = await performGenericAct(page, plan, { snap, log, sessionId: opts.sessionId, context });
       aiOk = result.ok;
+      const challenge = await probeCaptchaAfterAction(page, {
+        snap,
+        error: result.error || result.message || null,
+      }).catch(() => ({ detected: false }));
+      if (challenge.detected) {
+        log?.layer("recovery", `captcha after AI act — ${challenge.reason}`, "warn");
+        return { ok: false, fillResult, source: "captcha_blocked", captcha: challenge };
+      }
       if (aiOk) {
         log?.layer("recovery", `AI act succeeded: ${plan.action}`, "info");
         return {

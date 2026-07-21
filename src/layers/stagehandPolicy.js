@@ -21,10 +21,12 @@ import { looksLikePlatformOnboarding, looksLikeBoardSignupOnboarding, looksLikeJ
 import {
   buildApplicationControlsStagehandInstruction,
   hasUnfilledApplicationControls,
+  isWaasRoleStep,
 } from "../fillApplicationAnswers.js";
 import { canUseStagehand, attemptStagehandAct } from "./stagehandAdapter.js";
 import { smartFillStalledOnStep } from "./deterministicPolicy.js";
 import { isOauthProviderHost, looksLikeDeadApplyDestination } from "./applyUrlSafety.js";
+import { looksLikeReachOutModal } from "../patterns/outreach.js";
 
 const SAFETY_STEPS = new Set(["loading", "blocked", "enter_otp", "verify_email", "signup_entry"]);
 
@@ -141,6 +143,12 @@ export function shouldPreferStagehand(snap, classification, history = [], contex
   if (looksLikeDidYouApplyPrompt(snap)) return false;
   if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) return false;
   if (looksLikeGoogleVignetteAd(snap)) return false;
+  // Reach-out message modal — smart_fill owns it; Stagehand re-clicks Apply.
+  if (looksLikeReachOutModal(snap)) return false;
+  // Auth walls — authWall handler owns them.
+  if (snap?.authForm || snap?.signupForm || (snap?.passwordFieldCount || 0) > 0) {
+    if ((snap?.emailFieldCount || 0) > 0 || (snap?.usernameFieldCount || 0) > 0) return false;
+  }
 
   const fp = classification?.fingerprint || pageFingerprintFromSnap(snap);
 
@@ -314,6 +322,11 @@ export async function attemptApplicationControlsStagehand(page, context, opts = 
   if (!hasUnfilledApplicationControls(snap)) {
     return { ok: false, reason: "none_unfilled" };
   }
+  // Role-step fields are filled via waasRoleFields / custom_controls — work-auth
+  // Stagehand poisons job-function selections on this page.
+  if (isWaasRoleStep(snap)) {
+    return { ok: false, reason: "waas_role_step" };
+  }
   const gate = canUseStagehand(context);
   if (!gate.ok) {
     return { ok: false, reason: gate.reason || "stagehand_unavailable" };
@@ -332,7 +345,7 @@ export async function attemptApplicationControlsStagehand(page, context, opts = 
     return { ok: false, reason: "already_tried" };
   }
 
-  const instruction = buildApplicationControlsStagehandInstruction(context);
+  const instruction = buildApplicationControlsStagehandInstruction(context, snap);
   log?.layer("stagehand", `application controls fallback: ${instruction.slice(0, 100)}`, "info");
   const result = await attemptStagehandAct(page, context, { instruction, log });
   return { ...result, instruction, source: "application-controls" };

@@ -7,6 +7,8 @@ import { safeRoleLocator } from "../../primitives/safeLocator.js";
 import { isNonCookiePopup } from "../../consentDetection.js";
 import { scoreEntryCandidate } from "./candidateScoring.js";
 import { mergeCandidates, recomputePageKind } from "./scanDom.js";
+import { enrichSnapWithWaasValidation } from "../../siteAdapters/waasValidator.js";
+import { reconcileSnapFilledState } from "../../siteStructureLearner.js";
 
 /** Playwright enrichment when CDP/evaluate lag — still driven by discovered metadata. */
 export async function enrichFileInputs(page, snap) {
@@ -347,6 +349,8 @@ export async function enrichViaPlaywright(page, snap) {
   await enrichModalSteps(page, snap);
   await enrichResumeReviewUpsell(page, snap);
   await enrichCustomControlWidgetTypes(page, snap);
+  await enrichSnapWithWaasValidation(page, snap);
+  reconcileSnapFilledState(snap);
 
   if ((snap.entryCount || 0) === 0) {
     // Anchored only — bare /\bapply\b/ was matching "Apply with Indeed" / "Apply with Apple" randomly.

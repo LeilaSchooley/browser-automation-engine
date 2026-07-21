@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Profile | Y Combinator's Work at a Startup</title>
+  </head>
+  <body>
+    <!--
+      WaaS /application/role as it renders live: job function is a react-select
+      combobox (options only exist in the DOM after the control is opened), not a
+      plain radio group. Reproduces the "label click finds nothing" loop.
+    -->
+    <div
+      data-page='{"props":{"sectionAppProps":{"activeSection":"role","serverErrors":{"role":["is missing"]},"sectionInfo":[{"name":"role","status":"current"}]}}}'
+    >
+      <h1>Role</h1>
+      <form>
+        <div class="field mb-4">
+          <label class="mb-1 block font-bold"
+            >What job function best fits what you're looking for?<span class="text-red-500"> *</span></label
+          >
+          <div class="select__control" tabindex="0">
+            <span class="select__placeholder">Select...</span>
+          </div>
+          <input type="hidden" name="job_function" id="job_function" value="" />
+          <span class="text-red-500">Required</span>
+        </div>
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+    <script>
+      const control = document.querySelector(".select__control");
+      const hidden = document.getElementById("job_function");
+      const OPTIONS = [
+        { text: "Engineering", value: "eng" },
+        { text: "Design", value: "design" },
+        { text: "Product", value: "product" },
+      ];
+      let menu = null;
+      control.addEventListener("click", () => {
+        if (menu) return;
+        menu = document.createElement("div");
+        menu.setAttribute("role", "listbox");
+        menu.className = "select__menu";
+        for (const o of OPTIONS) {
+          const opt = document.createElement("div");
+          opt.setAttribute("role", "option");
+          opt.className = "select__option";
+          opt.textContent = o.text;
+          opt.addEventListener("click", () => {
+            hidden.value = o.value;
+            control.querySelector(".select__placeholder").textContent = o.text;
+            menu.remove();
+            menu = null;
+          });
+          menu.appendChild(opt);
+        }
+        control.parentElement.appendChild(menu);
+      });
+    </script>
+  </body>
+</html>

@@ -16,6 +16,17 @@ import {
   looksLikeHideFromCompanies,
   getHideFromCompaniesValue,
   HIDE_FROM_COMPANIES_PROMPT_RULE,
+  resolveJobFunctionAnswer,
+  resolveRoleInterestAnswer,
+  resolveEmploymentTypeAnswer,
+  resolveEngRolesFromTitle,
+  resolveTechSkills,
+  looksLikeJobFunction,
+  looksLikeRoleInterest,
+  looksLikeFullTimeStudent,
+  looksLikeEmploymentType,
+  looksLikeEngRoles,
+  looksLikeTechSkills,
 } from "./patterns/applicationScreening.js";
 
 export const EEOC_MAPPED = new Set(["eeocgender", "eeocrace", "eeocveteran", "eeocdisability"]);
@@ -46,6 +57,13 @@ export function getApplicationAnswers(context = {}) {
   const remotePreference = normalizeRemotePreference(p.remotePreference ?? a.remotePreference);
   const willingToRelocate = truthy(p.willingToRelocate ?? a.willingToRelocate, false);
   const hideFromCompanies = getHideFromCompaniesValue(context);
+  const desiredTitle = String(p.desiredTitle || p.desiredJobTitle || a.desiredTitle || "").trim();
+  const jobFunction = resolveJobFunctionAnswer(desiredTitle, p.jobFunction ?? a.jobFunction);
+  const roleInterest = resolveRoleInterestAnswer(p.roleInterest ?? a.roleInterest ?? "fulltime");
+  const fullTimeStudent = truthy(p.fullTimeStudent ?? a.fullTimeStudent, false);
+  const employmentType = resolveEmploymentTypeAnswer(p.employmentType ?? a.employmentType ?? "");
+  const engRoles = resolveEngRolesFromTitle(desiredTitle, p.engRoles ?? a.engRoles);
+  const techSkills = resolveTechSkills(p.skills ?? a.skills ?? p.yourSkills ?? a.yourSkills, desiredTitle);
 
   return {
     needsVisaSponsorship: needsVisa,
@@ -60,6 +78,16 @@ export function getApplicationAnswers(context = {}) {
     eeocDecline,
     eeocDeclineAnswer: "Decline to self-identify",
     pronouns: pronouns || "Use name only",
+    desiredTitle,
+    jobFunction,
+    roleInterest,
+    fullTimeStudent,
+    fullTimeStudentAnswer: fullTimeStudent ? "Yes" : "No",
+    employmentType,
+    engRoles,
+    engRolesAnswer: engRoles.join(", "),
+    techSkills,
+    techSkillsAnswer: techSkills.join(", "),
   };
 }
 
@@ -88,6 +116,24 @@ export function resolveApplicationAnswer(mappedTo, label, context) {
   if (m === "hidecompanies" || looksLikeHideFromCompanies(blob)) {
     return answers.hideFromCompanies || "";
   }
+  if (m === "jobfunction" || looksLikeJobFunction(blob)) {
+    return answers.jobFunction;
+  }
+  if (m === "roleinterest" || looksLikeRoleInterest(blob)) {
+    return answers.roleInterest;
+  }
+  if (m === "fulltimestudent" || looksLikeFullTimeStudent(blob)) {
+    return answers.fullTimeStudentAnswer;
+  }
+  if (m === "employmenttype" || looksLikeEmploymentType(blob)) {
+    return answers.employmentType;
+  }
+  if (m === "engroles" || looksLikeEngRoles(blob)) {
+    return answers.engRolesAnswer;
+  }
+  if (m === "techskills" || looksLikeTechSkills(blob)) {
+    return answers.techSkillsAnswer;
+  }
   // Employer affiliation (current/former employee, volunteer, contractor, relation) → No.
   if (COMPANY_NO_MAPPED.has(m) || looksLikeCompanyAffiliation(blob)) {
     return "No";
@@ -107,7 +153,7 @@ function looksLikeCompanyAffiliation(blob) {
     /\bcurrent or former employee\b|\bformer employee of\b|are you (a |an )?(current|former)\s+employee\b/.test(blob) ||
     /been in your position for at least|at least one year/.test(blob) ||
     /\bvolunteer\b/.test(blob) ||
-    /\bcontractor\b|third[\s-]party/.test(blob)
+    /\b(?:are|were|is|as an?|been an?|current(?:ly)?|former(?:ly)?)\b[^?.!]{0,60}\bcontractor\b|contractor\s+(?:through|via)\s+a?\s*third[\s-]?party|third[\s-]party/.test(blob)
   );
 }
 
@@ -120,7 +166,8 @@ function controlLooksApplicationMapped(c) {
     return true;
   }
   if (c.widgetType === "select" && APPLICATION_CONTROL_MAPPED.has(mapped)) return true;
-  if (c.widgetType === "checkbox" && mapped === "pronouns") return true;
+  if (c.widgetType === "checkbox" && (mapped === "pronouns" || mapped === "employmenttype")) return true;
+  if (c.widgetType === "combobox" && (mapped === "engroles" || mapped === "techskills")) return true;
   if (c.widgetType === "text" && (COMPANY_NO_MAPPED.has(mapped) || mapped === "hidecompanies")) return true;
   return false;
 }
@@ -136,8 +183,32 @@ export function hasUnfilledApplicationControls(snap) {
   return hasUnfilledYesNoOrEEOC(snap);
 }
 
+/** True when snap is on the WaaS profile Role wizard step. */
+export function isWaasRoleStep(snap) {
+  const url = String(snap?.url || "");
+  if (/\/application\/role\b/i.test(url)) return true;
+  return String(snap?.waasValidation?.activeSection || "").toLowerCase() === "role";
+}
+
+/** True when snap is on the WaaS Skills wizard step. */
+export function isWaasSkillsStep(snap) {
+  const url = String(snap?.url || "");
+  if (/\/application\/skills\b/i.test(url)) return true;
+  return String(snap?.waasValidation?.activeSection || "").toLowerCase() === "skills";
+}
+
 /** One-shot Stagehand instruction for screening / EEOC when deterministic fill missed. */
-export function buildApplicationControlsStagehandInstruction(context = {}) {
+export function buildApplicationControlsStagehandInstruction(context = {}, snap = null) {
+  if (isWaasRoleStep(snap)) {
+    const missing = snap?.waasValidation?.missing || [];
+    const keys = missing.length ? missing.join(", ") : "role, in_school, job_type";
+    return (
+      `WaaS profile Role step still has required fields (${keys}). ` +
+      `Select job function Engineering if applying as an engineer, pick engineering sub-roles if shown, ` +
+      `answer student question No unless applicant is a student, check Full-time employee for job type. ` +
+      `Do not answer work authorization or visa questions on this step. Click Continue when done.`
+    );
+  }
   const answers = getApplicationAnswers(context);
   const parts = [];
   if (answers.workAuthorizationAnswer) {

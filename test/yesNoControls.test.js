@@ -9,6 +9,7 @@ import {
   buildApplicationControlsStagehandInstruction,
 } from "../src/fillApplicationAnswers.js";
 import { hasUnfilledApplicationFields } from "../src/heuristics.js";
+import { isStepComplete } from "../src/layers/steppedForm.js";
 import { withFixturePage } from "./helpers/fixtures.js";
 import { initRuntime } from "../src/runtime.js";
 
@@ -224,22 +225,137 @@ describe("application yes/no controls", () => {
           preferences: {
             city: "London",
             location: "London, gb",
+            relocateLocations: "Berlin",
             workAuthorized: true,
             needsVisaSponsorship: false,
             remotePreference: "open",
-            willingToRelocate: false,
+            willingToRelocate: true,
           },
         },
         { snap, log: null },
       );
       assert.ok(result.filled.some((f) => f.mappedTo === "location"), `filled=${result.filled.map((f) => f.mappedTo).join(",")}`);
-      assert.ok(result.filled.length >= 5, `filled=${result.filled.map((f) => f.mappedTo).join(",")}`);
+      assert.ok(result.filled.some((f) => f.mappedTo === "willingtorelocate"), `filled=${result.filled.map((f) => f.mappedTo).join(",")}`);
+      // Relocate=Yes reveals cities typeahead — second pass fills it.
+      const snap2 = await inspectPage(page);
+      const result2 = await fillCustomControls(
+        page,
+        {
+          preferences: {
+            city: "London",
+            relocateLocations: "Berlin",
+            workAuthorized: true,
+            needsVisaSponsorship: false,
+            remotePreference: "open",
+            willingToRelocate: true,
+          },
+        },
+        { snap: snap2, log: null },
+      );
+      assert.ok(
+        result2.filled.some((f) => f.mappedTo === "relocatelocations") ||
+          /Berlin/i.test(await page.locator("#relocate-cities").inputValue()),
+        `filled2=${result2.filled.map((f) => f.mappedTo).join(",")}`,
+      );
       assert.match(await page.locator("#city").inputValue(), /London/i);
       assert.equal(await page.locator('input[name="work_auth"][value="Yes"]').isChecked(), true);
       assert.equal(await page.locator('input[name="visa_sponsor"][value="No"]').isChecked(), true);
       assert.equal(await page.locator('input[name="remote"][value="open"]').isChecked(), true);
-      assert.equal(await page.locator('input[name="relocate"][value="No"]').isChecked(), true);
+      assert.equal(await page.locator('input[name="relocate"][value="Yes"]').isChecked(), true);
+      assert.match(await page.locator("#relocate-cities").inputValue(), /Berlin/i);
       assert.equal(await page.locator("#continue").isDisabled(), false);
+    });
+  });
+
+  it("bare WaaS radios (no name / no radiogroup) are discovered, filled, and gate completeness", async () => {
+    await withFixturePage("waas-location-bare-radios", async (page) => {
+      initRuntime({ settings: { browser_human_behavior: false } });
+      const snap = await inspectPage(page);
+      const byMapped = Object.fromEntries((snap.customControls || []).map((c) => [c.mappedTo, c]));
+      // Question-first scanner must emit each screening radio even without name/radiogroup.
+      assert.ok(byMapped.workauthorization, `mapped=${Object.keys(byMapped)}`);
+      assert.ok(byMapped.visasponsorship, `mapped=${Object.keys(byMapped)}`);
+      assert.ok(byMapped.remotepreference, `mapped=${Object.keys(byMapped)}`);
+      assert.ok(byMapped.willingtorelocate, `mapped=${Object.keys(byMapped)}`);
+      assert.equal(byMapped.visasponsorship.filled, false);
+      assert.ok(byMapped.visasponsorship.selector, "expected a real selector for fill");
+
+      // Continue is always enabled, city not committed, screening unanswered → NOT complete.
+      assert.equal(isStepComplete(snap), false);
+
+      const ctx = {
+        preferences: {
+          city: "London",
+          location: "London, gb",
+          workAuthorized: true,
+          needsVisaSponsorship: false,
+          remotePreference: "open",
+          willingToRelocate: false,
+        },
+      };
+      const result = await fillCustomControls(page, ctx, { snap, log: null });
+      const filledMapped = new Set(result.filled.map((f) => f.mappedTo));
+      assert.ok(filledMapped.has("workauthorization"), `filled=${[...filledMapped].join(",")}`);
+      assert.ok(filledMapped.has("visasponsorship"), `filled=${[...filledMapped].join(",")}`);
+      assert.ok(filledMapped.has("remotepreference"), `filled=${[...filledMapped].join(",")}`);
+      assert.ok(filledMapped.has("willingtorelocate"), `filled=${[...filledMapped].join(",")}`);
+
+      // Radios actually selected on the page.
+      assert.equal(await page.locator('.form-field:has-text("authorized to work") input[value="Yes"]').isChecked(), true);
+      assert.equal(await page.locator('.form-field:has-text("visa sponsorship") input[value="No"]').isChecked(), true);
+      assert.equal(await page.locator('.form-field:has-text("working remotely") input[value="open"]').isChecked(), true);
+      assert.equal(await page.locator('.form-field:has-text("willing to relocate") input[value="No"]').isChecked(), true);
+
+      // Re-scan: screening now answered → completeness no longer blocked by screening.
+      const snap2 = await inspectPage(page);
+      const by2 = Object.fromEntries((snap2.customControls || []).map((c) => [c.mappedTo, c]));
+      assert.equal(by2.visasponsorship?.filled, true);
+      assert.equal(by2.workauthorization?.filled, true);
+    });
+  });
+
+  it("real WaaS location DOM: fills city Places + workauth/visa, gates completeness end-to-end", async () => {
+    await withFixturePage("waas-location-real", async (page) => {
+      initRuntime({ settings: { browser_human_behavior: false } });
+      const snap = await inspectPage(page);
+      const byMapped = Object.fromEntries((snap.customControls || []).map((c) => [c.mappedTo, c]));
+
+      // Each screening radio maps to its OWN per-question block (not the wrapper),
+      // so the two unanswered ones read false and the pre-checked ones read true.
+      assert.equal(byMapped.workauthorization?.filled, false, "us_authorized starts unanswered");
+      assert.equal(byMapped.visasponsorship?.filled, false, "us_visa_sponsorship starts unanswered");
+      assert.equal(byMapped.remotepreference?.filled, true, "remote has a checked default");
+      assert.equal(byMapped.willingtorelocate?.filled, true, "relocate has a checked default");
+      // Raw "LONDON" with the dropdown open is NOT a committed place.
+      assert.equal(byMapped.location?.filled, false, "raw city search text is uncommitted");
+
+      // Continue is always enabled, but the step is NOT complete (city + 2 radios missing).
+      assert.equal(isStepComplete(snap), false);
+
+      const ctx = {
+        preferences: {
+          city: "London",
+          location: "London, gb",
+          workAuthorized: true,
+          needsVisaSponsorship: false,
+          remotePreference: "open",
+          willingToRelocate: false,
+        },
+      };
+      const result = await fillCustomControls(page, ctx, { snap, log: null });
+      const filledMapped = new Set(result.filled.map((f) => f.mappedTo));
+      assert.ok(filledMapped.has("location"), `filled=${[...filledMapped].join(",")}`);
+      assert.ok(filledMapped.has("workauthorization"), `filled=${[...filledMapped].join(",")}`);
+      assert.ok(filledMapped.has("visasponsorship"), `filled=${[...filledMapped].join(",")}`);
+
+      // City committed to a real Places chip; the two required radios answered.
+      assert.match(await page.locator('input[name="city_current"]').inputValue(), /London, UK/i);
+      assert.equal(await page.locator('input[name="us_authorized"][value="yes"]').isChecked(), true);
+      assert.equal(await page.locator('input[name="us_visa_sponsorship"][value="no"]').isChecked(), true);
+
+      // Re-scan: everything answered → step is now complete → Continue may advance.
+      const snap2 = await inspectPage(page);
+      assert.equal(isStepComplete(snap2), true);
     });
   });
 

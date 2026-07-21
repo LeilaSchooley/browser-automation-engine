@@ -53,7 +53,7 @@ export async function fillYesNoControl(page, spec, value, log, snap = null) {
       if (!labelSnippet) return false;
       const entry = root
         .locator(
-          '[class*="ashby-application-form-field-entry"], fieldset, [data-field-id], .application-question, .custom-question, .field, [role="radiogroup"]',
+          '[class*="ashby-application-form-field-entry"], fieldset, [data-field-id], .application-question, .custom-question, .field, [class*="field" i], [role="radiogroup"], form div.mb-4, form > div > div',
         )
         .filter({ hasText: new RegExp(labelSnippet, "i") })
         .first();

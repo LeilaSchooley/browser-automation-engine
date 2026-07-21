@@ -28,7 +28,13 @@ export async function interactWidget(page, spec, value, handlers, opts = {}) {
     widgetType,
   };
 
-  if (mappedTo === "salary" || spec.requiresConfirm) {
+  if (
+    mappedTo === "salary" ||
+    mappedTo === "location" ||
+    mappedTo === "relocatelocations" ||
+    spec.requiresConfirm ||
+    widgetType === "typeahead"
+  ) {
     const live = await readControlValue(page, mappedTo, readSpec);
     if (live && isCommittedValue(live, mappedTo)) {
       return { ok: true, committed: true, value: live };
@@ -151,20 +157,32 @@ export async function readControlValue(page, mappedTo, spec = {}) {
           /* ignore */
         }
       }
-      if (m === "location" || m === "desiredtitle" || m === "country") {
-        const inputs = root.locator("input[type='text'], input:not([type]), textarea, [role='combobox']");
+      if (m === "location" || m === "relocatelocations" || m === "desiredtitle" || m === "country") {
+        const inputs = root.locator(
+          "input[type='text'], input:not([type]), textarea, input[role='combobox'], [role='combobox']",
+        );
         const count = await inputs.count().catch(() => 0);
         for (let i = 0; i < count; i += 1) {
           const input = inputs.nth(i);
-          const blob = `${await input.getAttribute("placeholder").catch(() => "")} ${await input.getAttribute("aria-label").catch(() => "")} ${await input.innerText().catch(() => "")}`.toLowerCase();
+          const aria = (await input.getAttribute("aria-label").catch(() => "")) || "";
+          const placeholder = (await input.getAttribute("placeholder").catch(() => "")) || "";
+          const labelNear = await nearbyLabelText(input);
+          const blob = `${placeholder} ${aria} ${labelNear}`.toLowerCase();
           const match =
             m === "location"
-              ? /\blocation\b|where are you|based in/i.test(blob)
-              : m === "country"
-                ? /\bcountry\b/i.test(blob)
-                : /desired job|job title/i.test(blob);
+              ? /\blocation\b|where are you|based in|what city|which city|city do you live|live in|hometown/i.test(
+                  blob,
+                )
+              : m === "relocatelocations"
+                ? /where else|relocat|cities|regions|countries/i.test(blob)
+                : m === "country"
+                  ? /\bcountry\b/i.test(blob)
+                  : /desired job|job title/i.test(blob);
           if (!match) continue;
-          const val = await input.inputValue().catch(() => "") || (await input.innerText().catch(() => ""));
+          const fromCombo = await readComboboxElementValue(input, m);
+          if (fromCombo) return fromCombo;
+          const val =
+            (await input.inputValue().catch(() => "")) || (await input.innerText().catch(() => ""));
           const trimmed = String(val).replace(/\s+/g, " ").trim();
           if (isCommittedValue(trimmed, m)) return trimmed;
         }

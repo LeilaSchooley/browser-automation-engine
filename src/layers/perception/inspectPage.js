@@ -8,6 +8,7 @@ import { isNonCookiePopup } from "../../consentDetection.js";
 import { pageStateSummary } from "../pageState.js";
 import { emptySnap, scanDom } from "./scanDom.js";
 import { enrichViaPlaywright } from "./enrichSnap.js";
+import { maybeLearnSiteStructure } from "../../siteStructureLearner.js";
 
 export { scoreEntryCandidate, scoreListingEntryCandidate } from "./candidateScoring.js";
 export { applyAffordances } from "../applyStep.js";
@@ -30,6 +31,7 @@ export async function inspectPage(page) {
     snap.cookieBanner = false;
     snap.structuralCookieBanner = false;
   }
+  await maybeLearnSiteStructure(page, snap, { persistRequiredOrder: false }).catch(() => {});
   return snap;
 }
 

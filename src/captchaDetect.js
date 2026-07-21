@@ -15,6 +15,8 @@ export const CAPTCHA_SELECTORS = [
   "iframe[src*='google.com/recaptcha']",
   "iframe[src*='recaptcha.net']",
   "iframe[title*='reCAPTCHA' i]",
+  "iframe[title*='recaptcha challenge' i]",
+  "iframe[src*='recaptcha/api2/bframe']",
   "iframe[src*='hcaptcha.com']",
   "iframe[title*='hCaptcha' i]",
   "#captcha-form",
@@ -33,6 +35,16 @@ export const CAPTCHA_SELECTORS = [
   "[id*='px-captcha' i]",
   "[class*='px-captcha' i]",
   "[data-testid*='captcha' i]",
+];
+
+/** Challenge frames that may not report isVisible() but still block interaction. */
+const CHALLENGE_FRAME_SELECTORS = [
+  "iframe[src*='recaptcha/api2/bframe']",
+  "iframe[title*='recaptcha challenge' i]",
+  "iframe[src*='hcaptcha.com'][src*='frame=challenge']",
+  "iframe[src*='challenges.cloudflare.com']",
+  "iframe[src*='arkoselabs']",
+  "iframe[src*='funcaptcha']",
 ];
 
 const URL_MARKERS = [
@@ -66,6 +78,31 @@ export function looksLikeCaptchaReason(reason = "") {
   return /\b(captcha|recaptcha|hcaptcha|turnstile|human verification|security check|challenge)\b/i.test(
     String(reason || ""),
   );
+}
+
+/** Playwright click failures when a challenge iframe swallows pointer events. */
+export function looksLikeCaptchaClickError(err) {
+  const msg = String(err?.message || err || "");
+  return (
+    /recaptcha|hcaptcha|turnstile|funcaptcha|arkose|bframe|captcha challenge/i.test(msg) ||
+    (/intercepts pointer events/i.test(msg) &&
+      /iframe|recaptcha|challenge|captcha/i.test(msg))
+  );
+}
+
+/**
+ * Probe after a failed (or suspiciously “ok”) click — used by recovery paths.
+ * @returns {Promise<{ detected: boolean, reason: string, source: string }>}
+ */
+export async function probeCaptchaAfterAction(page, { snap = null, error = null } = {}) {
+  if (looksLikeCaptchaClickError(error)) {
+    return {
+      detected: true,
+      reason: "CAPTCHA challenge intercepted click",
+      source: "click_error",
+    };
+  }
+  return detectCaptcha(page, { snap, suspectPointerBlock: true });
 }
 
 /** Fast snap-only signal (no Playwright). Used by classify / hard-gate heuristics. */
@@ -119,6 +156,21 @@ export async function detectCaptcha(page, opts = {}) {
       }
     } catch {
       /* next selector */
+    }
+  }
+
+  // Challenge frames (bframe etc.) — must be visible + sized; leftover DOM after solve is common.
+  for (const sel of CHALLENGE_FRAME_SELECTORS) {
+    try {
+      const loc = page.locator(sel).first();
+      const visible = await loc.isVisible({ timeout: 300 }).catch(() => false);
+      if (!visible) continue;
+      const box = await loc.boundingBox().catch(() => null);
+      if (box && box.width >= 40 && box.height >= 40) {
+        return { detected: true, reason: `CAPTCHA challenge frame (${sel})`, source: "dom" };
+      }
+    } catch {
+      /* next */
     }
   }
 

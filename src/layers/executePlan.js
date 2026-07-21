@@ -15,7 +15,8 @@ import {
   performGenericAct,
   uploadDiscoveredFile,
 } from "./domActions.js";
-import { attemptAuthLogin, clickSignInEntry, looksLikeAuthForm } from "./authActions.js";
+import { attemptAuthLogin, clickSignInEntry } from "./authActions.js";
+import { classifyPageRoleFromSnap } from "./classifyPageRole.js";
 import { attemptAuthSignup, clickSignupEntry, looksLikeSignupForm } from "./signupActions.js";
 import { hasPreferencesGateFields } from "../fillPreferences.js";
 import { controlCount } from "../controlState.js";
@@ -35,6 +36,9 @@ import { isPageUnloaded, waitForApplySurface, waitAfterClickTransition } from ".
 import { inspectPage } from "./formDiscovery.js";
 import { attemptStagehandAct, canUseStagehand } from "./stagehandAdapter.js";
 import { buildStagehandInstruction } from "./stagehandPolicy.js";
+import { commitOpenTypeaheads } from "./wizardCommit.js";
+import { wizardAdvanced } from "./steppedForm.js";
+import { verifyAdvance } from "./transition.js";
 
 function unwrapActionResult(result) {
   if (typeof result === "boolean") return { ok: result };
@@ -175,9 +179,10 @@ export async function executePlan(page, plan, {
         ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId, {
           preferredSelector: item?.selector || "",
           preferredTestId: item?.testId || "",
+          context,
         });
       } else {
-        ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId);
+        ok = await uploadDiscoveredFile(page, log, "agent", snap, sessionId, { context });
       }
       if (ok) await waitAfterClickTransition(page);
       break;
@@ -216,12 +221,37 @@ export async function executePlan(page, plan, {
       } else if (looksLikeJobBoardIndex(snap)) {
         log?.layer("agent", "smart_fill skipped — job board index (navigation required)", "warn");
         ok = false;
-      } else if (looksLikeAuthForm(snap) || looksLikeSignupForm(snap)) {
-        log?.layer("agent", "smart_fill redirected — auth/signup gate", "warn");
-        const authResult = unwrapActionResult(await attemptAuthSignup(page, snap, context, log));
-        ok = authResult.ok || authResult.filled === true;
-        learnings = authResult.learnings;
-        if (ok) await waitAfterClickTransition(page);
+      } else if (
+        classifyPageRoleFromSnap(snap, context).role === "auth_wall" ||
+        looksLikeSignupForm(snap)
+      ) {
+        const { detectAuthWallFromSnap } = await import("../patterns/authWall.js");
+        const authState = detectAuthWallFromSnap(snap);
+        if (!authState.isAuthWall) {
+          log?.layer(
+            "agent",
+            `smart_fill: auth-looking flags but detector says ${authState.reason} — skip auth redirect`,
+            "debug",
+          );
+          ok = false;
+        } else {
+          log?.layer("agent", `smart_fill redirected — auth wall (${authState.reason})`, "warn");
+          const { handleAuthWall } = await import("./authWall.js");
+          const wall = await handleAuthWall(page, snap, context, log, { history });
+          ok = Boolean(wall.ok);
+          learnings = {
+            ...(wall.learnings || {}),
+            existingAccount: Boolean(wall.existingAccount),
+            authWall: true,
+            authWallMode: wall.mode,
+          };
+          if (wall.snap) nextSnap = wall.snap;
+          if (wall.handoff) {
+            ok = false;
+            learnings = { ...learnings, handoff: true, reason: wall.reason };
+          }
+          if (ok) await waitAfterClickTransition(page);
+        }
       } else if (isResumeReviewUpsell(snap) || isExpertReviewGate(snap)) {
         log?.layer("agent", "smart_fill skipped — resume boost/upsell (dismiss instead)", "warn");
         ok = await dismissBlockingOverlays(page, log, "agent", snap);
@@ -245,7 +275,11 @@ export async function executePlan(page, plan, {
             sessionId,
             history,
           });
-          if (recovery.ok) {
+          if (recovery.captcha?.detected) {
+            ok = false;
+            learnings = { ...(learnings || {}), captcha: recovery.captcha, handoff: true };
+            log?.layer("agent", `smart_fill recovery blocked by captcha — ${recovery.captcha.reason}`, "warn");
+          } else if (recovery.ok) {
             ok = true;
             nextFill = recovery.fillResult || nextFill;
             if (recovery.action) {
@@ -281,6 +315,14 @@ export async function executePlan(page, plan, {
       }
       break;
     }
+    case "commit_step": {
+      ok = await commitOpenTypeaheads(page, log);
+      await humanPause(400, 700);
+      nextSnap = await inspectPage(page).catch(() => snap);
+      // Treat a successful commit gesture OR already-committed step as ok.
+      if (!ok) ok = true;
+      break;
+    }
     case "click_continue": {
       const skipGate = looksLikeDidYouApplyPrompt(snap) || looksLikeJobBoardWelcomeConfirm(snap);
       const block = skipGate ? { block: false } : await shouldBlockAdvance(snap, fillResult, page);
@@ -313,11 +355,49 @@ export async function executePlan(page, plan, {
       if (looksLikePlatformOnboarding(snap)) {
         await tickOnboardingDefaults(page, log);
       }
+      // Places / React Select often need an explicit commit before Continue validates.
+      await commitOpenTypeaheads(page, log);
       ok = await clickDiscoveredContinue(page, log, "agent", snap);
       if (!ok && plan.target) {
         ok = await clickTargetCandidate(page, plan.target, log, "agent");
       }
-      if (ok) await waitAfterClickTransition(page);
+      if (ok) {
+        await waitAfterClickTransition(page);
+        nextSnap = await inspectPage(page).catch(() => snap);
+        let advanced =
+          wizardAdvanced(snap, nextSnap) || verifyAdvance(snap, nextSnap).advanced;
+        if (!advanced) {
+          // One more commit + brief wait — validation sometimes lags the click.
+          await commitOpenTypeaheads(page, log);
+          await humanPause(500, 900);
+          const retrySnap = await inspectPage(page).catch(() => nextSnap);
+          advanced =
+            wizardAdvanced(snap, retrySnap) || verifyAdvance(snap, retrySnap).advanced;
+          nextSnap = retrySnap;
+          if (!advanced) {
+            log?.layer?.(
+              "agent",
+              "click_continue — page did not advance; typeahead may need re-commit",
+              "warn",
+            );
+            return {
+              ok: false,
+              clicked: true,
+              advanced: false,
+              stuck: true,
+              snap: nextSnap,
+              entryKey,
+              entryCandidate,
+              fillResult: nextFill,
+              prepActions,
+              learnings,
+              preferencesSignupClicked,
+              stuckAdvance: true,
+            };
+          }
+        }
+        ok = true;
+      }
       break;
     }
     case "click_submit": {
@@ -350,7 +430,10 @@ export async function executePlan(page, plan, {
         const switched = await clickSignInEntry(page, afterSignup, log);
         if (switched) await waitAfterClickTransition(page);
         nextSnap = await inspectPage(page).catch(() => afterSignup);
-        if (looksLikeAuthForm(nextSnap) || looksLikeSignupForm(nextSnap) === false) {
+        if (
+          classifyPageRoleFromSnap(nextSnap, context).role === "auth_wall" ||
+          looksLikeSignupForm(nextSnap) === false
+        ) {
           const login = unwrapActionResult(await attemptAuthLogin(page, nextSnap, context, log));
           ok = login.ok;
           learnings = login.learnings || learnings;
@@ -479,7 +562,10 @@ export async function executePlan(page, plan, {
     }
     case "click_signin": {
       // Already on a password login form — fill credentials instead of re-clicking Log in.
-      if (looksLikeAuthForm(snap) || (snap.passwordFieldCount || 0) > 0) {
+      if (
+        classifyPageRoleFromSnap(snap, context).role === "auth_wall" ||
+        (snap.passwordFieldCount || 0) > 0
+      ) {
         const login = unwrapActionResult(await attemptAuthLogin(page, snap, context, log));
         ok = login.ok;
         learnings = login.learnings || learnings;
